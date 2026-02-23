@@ -1,0 +1,10 @@
+[package]
+name = "zprove-core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+revm = { workspace = true, features = ["std", "alloydb", "tracer"] }
+revm-interpreter = "32.0.0"
+revm-primitives = "22.0.0"
+

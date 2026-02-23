@@ -1,0 +1,127 @@
+use crate::transition::{
+  InstructionTransitionProof, TransactionProof, opcode_input_count, opcode_output_count,
+  prove_instruction,
+};
+use revm::{
+  Context, InspectEvm, Inspector, MainBuilder, MainContext,
+  context::TxEnv,
+  interpreter::interpreter_types::StackTr,
+  interpreter::{Interpreter, InterpreterTypes, interpreter_types::Jumps},
+  primitives::{Address, Bytes, TxKind, U256},
+};
+
+// ============================================================
+// U256 ↔ [u8; 32] helpers
+// ============================================================
+
+fn u256_to_bytes(val: U256) -> [u8; 32] {
+  val.to_be_bytes::<32>()
+}
+
+// ============================================================
+// Proving inspector
+// ============================================================
+
+/// An EVM inspector that captures stack snapshots around every instruction
+/// and generates Hilbert-style transition proofs.
+#[derive(Default)]
+struct ProvingInspector {
+  /// Opcode of the instruction about to execute.
+  pending_opcode: u8,
+  /// Program counter before execution.
+  pending_pc: usize,
+  /// Stack values consumed by the instruction (read in `step()`).
+  pending_inputs: Vec<[u8; 32]>,
+  /// Stack depth before the instruction.
+  pending_stack_depth: usize,
+  /// Accumulated instruction transition proofs.
+  pub proofs: Vec<InstructionTransitionProof>,
+}
+
+impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
+  /// Called **before** each instruction executes.
+  /// Captures the opcode, PC, and relevant stack inputs.
+  fn step(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+    let opcode = interp.bytecode.opcode();
+    let pc = interp.bytecode.pc();
+    let stack_data = interp.stack.data(); // &[U256], index 0 = bottom
+    let stack_len = stack_data.len();
+
+    self.pending_opcode = opcode;
+    self.pending_pc = pc;
+    self.pending_stack_depth = stack_len;
+
+    // Read the top N values that this opcode consumes
+    let n_inputs = opcode_input_count(opcode);
+    self.pending_inputs.clear();
+    for i in 0..n_inputs.min(stack_len) {
+      let val = stack_data[stack_len - 1 - i];
+      self.pending_inputs.push(u256_to_bytes(val));
+    }
+  }
+
+  /// Called **after** each instruction executes.
+  /// Captures outputs and generates the transition proof.
+  fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
+    let stack_data = interp.stack.data();
+    let stack_len = stack_data.len();
+
+    let n_outputs = opcode_output_count(self.pending_opcode);
+    let mut outputs = Vec::with_capacity(n_outputs);
+    for i in 0..n_outputs.min(stack_len) {
+      let val = stack_data[stack_len - 1 - i];
+      outputs.push(u256_to_bytes(val));
+    }
+
+    // Generate semantic proof (if applicable)
+    let semantic_proof = if !self.pending_inputs.is_empty() || n_outputs > 0 {
+      prove_instruction(self.pending_opcode, &self.pending_inputs)
+        .map(|(proof, _computed_outputs)| proof)
+    } else {
+      None
+    };
+
+    self.proofs.push(InstructionTransitionProof {
+      opcode: self.pending_opcode,
+      pc: self.pending_pc,
+      stack_inputs: self.pending_inputs.clone(),
+      stack_outputs: outputs,
+      semantic_proof,
+    });
+  }
+}
+
+// ============================================================
+// Public API
+// ============================================================
+
+/// Execute an EVM transaction and produce a Hilbert-style transition proof
+/// for every instruction.
+pub fn execute_and_prove(
+  caller: Address,
+  transact_to: Address,
+  data: Bytes,
+  value: U256,
+) -> Result<TransactionProof, String> {
+  let ctx = Context::mainnet();
+  let inspector = ProvingInspector::default();
+  let mut evm = ctx.build_mainnet_with_inspector(inspector);
+
+  let tx = TxEnv::builder()
+    .caller(caller)
+    .kind(TxKind::Call(transact_to))
+    .data(data)
+    .value(value)
+    .gas_limit(1_000_000)
+    .build()
+    .map_err(|err| format!("failed to build tx env: {err:?}"))?;
+
+  let _execution_result = evm
+    .inspect_one_tx(tx)
+    .map_err(|err| format!("failed to execute tx: {err}"))?;
+
+  let proof = TransactionProof {
+    steps: evm.inspector.proofs.clone(),
+  };
+  Ok(proof)
+}
