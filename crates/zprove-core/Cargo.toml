@@ -4,7 +4,34 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-revm = { workspace = true, features = ["std", "alloydb", "tracer"] }
+revm = { version = "34", features = ["std", "alloydb", "tracer"] }
 revm-interpreter = "32.0.0"
 revm-primitives = "22.0.0"
+serde = { version = "1", features = ["derive"] }
+
+# Plonky3 Circle STARK over M31
+p3-mersenne-31 = "0.4"
+p3-field = "0.4"
+p3-air = "0.4"
+p3-matrix = "0.4"
+p3-circle = "0.4"
+p3-uni-stark = "0.4"
+p3-fri = "0.4"
+p3-commit = "0.4"
+p3-keccak = "0.4"
+p3-symmetric = "0.4"
+p3-merkle-tree = "0.4"
+p3-challenger = "0.4"
+
+num-traits = "0.2"
+itertools = "0.13"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+serde_json = "1"
+bincode = "1"
+
+[[bench]]
+name = "sementic_proof_gen"
+harness = false
 

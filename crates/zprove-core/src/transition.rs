@@ -10,9 +10,7 @@
 //! every step of a transaction's execution.
 
 use crate::sementic_proof::{
-  Proof, Term, VerifyError, extract_word_bytes, make_word_term, prove_word_add, prove_word_and,
-  prove_word_eq, prove_word_gt, prove_word_iszero, prove_word_lt, prove_word_not, prove_word_or,
-  prove_word_sub, prove_word_xor, verify,
+  Proof, WFF, infer_proof, prove_add, wff_add
 };
 
 // ============================================================
@@ -145,160 +143,42 @@ pub fn opcode_output_count(op: u8) -> usize {
 ///
 /// Returns `(proof, computed_outputs)`.  The caller should compare
 /// `computed_outputs` against the actual EVM outputs to ensure consistency.
-pub fn prove_instruction(op: u8, inputs: &[[u8; 32]]) -> Option<(Proof, Vec<[u8; 32]>)> {
+pub fn prove_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Option<Proof> {
   match op {
-    opcode::ADD => {
-      let (proof, result) = prove_word_add(&inputs[0], &inputs[1]);
-      Some((proof, vec![result]))
-    }
-    opcode::SUB => {
-      let (proof, result) = prove_word_sub(&inputs[0], &inputs[1]);
-      Some((proof, vec![result]))
-    }
-    opcode::AND => {
-      let (proof, result) = prove_word_and(&inputs[0], &inputs[1]);
-      Some((proof, vec![result]))
-    }
-    opcode::OR => {
-      let (proof, result) = prove_word_or(&inputs[0], &inputs[1]);
-      Some((proof, vec![result]))
-    }
-    opcode::XOR => {
-      let (proof, result) = prove_word_xor(&inputs[0], &inputs[1]);
-      Some((proof, vec![result]))
-    }
-    opcode::NOT => {
-      let (proof, result) = prove_word_not(&inputs[0]);
-      Some((proof, vec![result]))
-    }
-    opcode::EQ => {
-      let (proof, result) = prove_word_eq(&inputs[0], &inputs[1]);
-      Some((proof, vec![result]))
-    }
-    opcode::ISZERO => {
-      let (proof, result) = prove_word_iszero(&inputs[0]);
-      Some((proof, vec![result]))
-    }
-    opcode::LT => {
-      let (proof, result) = prove_word_lt(&inputs[0], &inputs[1]);
-      Some((proof, vec![result]))
-    }
-    opcode::GT => {
-      let (proof, result) = prove_word_gt(&inputs[0], &inputs[1]);
-      Some((proof, vec![result]))
-    }
+    opcode::ADD => prove_add(&inputs[0], &inputs[1], &outputs[0]),
     // Structural ops: no semantic proof needed
     _ => None,
   }
 }
 
 // ============================================================
-// Verification
+// WFF generation
 // ============================================================
 
-/// Verification error for instruction-level proofs.
-#[derive(Debug)]
-pub enum TransitionVerifyError {
-  /// Semantic proof verification failed.
-  SemanticProof(VerifyError),
-  /// Proof proves wrong operation for this opcode.
-  WrongOperation { opcode: u8, expected: &'static str },
-  /// Proven result doesn't match claimed output.
-  OutputMismatch { index: usize },
-  /// Proven inputs don't match claimed inputs.
-  InputMismatch { index: usize },
-  /// Missing semantic proof for arithmetic/logic opcode.
-  MissingProof { opcode: u8 },
-}
-
-impl From<VerifyError> for TransitionVerifyError {
-  fn from(e: VerifyError) -> Self {
-    TransitionVerifyError::SemanticProof(e)
-  }
-}
-
-/// Verify a single instruction's transition proof.
-pub fn verify_instruction(proof: &InstructionTransitionProof) -> Result<(), TransitionVerifyError> {
-  let op = proof.opcode;
-
-  // Structural ops: just check stack counts
-  if proof.semantic_proof.is_none() {
-    return Ok(());
-  }
-
-  let semantic = proof.semantic_proof.as_ref().unwrap();
-  let (lhs, rhs) = verify(semantic)?;
-
-  // Check that the proven LHS matches the expected operation on the inputs,
-  // and the proven RHS matches the claimed outputs.
+pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Option<WFF> {
   match op {
-    opcode::ADD => check_binop_proof(&lhs, &rhs, proof, Term::WordAdd, "WordAdd"),
-    opcode::SUB => check_binop_proof(&lhs, &rhs, proof, Term::WordSub, "WordSub"),
-    opcode::AND => check_binop_proof(&lhs, &rhs, proof, Term::WordAnd, "WordAnd"),
-    opcode::OR => check_binop_proof(&lhs, &rhs, proof, Term::WordOr, "WordOr"),
-    opcode::XOR => check_binop_proof(&lhs, &rhs, proof, Term::WordXor, "WordXor"),
-    opcode::NOT => check_unaryop_proof(&lhs, &rhs, proof, Term::WordNot, "WordNot"),
-    opcode::EQ => check_binop_proof(&lhs, &rhs, proof, Term::WordEqOp, "WordEqOp"),
-    opcode::ISZERO => check_unaryop_proof(&lhs, &rhs, proof, Term::WordIsZero, "WordIsZero"),
-    opcode::LT => check_binop_proof(&lhs, &rhs, proof, Term::WordLt, "WordLt"),
-    opcode::GT => check_binop_proof(&lhs, &rhs, proof, Term::WordGt, "WordGt"),
-    _ => Ok(()), // unrecognized opcode with proof — just trust semantic verify
+    opcode::ADD => Some(wff_add(&inputs[0], &inputs[1], &outputs[0])),
+    // Structural ops: no semantic proof needed
+    _ => None,
   }
 }
 
-fn check_binop_proof(
-  lhs: &Term,
-  rhs: &Term,
-  itp: &InstructionTransitionProof,
-  make_op: fn(Box<Term>, Box<Term>) -> Term,
-  expected_name: &'static str,
-) -> Result<(), TransitionVerifyError> {
-  let expected_lhs = make_op(
-    Box::new(make_word_term(&itp.stack_inputs[0])),
-    Box::new(make_word_term(&itp.stack_inputs[1])),
-  );
-  if *lhs != expected_lhs {
-    return Err(TransitionVerifyError::InputMismatch { index: 0 });
-  }
-  let result_bytes = extract_word_bytes(rhs).ok_or(TransitionVerifyError::WrongOperation {
-    opcode: itp.opcode,
-    expected: expected_name,
-  })?;
-  if result_bytes != itp.stack_outputs[0] {
-    return Err(TransitionVerifyError::OutputMismatch { index: 0 });
-  }
-  Ok(())
-}
+// ============================================================
+// Verification (for testing)
+// ============================================================
 
-fn check_unaryop_proof(
-  lhs: &Term,
-  rhs: &Term,
-  itp: &InstructionTransitionProof,
-  make_op: fn(Box<Term>) -> Term,
-  expected_name: &'static str,
-) -> Result<(), TransitionVerifyError> {
-  let expected_lhs = make_op(Box::new(make_word_term(&itp.stack_inputs[0])));
-  if *lhs != expected_lhs {
-    return Err(TransitionVerifyError::InputMismatch { index: 0 });
+pub fn verify_proof(proof: &InstructionTransitionProof) -> bool {
+  let expected_wff = wff_instruction(proof.opcode, &proof.stack_inputs, &proof.stack_outputs);
+  match (&proof.semantic_proof, expected_wff) {
+    (Some(proof), Some(wff)) => {
+      let Ok(wff_result) = infer_proof(proof) else {
+        return false;
+      };
+      wff == wff_result
+    },
+    (None, None) => true, // No proof needed for structural ops
+    _ => false, // Mismatch between proof presence and expected WFF
   }
-  let result_bytes = extract_word_bytes(rhs).ok_or(TransitionVerifyError::WrongOperation {
-    opcode: itp.opcode,
-    expected: expected_name,
-  })?;
-  if result_bytes != itp.stack_outputs[0] {
-    return Err(TransitionVerifyError::OutputMismatch { index: 0 });
-  }
-  Ok(())
-}
-
-/// Verify all instruction proofs in a transaction.
-pub fn verify_transaction(
-  tx_proof: &TransactionProof,
-) -> Result<(), (usize, TransitionVerifyError)> {
-  for (step_idx, instr_proof) in tx_proof.steps.iter().enumerate() {
-    verify_instruction(instr_proof).map_err(|e| (step_idx, e))?;
-  }
-  Ok(())
 }
 
 // ============================================================
@@ -316,56 +196,74 @@ mod tests {
   }
 
   #[test]
-  fn test_prove_and_verify_add() {
+  fn test_add_simple() {
     let a = u256_bytes(1000);
     let b = u256_bytes(2000);
-    let (proof, outputs) = prove_instruction(opcode::ADD, &[a, b]).unwrap();
-    assert_eq!(outputs, vec![u256_bytes(3000)]);
-
+    let c = u256_bytes(3000);
+    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
     let itp = InstructionTransitionProof {
       opcode: opcode::ADD,
       pc: 0,
       stack_inputs: vec![a, b],
-      stack_outputs: outputs,
+      stack_outputs: vec![c],
       semantic_proof: Some(proof),
     };
-    verify_instruction(&itp).unwrap();
+    assert!(verify_proof(&itp));
   }
 
   #[test]
-  fn test_prove_and_verify_sub() {
-    let a = u256_bytes(5000);
-    let b = u256_bytes(3000);
-    let (proof, outputs) = prove_instruction(opcode::SUB, &[a, b]).unwrap();
-    assert_eq!(outputs, vec![u256_bytes(2000)]);
-
+  fn test_add_with_carry() {
+    // 0xFF...FF + 1 = 0 (overflow)
+    let a = [0xFF; 32];
+    let mut b = [0u8; 32];
+    b[31] = 1;
+    let c = [0u8; 32]; // wraps to 0
+    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
     let itp = InstructionTransitionProof {
-      opcode: opcode::SUB,
+      opcode: opcode::ADD,
       pc: 0,
       stack_inputs: vec![a, b],
-      stack_outputs: outputs,
+      stack_outputs: vec![c],
       semantic_proof: Some(proof),
     };
-    verify_instruction(&itp).unwrap();
+    assert!(verify_proof(&itp));
   }
 
   #[test]
-  fn test_prove_and_verify_lt() {
-    let a = u256_bytes(10);
-    let b = u256_bytes(20);
-    let (proof, outputs) = prove_instruction(opcode::LT, &[a, b]).unwrap();
-    let mut one = [0u8; 32];
-    one[31] = 1;
-    assert_eq!(outputs, vec![one]);
-
+  fn test_add_large_values() {
+    // 0x80...00 + 0x80...00 = 0 (two large values)
+    let mut a = [0u8; 32];
+    a[0] = 0x80;
+    let b = a;
+    let c = [0u8; 32];
+    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
     let itp = InstructionTransitionProof {
-      opcode: opcode::LT,
+      opcode: opcode::ADD,
       pc: 0,
       stack_inputs: vec![a, b],
-      stack_outputs: outputs,
+      stack_outputs: vec![c],
       semantic_proof: Some(proof),
     };
-    verify_instruction(&itp).unwrap();
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn test_add_wrong_output_fails() {
+    let a = u256_bytes(100);
+    let b = u256_bytes(200);
+    let wrong = u256_bytes(999); // incorrect result
+    let proof = prove_instruction(opcode::ADD, &[a, b], &[wrong]);
+    // ByteAddEq should fail since the result is wrong
+    assert!(proof.is_none() || {
+      let itp = InstructionTransitionProof {
+        opcode: opcode::ADD,
+        pc: 0,
+        stack_inputs: vec![a, b],
+        stack_outputs: vec![wrong],
+        semantic_proof: proof,
+      };
+      !verify_proof(&itp)
+    });
   }
 
   #[test]
@@ -377,37 +275,48 @@ mod tests {
       stack_outputs: vec![],
       semantic_proof: None,
     };
-    verify_instruction(&itp).unwrap();
+    assert!(verify_proof(&itp));
   }
 
   #[test]
-  fn test_transaction_proof() {
+  fn test_push_no_proof() {
+    let itp = InstructionTransitionProof {
+      opcode: opcode::PUSH1,
+      pc: 0,
+      stack_inputs: vec![],
+      stack_outputs: vec![u256_bytes(42)],
+      semantic_proof: None,
+    };
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn test_transaction_add_chain() {
     let a = u256_bytes(100);
     let b = u256_bytes(200);
+    let c = u256_bytes(300);
+    let d = u256_bytes(50);
+    let e = u256_bytes(350);
 
-    // Step 1: ADD
-    let (add_proof, add_out) = prove_instruction(opcode::ADD, &[a, b]).unwrap();
+    // Step 1: ADD(100, 200) = 300
+    let p1 = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
     let step1 = InstructionTransitionProof {
-      opcode: opcode::ADD,
-      pc: 0,
-      stack_inputs: vec![a, b],
-      stack_outputs: add_out.clone(),
-      semantic_proof: Some(add_proof),
+      opcode: opcode::ADD, pc: 0,
+      stack_inputs: vec![a, b], stack_outputs: vec![c],
+      semantic_proof: Some(p1),
     };
 
-    // Step 2: ISZERO on the result
-    let (iz_proof, iz_out) = prove_instruction(opcode::ISZERO, &[add_out[0]]).unwrap();
+    // Step 2: ADD(300, 50) = 350
+    let p2 = prove_instruction(opcode::ADD, &[c, d], &[e]).unwrap();
     let step2 = InstructionTransitionProof {
-      opcode: opcode::ISZERO,
-      pc: 1,
-      stack_inputs: vec![add_out[0]],
-      stack_outputs: iz_out,
-      semantic_proof: Some(iz_proof),
+      opcode: opcode::ADD, pc: 1,
+      stack_inputs: vec![c, d], stack_outputs: vec![e],
+      semantic_proof: Some(p2),
     };
 
-    let tx_proof = TransactionProof {
-      steps: vec![step1, step2],
-    };
-    verify_transaction(&tx_proof).unwrap();
+    let tx = TransactionProof { steps: vec![step1, step2] };
+    for step in &tx.steps {
+      assert!(verify_proof(step));
+    }
   }
 }

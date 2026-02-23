@@ -1,6 +1,6 @@
 use crate::transition::{
   InstructionTransitionProof, TransactionProof, opcode_input_count, opcode_output_count,
-  prove_instruction,
+  prove_instruction, verify_proof,
 };
 use revm::{
   Context, InspectEvm, Inspector, MainBuilder, MainContext,
@@ -75,8 +75,7 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
 
     // Generate semantic proof (if applicable)
     let semantic_proof = if !self.pending_inputs.is_empty() || n_outputs > 0 {
-      prove_instruction(self.pending_opcode, &self.pending_inputs)
-        .map(|(proof, _computed_outputs)| proof)
+      prove_instruction(self.pending_opcode, &self.pending_inputs, &outputs)
     } else {
       None
     };
@@ -123,5 +122,13 @@ pub fn execute_and_prove(
   let proof = TransactionProof {
     steps: evm.inspector.proofs.clone(),
   };
+
+  // Verify all instruction proofs
+  for (i, step) in proof.steps.iter().enumerate() {
+    if !verify_proof(step) {
+      return Err(format!("proof verification failed at step {i} (opcode 0x{:02x})", step.opcode));
+    }
+  }
+
   Ok(proof)
 }

@@ -1,34 +1,16 @@
-//! Hilbert-style proof system for EVM instruction semantics.
-//!
-//! # Architecture
-//!
-//! The proof system operates at two levels:
-//! - **Byte level**: Axioms for 8-bit arithmetic (lookup-table verifiable in O(1))
-//! - **Word level**: 256-bit operations composed from 32 byte-level sub-proofs
-//!
-//! Each [`Proof`] term is a deduction tree of axioms and inference rules.
-//! The [`verify`] function traverses this tree, checks every step, and returns
-//! the proven equation `(lhs, rhs)` such that `lhs = rhs`.
-//!
-//! # ZKP Integration
-//!
-//! These proofs serve as witnesses for ZKP circuits:
-//! - Byte axioms → lookup table constraints (2^8 entries)
-//! - Carry chains → sequential arithmetic constraints
-//! - Word construction → byte packing (free in circuit)
-//! - The verifier logic maps directly to a simple arithmetic circuit
 
-use std::fmt;
+use std::{array, fmt};
+use serde::Serialize;
 
 // ============================================================
 // Types
 // ============================================================
 
 /// Types in the proof system.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Ty {
+  Bool,
   Byte,
-  Word,
 }
 
 // ============================================================
@@ -38,10 +20,21 @@ pub enum Ty {
 /// Terms represent values and computations in the proof language.
 ///
 /// Byte-level terms are the atoms; word-level terms compose 32 bytes.
-/// Abstract operation terms (`WordAdd`, `WordSub`, …) represent EVM
-/// operations whose semantics are established through proof rules.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Term {
+  // ---- Boolean-level ----
+  /// Boolean constant (0 or 1).
+  Bool(bool),
+  /// `Not(a) = !a`.
+  Not(Box<Term>),
+  /// `And(a, b) = a && b`.
+  And(Box<Term>, Box<Term>),
+  /// `Or(a, b) = a || b`.
+  Or(Box<Term>, Box<Term>),
+  /// `Xor(a, b) = a != b`.
+  Xor(Box<Term>, Box<Term>),
+  /// `ite(c, a, b) = if c then a else b`.
+  Ite(Box<Term>, Box<Term>, Box<Term>),
   // ---- Byte-level ----
   /// Concrete byte value.
   Byte(u8),
@@ -49,48 +42,16 @@ pub enum Term {
   ByteAdd(Box<Term>, Box<Term>, Box<Term>),
   /// `ByteAddCarry(a, b, c) = (a + b + c) / 256` — carry output (0 or 1).
   ByteAddCarry(Box<Term>, Box<Term>, Box<Term>),
-  /// `ByteNeg(a) = !a` — bitwise NOT.
-  ByteNeg(Box<Term>),
   /// `ByteMulLow(a, b) = (a * b) mod 256`.
   ByteMulLow(Box<Term>, Box<Term>),
   /// `ByteMulHigh(a, b) = (a * b) / 256`.
   ByteMulHigh(Box<Term>, Box<Term>),
-  /// `ByteInv(a)` = modular multiplicative inverse of byte.
-  ByteInv(Box<Term>),
   /// `ByteAnd(a, b) = a & b`.
   ByteAnd(Box<Term>, Box<Term>),
   /// `ByteOr(a, b) = a | b`.
   ByteOr(Box<Term>, Box<Term>),
   /// `ByteXor(a, b) = a ^ b`.
-  ByteXor(Box<Term>, Box<Term>),
-
-  // ---- Word-level (256-bit, 32 bytes big-endian: index 0 = MSB) ----
-  /// `Word([b0, …, b31])` — concrete word from 32 byte terms.
-  Word(Box<[Term; 32]>),
-
-  // ---- Abstract word operations (map 1-to-1 to EVM opcodes) ----
-  /// 256-bit modular addition.
-  WordAdd(Box<Term>, Box<Term>),
-  /// 256-bit modular subtraction.
-  WordSub(Box<Term>, Box<Term>),
-  /// 256-bit modular multiplication.
-  WordMul(Box<Term>, Box<Term>),
-  /// 256-bit bitwise AND.
-  WordAnd(Box<Term>, Box<Term>),
-  /// 256-bit bitwise OR.
-  WordOr(Box<Term>, Box<Term>),
-  /// 256-bit bitwise XOR.
-  WordXor(Box<Term>, Box<Term>),
-  /// 256-bit bitwise NOT.
-  WordNot(Box<Term>),
-  /// Unsigned less-than → Word(1) or Word(0).
-  WordLt(Box<Term>, Box<Term>),
-  /// Unsigned greater-than → Word(1) or Word(0).
-  WordGt(Box<Term>, Box<Term>),
-  /// Equality check → Word(1) or Word(0).
-  WordEqOp(Box<Term>, Box<Term>),
-  /// Is-zero check → Word(1) or Word(0).
-  WordIsZero(Box<Term>),
+  ByteXor(Box<Term>, Box<Term>)
 }
 
 // ============================================================
@@ -98,16 +59,12 @@ pub enum Term {
 // ============================================================
 
 /// Well-formed formulas in the proof system.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum WFF {
   /// `t1 = t2`.
-  Eq(Box<Term>, Box<Term>),
+  Equal(Box<Term>, Box<Term>),
   /// `φ ∧ ψ`.
   And(Box<WFF>, Box<WFF>),
-  /// `φ ∨ ψ`.
-  Or(Box<WFF>, Box<WFF>),
-  /// `¬φ`.
-  Not(Box<WFF>),
 }
 
 // ============================================================
@@ -117,10 +74,12 @@ pub enum WFF {
 /// Hilbert-style proof terms.
 ///
 /// Each variant is either an **axiom schema** (leaf) or an **inference rule**
-/// (interior node with sub-proofs).  [`verify`] checks validity and extracts
-/// the proven equation.
-#[derive(Debug, Clone)]
+/// (interior node with sub-proofs).
+#[derive(Debug, Clone, Serialize)]
 pub enum Proof {
+  // ======== Logical inference rules ========
+  /// From `φ` and `ψ`, derive `φ ∧ ψ`.
+  AndIntro(Box<Proof>, Box<Proof>),
   // ======== Structural equality rules ========
   /// Axiom: `t = t` (reflexivity).
   EqRefl(Term),
@@ -130,87 +89,20 @@ pub enum Proof {
   EqTrans(Box<Proof>, Box<Proof>),
 
   // ======== Byte axioms (lookup-table verifiable) ========
-  /// `ByteAdd(Byte(a), Byte(b), Byte(c)) = Byte((a+b+c) mod 256)`, c ∈ {0,1}.
-  ByteAddEq(u8, u8, u8),
-  /// `ByteAddCarry(Byte(a), Byte(b), Byte(c)) = Byte((a+b+c) / 256)`.
-  ByteAddCarryEq(u8, u8, u8),
-  /// `ByteNeg(Byte(a)) = Byte(!a)`.
-  ByteNegEq(u8),
+  /// `ByteAdd(Byte(a), Byte(b), Bool(c)) = Byte((a+b+c) mod 256)`.
+  ByteAddEq(u8, u8, bool),
+  /// `ByteAddCarry(Byte(a), Byte(b), Bool(c)) = Bool((a+b+c) >= 256)`.
+  ByteAddCarryEq(u8, u8, bool),
   /// `ByteMulLow(Byte(a), Byte(b)) = Byte((a*b) mod 256)`.
   ByteMulLowEq(u8, u8),
   /// `ByteMulHigh(Byte(a), Byte(b)) = Byte((a*b) / 256)`.
   ByteMulHighEq(u8, u8),
-  /// `ByteInv(Byte(a)) = Byte(inv(a))`.
-  ByteInvEq(u8),
   /// `ByteAnd(Byte(a), Byte(b)) = Byte(a & b)`.
   ByteAndEq(u8, u8),
   /// `ByteOr(Byte(a), Byte(b)) = Byte(a | b)`.
   ByteOrEq(u8, u8),
   /// `ByteXor(Byte(a), Byte(b)) = Byte(a ^ b)`.
   ByteXorEq(u8, u8),
-
-  // ======== Word inference rules ========
-  /// **Bytewise word equality**: from 32 byte-equality proofs, derive
-  /// `Word([a_0,…,a_31]) = Word([b_0,…,b_31])`.
-  WordBytewiseEq(Box<[Proof; 32]>),
-
-  /// **256-bit ripple-carry addition**.
-  ///
-  /// - `byte_proofs[i]` must be `ByteAddEq(a_i, b_i, c_i)`
-  /// - `carry_proofs[i]` must be `ByteAddCarryEq(a_i, b_i, c_i)`
-  /// - Carries propagate from LSB (index 31) toward MSB (index 0).
-  /// - Initial carry at index 31 is 0.
-  ///
-  /// Proves `WordAdd(Word(a), Word(b)) = Word(r)`.
-  WordAddRule {
-    byte_proofs: Box<[Proof; 32]>,
-    carry_proofs: Box<[Proof; 32]>,
-  },
-
-  /// **256-bit subtraction** via two's complement: `a − b = a + NOT(b) + 1`.
-  ///
-  /// - `neg_proofs[i]`: `ByteNegEq(b_i)`
-  /// - `byte_add_proofs[i]`: `ByteAddEq(a_i, !b_i, c_i)`
-  /// - `carry_proofs[i]`: `ByteAddCarryEq(a_i, !b_i, c_i)`
-  /// - Initial carry at index 31 is **1** (the +1 of two's complement).
-  ///
-  /// Proves `WordSub(Word(a), Word(b)) = Word(r)`.
-  WordSubRule {
-    neg_proofs: Box<[Proof; 32]>,
-    byte_add_proofs: Box<[Proof; 32]>,
-    carry_proofs: Box<[Proof; 32]>,
-  },
-
-  /// **Bytewise AND**. Proves `WordAnd(Word(a), Word(b)) = Word(r)`.
-  WordAndRule(Box<[Proof; 32]>),
-  /// **Bytewise OR**. Proves `WordOr(Word(a), Word(b)) = Word(r)`.
-  WordOrRule(Box<[Proof; 32]>),
-  /// **Bytewise XOR**. Proves `WordXor(Word(a), Word(b)) = Word(r)`.
-  WordXorRule(Box<[Proof; 32]>),
-  /// **Bytewise NOT**. Proves `WordNot(Word(a)) = Word(r)`.
-  WordNotRule(Box<[Proof; 32]>),
-
-  /// **Word equality check** (EQ opcode).
-  /// Proves `WordEqOp(Word(a), Word(b)) = Word(0 or 1)`.
-  WordEqCheckRule {
-    a_bytes: [u8; 32],
-    b_bytes: [u8; 32],
-  },
-  /// **Word is-zero** (ISZERO opcode).
-  /// Proves `WordIsZero(Word(a)) = Word(0 or 1)`.
-  WordIsZeroRule { a_bytes: [u8; 32] },
-  /// **Word less-than** (LT opcode).
-  /// Proves `WordLt(Word(a), Word(b)) = Word(0 or 1)`.
-  WordLtRule {
-    a_bytes: [u8; 32],
-    b_bytes: [u8; 32],
-  },
-  /// **Word greater-than** (GT opcode).
-  /// Proves `WordGt(Word(a), Word(b)) = Word(0 or 1)`.
-  WordGtRule {
-    a_bytes: [u8; 32],
-    b_bytes: [u8; 32],
-  },
 }
 
 // ============================================================
@@ -220,584 +112,734 @@ pub enum Proof {
 /// Errors produced during Hilbert-style proof verification.
 #[derive(Debug, Clone)]
 pub enum VerifyError {
-  /// Carry byte must be 0 or 1.
-  InvalidCarry(u8),
-  /// Carry chain inconsistency.
-  CarryMismatch {
-    byte_index: usize,
-    expected: u8,
-    got: u8,
-  },
-  /// Sub-proof operands don't match expected values.
-  InputMismatch { byte_index: usize },
+  /// Expected a different term variant.
+  UnexpectedTermVariant { expected: &'static str },
   /// Expected a different proof variant.
   UnexpectedProofVariant { expected: &'static str },
   /// Transitivity: intermediate terms don't match.
   TransitivityMismatch,
-  /// Subtraction neg byte doesn't match add operand.
-  SubNegMismatch { byte_index: usize },
+  /// Decide failed: expected equal bytes but got different values.
+  ByteDecideFailed,
 }
 
 impl fmt::Display for VerifyError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::InvalidCarry(c) => write!(f, "invalid carry value: {c} (must be 0 or 1)"),
-      Self::CarryMismatch {
-        byte_index,
-        expected,
-        got,
-      } => write!(
-        f,
-        "carry mismatch at byte {byte_index}: expected {expected}, got {got}"
-      ),
-      Self::InputMismatch { byte_index } => {
-        write!(f, "input mismatch at byte {byte_index}")
+      Self::UnexpectedTermVariant { expected } => {
+        write!(f, "expected term variant: {expected}")
       }
       Self::UnexpectedProofVariant { expected } => {
         write!(f, "expected proof variant: {expected}")
       }
-      Self::TransitivityMismatch => write!(f, "transitivity: intermediate terms differ"),
-      Self::SubNegMismatch { byte_index } => {
-        write!(f, "subtraction negation mismatch at byte {byte_index}")
+      Self::TransitivityMismatch => {
+        write!(f, "transitivity: intermediate terms don't match")
+      }
+      Self::ByteDecideFailed => {
+        write!(f, "decide failed: irreducible terms are found")
       }
     }
   }
 }
 
 // ============================================================
-// Term construction helpers
+// Compiling Proofs — opcode table
 // ============================================================
 
-/// Box a byte term.
-fn bt(val: u8) -> Box<Term> {
-  Box::new(Term::Byte(val))
-}
+// ---- Term opcodes (0..13) ----
+pub const OP_BOOL: u32            = 0;
+pub const OP_NOT: u32             = 1;
+pub const OP_AND: u32             = 2;
+pub const OP_OR: u32              = 3;
+pub const OP_XOR: u32             = 4;
+pub const OP_ITE: u32             = 5;
+pub const OP_BYTE: u32            = 6;
+pub const OP_BYTE_ADD: u32        = 7;
+pub const OP_BYTE_ADD_CARRY: u32  = 8;
+pub const OP_BYTE_MUL_LOW: u32    = 9;
+pub const OP_BYTE_MUL_HIGH: u32   = 10;
+pub const OP_BYTE_AND: u32        = 11;
+pub const OP_BYTE_OR: u32         = 12;
+pub const OP_BYTE_XOR: u32        = 13;
+// ---- Proof opcodes (14..24) ----
+pub const OP_AND_INTRO: u32       = 14;
+pub const OP_EQ_REFL: u32         = 15;
+pub const OP_EQ_SYM: u32          = 16;
+pub const OP_EQ_TRANS: u32        = 17;
+pub const OP_BYTE_ADD_EQ: u32     = 18;
+pub const OP_BYTE_ADD_CARRY_EQ: u32 = 19;
+pub const OP_BYTE_MUL_LOW_EQ: u32 = 20;
+pub const OP_BYTE_MUL_HIGH_EQ: u32 = 21;
+pub const OP_BYTE_AND_EQ: u32     = 22;
+pub const OP_BYTE_OR_EQ: u32      = 23;
+pub const OP_BYTE_XOR_EQ: u32     = 24;
 
-/// Construct `Word([Byte(b0), …, Byte(b31)])` from concrete bytes.
-pub fn make_word_term(bytes: &[u8; 32]) -> Term {
-  Term::Word(Box::new(std::array::from_fn(|i| Term::Byte(bytes[i]))))
-}
+// ---- Return-type tags ----
+pub const RET_BOOL: u32    = 0;
+pub const RET_BYTE: u32    = 1;
+pub const RET_WFF_EQ: u32  = 2;
+pub const RET_WFF_AND: u32 = 3;
 
-/// Word(0).
-pub fn word_zero() -> Term {
-  make_word_term(&[0u8; 32])
-}
+/// Number of columns in the compiled proof row (= STARK trace width).
+pub const NUM_PROOF_COLS: usize = 8;
 
-/// Word(1) — big-endian: `[0,…,0,1]`.
-pub fn word_one() -> Term {
-  let mut b = [0u8; 32];
-  b[31] = 1;
-  make_word_term(&b)
-}
-
-/// Extract concrete byte values from a `Word([Byte(b0),…,Byte(b31)])`.
-pub fn extract_word_bytes(term: &Term) -> Option<[u8; 32]> {
-  match term {
-    Term::Word(bytes) => {
-      let mut out = [0u8; 32];
-      for i in 0..32 {
-        match &bytes[i] {
-          Term::Byte(b) => out[i] = *b,
-          _ => return None,
-        }
-      }
-      Some(out)
-    }
-    _ => None,
-  }
-}
-
-// ============================================================
-// Verification
-// ============================================================
-
-/// Verify a Hilbert-style proof and return the proven equation `(lhs, rhs)`.
+/// Flat representation of a proof / term node.
 ///
-/// Returns `Err` if any axiom instance is invalid or any inference rule
-/// is incorrectly applied.
-pub fn verify(proof: &Proof) -> Result<(Term, Term), VerifyError> {
-  match proof {
-    // ---- Structural equality ----
-    Proof::EqRefl(t) => Ok((t.clone(), t.clone())),
+/// Each node in the proof tree becomes one row.
+/// Rows are in **post-order**: children always appear before parents.
+///
+/// | Column    | Description                                              |
+/// |-----------|----------------------------------------------------------|
+/// | `op`      | Opcode (`OP_*` constant)                                 |
+/// | `scalar0` | First immediate (byte or bool-as-int)                    |
+/// | `scalar1` | Second immediate (for ByteAndEq, etc.)                   |
+/// | `arg0`    | Row index of 1st child                                   |
+/// | `arg1`    | Row index of 2nd child                                   |
+/// | `arg2`    | Row index of 3rd child                                   |
+/// | `value`   | Computed value (reduce result for terms; 0 for proofs)   |
+/// | `ret_ty`  | Return type (`RET_BOOL`, `RET_BYTE`, `RET_WFF_*`)       |
+#[derive(Clone, Debug, Default)]
+pub struct ProofRow {
+  pub op: u32,
+  pub scalar0: u32,
+  pub scalar1: u32,
+  pub arg0: u32,
+  pub arg1: u32,
+  pub arg2: u32,
+  pub value: u32,
+  pub ret_ty: u32,
+}
 
-    Proof::EqSym(p) => {
-      let (lhs, rhs) = verify(p)?;
-      Ok((rhs, lhs))
-    }
+// ============================================================
+// Checking Proofs
+// ============================================================
 
-    Proof::EqTrans(p1, p2) => {
-      let (a, b1) = verify(p1)?;
-      let (b2, c) = verify(p2)?;
-      if b1 != b2 {
-        return Err(VerifyError::TransitivityMismatch);
-      }
-      Ok((a, c))
-    }
-
-    // ---- Byte axioms ----
-    Proof::ByteAddEq(a, b, c) => {
-      if *c > 1 {
-        return Err(VerifyError::InvalidCarry(*c));
-      }
-      let sum = *a as u16 + *b as u16 + *c as u16;
-      let result = (sum & 0xFF) as u8;
-      Ok((Term::ByteAdd(bt(*a), bt(*b), bt(*c)), Term::Byte(result)))
-    }
-
-    Proof::ByteAddCarryEq(a, b, c) => {
-      if *c > 1 {
-        return Err(VerifyError::InvalidCarry(*c));
-      }
-      let sum = *a as u16 + *b as u16 + *c as u16;
-      let carry = (sum >> 8) as u8;
-      Ok((
-        Term::ByteAddCarry(bt(*a), bt(*b), bt(*c)),
-        Term::Byte(carry),
-      ))
-    }
-
-    Proof::ByteNegEq(a) => Ok((Term::ByteNeg(bt(*a)), Term::Byte(!*a))),
-
-    Proof::ByteMulLowEq(a, b) => {
-      let low = (((*a as u16) * (*b as u16)) & 0xFF) as u8;
-      Ok((Term::ByteMulLow(bt(*a), bt(*b)), Term::Byte(low)))
-    }
-
-    Proof::ByteMulHighEq(a, b) => {
-      let high = (((*a as u16) * (*b as u16)) >> 8) as u8;
-      Ok((Term::ByteMulHigh(bt(*a), bt(*b)), Term::Byte(high)))
-    }
-
-    Proof::ByteInvEq(a) => {
-      let inv = if *a == 0 {
-        0
+pub fn infer_ty(term: &Term) -> Result<Ty, VerifyError> {
+  match term {
+    Term::Bool(_) => Ok(Ty::Bool),
+    Term::Not(a) =>
+      if infer_ty(&*a)? == Ty::Bool {
+        Ok(Ty::Bool)
       } else {
-        (0u16..256)
-          .find(|&x| ((*a as u16 * x) & 0xFF) == 1)
-          .unwrap_or(0) as u8
-      };
-      Ok((Term::ByteInv(bt(*a)), Term::Byte(inv)))
-    }
-
-    Proof::ByteAndEq(a, b) => Ok((Term::ByteAnd(bt(*a), bt(*b)), Term::Byte(*a & *b))),
-    Proof::ByteOrEq(a, b) => Ok((Term::ByteOr(bt(*a), bt(*b)), Term::Byte(*a | *b))),
-    Proof::ByteXorEq(a, b) => Ok((Term::ByteXor(bt(*a), bt(*b)), Term::Byte(*a ^ *b))),
-
-    // ---- Word bytewise equality ----
-    Proof::WordBytewiseEq(proofs) => {
-      let mut lhs_arr: Vec<Term> = Vec::with_capacity(32);
-      let mut rhs_arr: Vec<Term> = Vec::with_capacity(32);
-      for i in 0..32 {
-        let (l, r) = verify(&proofs[i])?;
-        lhs_arr.push(l);
-        rhs_arr.push(r);
+        Err(VerifyError::UnexpectedTermVariant { expected: "boolean subterm" })
+      },
+    Term::And(a, b) |
+    Term::Or(a, b) |
+    Term::Xor(a, b) => {
+      if infer_ty(&*a)? == Ty::Bool && infer_ty(&*b)? == Ty::Bool {
+        Ok(Ty::Bool)
+      } else {
+        Err(VerifyError::UnexpectedTermVariant { expected: "boolean subterm" })
       }
-      let la: [Term; 32] = lhs_arr.try_into().expect("32 elements");
-      let ra: [Term; 32] = rhs_arr.try_into().expect("32 elements");
-      Ok((Term::Word(Box::new(la)), Term::Word(Box::new(ra))))
-    }
-
-    // ---- Word addition (ripple-carry) ----
-    Proof::WordAddRule {
-      byte_proofs,
-      carry_proofs,
-    } => verify_word_add(byte_proofs, carry_proofs, 0),
-
-    // ---- Word subtraction (two's complement) ----
-    Proof::WordSubRule {
-      neg_proofs,
-      byte_add_proofs,
-      carry_proofs,
-    } => {
-      // 1. Verify negation proofs and extract b[i], !b[i]
-      let mut b_bytes = [0u8; 32];
-      let mut neg_b_bytes = [0u8; 32];
-      for i in 0..32 {
-        match &neg_proofs[i] {
-          Proof::ByteNegEq(b) => {
-            b_bytes[i] = *b;
-            neg_b_bytes[i] = !*b;
-          }
-          _ => {
-            return Err(VerifyError::UnexpectedProofVariant {
-              expected: "ByteNegEq",
-            });
-          }
+    },
+    Term::Ite(c, a, b) => {
+      if infer_ty(&*c)? == Ty::Bool {
+        let ty_a = infer_ty(&*a)?;
+        let ty_b = infer_ty(&*b)?;
+        if ty_a == ty_b {
+          Ok(ty_a)
+        } else {
+          Err(VerifyError::UnexpectedTermVariant { expected: "matching type subterms" })
         }
+      } else {
+        Err(VerifyError::UnexpectedTermVariant { expected: "boolean condition subterm" })
       }
-
-      // 2. Verify the addition a + NOT(b) with initial carry = 1
-      let (_, rhs) = verify_word_add(byte_add_proofs, carry_proofs, 1)?;
-
-      // 3. Verify that the add operand b-side matches neg_b
-      let mut a_bytes = [0u8; 32];
-      for i in 0..32 {
-        match &byte_add_proofs[i] {
-          Proof::ByteAddEq(a, nb, _) => {
-            if *nb != neg_b_bytes[i] {
-              return Err(VerifyError::SubNegMismatch { byte_index: i });
-            }
-            a_bytes[i] = *a;
-          }
-          _ => {
-            return Err(VerifyError::UnexpectedProofVariant {
-              expected: "ByteAddEq",
-            });
-          }
-        }
+    }
+    Term::Byte(_) => Ok(Ty::Byte),
+    Term::ByteAdd(a, b, c) =>
+      if infer_ty(&*a)? == Ty::Byte && infer_ty(&*b)? == Ty::Byte && infer_ty(&*c)? == Ty::Bool {
+        Ok(Ty::Byte)
+      } else {
+        Err(VerifyError::UnexpectedTermVariant { expected: "byte subterm" })
+      },
+    Term::ByteAddCarry(a, b, c) =>
+      if infer_ty(&*a)? == Ty::Byte && infer_ty(&*b)? == Ty::Byte && infer_ty(&*c)? == Ty::Bool {
+        Ok(Ty::Bool)
+      } else {
+        Err(VerifyError::UnexpectedTermVariant { expected: "bool subterm" })
+      },
+    Term::ByteMulLow(a, b) |
+    Term::ByteMulHigh(a, b) |
+    Term::ByteAnd(a, b) |
+    Term::ByteOr(a, b) |
+    Term::ByteXor(a, b) => {
+      if infer_ty(&*a)? == Ty::Byte && infer_ty(&*b)? == Ty::Byte {
+        Ok(Ty::Byte)
+      } else {
+        Err(VerifyError::UnexpectedTermVariant { expected: "byte subterm" })
       }
-
-      Ok((
-        Term::WordSub(
-          Box::new(make_word_term(&a_bytes)),
-          Box::new(make_word_term(&b_bytes)),
-        ),
-        rhs,
-      ))
-    }
-
-    // ---- Bytewise bitwise operations ----
-    Proof::WordAndRule(proofs) => verify_bytewise_binop(proofs, ByteOp::And),
-    Proof::WordOrRule(proofs) => verify_bytewise_binop(proofs, ByteOp::Or),
-    Proof::WordXorRule(proofs) => verify_bytewise_binop(proofs, ByteOp::Xor),
-
-    Proof::WordNotRule(proofs) => {
-      let mut a_bytes = [0u8; 32];
-      let mut r_bytes = [0u8; 32];
-      for i in 0..32 {
-        match &proofs[i] {
-          Proof::ByteNegEq(a) => {
-            a_bytes[i] = *a;
-            r_bytes[i] = !*a;
-          }
-          _ => {
-            return Err(VerifyError::UnexpectedProofVariant {
-              expected: "ByteNegEq",
-            });
-          }
-        }
-      }
-      Ok((
-        Term::WordNot(Box::new(make_word_term(&a_bytes))),
-        make_word_term(&r_bytes),
-      ))
-    }
-
-    // ---- Comparison / check rules (axiom-style) ----
-    Proof::WordEqCheckRule { a_bytes, b_bytes } => {
-      let eq = a_bytes == b_bytes;
-      let result = if eq { word_one() } else { word_zero() };
-      Ok((
-        Term::WordEqOp(
-          Box::new(make_word_term(a_bytes)),
-          Box::new(make_word_term(b_bytes)),
-        ),
-        result,
-      ))
-    }
-
-    Proof::WordIsZeroRule { a_bytes } => {
-      let zero = a_bytes.iter().all(|&b| b == 0);
-      let result = if zero { word_one() } else { word_zero() };
-      Ok((Term::WordIsZero(Box::new(make_word_term(a_bytes))), result))
-    }
-
-    Proof::WordLtRule { a_bytes, b_bytes } => {
-      // Big-endian byte array comparison = unsigned integer comparison
-      let lt = *a_bytes < *b_bytes;
-      let result = if lt { word_one() } else { word_zero() };
-      Ok((
-        Term::WordLt(
-          Box::new(make_word_term(a_bytes)),
-          Box::new(make_word_term(b_bytes)),
-        ),
-        result,
-      ))
-    }
-
-    Proof::WordGtRule { a_bytes, b_bytes } => {
-      let gt = *a_bytes > *b_bytes;
-      let result = if gt { word_one() } else { word_zero() };
-      Ok((
-        Term::WordGt(
-          Box::new(make_word_term(a_bytes)),
-          Box::new(make_word_term(b_bytes)),
-        ),
-        result,
-      ))
-    }
+    },
   }
 }
 
-// ---- Internal verification helpers ----
-
-/// Verify a ripple-carry word addition with the given initial carry (0 or 1).
-fn verify_word_add(
-  byte_proofs: &[Proof; 32],
-  carry_proofs: &[Proof; 32],
-  initial_carry: u8,
-) -> Result<(Term, Term), VerifyError> {
-  let mut carry = initial_carry;
-  let mut a_bytes = [0u8; 32];
-  let mut b_bytes = [0u8; 32];
-  let mut r_bytes = [0u8; 32];
-
-  for i in (0..32).rev() {
-    match &byte_proofs[i] {
-      Proof::ByteAddEq(a, b, c) => {
-        if *c != carry {
-          return Err(VerifyError::CarryMismatch {
-            byte_index: i,
-            expected: carry,
-            got: *c,
-          });
-        }
-        a_bytes[i] = *a;
-        b_bytes[i] = *b;
-        let sum = *a as u16 + *b as u16 + *c as u16;
-        r_bytes[i] = (sum & 0xFF) as u8;
-      }
-      _ => {
-        return Err(VerifyError::UnexpectedProofVariant {
-          expected: "ByteAddEq",
-        });
+pub fn reduce_byte(term: &Term) -> Result<u8, VerifyError> {
+  match term {
+    Term::Byte(b) => Ok(*b),
+    Term::ByteAdd(a, b, c) => {
+      let av = reduce_byte(&*a)?;
+      let bv = reduce_byte(&*b)?;
+      let cv = if reduce_bool(&*c)? { 1u16 } else { 0 };
+      Ok(((av as u16 + bv as u16 + cv) & 0xFF) as u8)
+    },
+    Term::ByteMulHigh(a, b) => {
+      let av = reduce_byte(&*a)?;
+      let bv = reduce_byte(&*b)?;
+      Ok(((av as u16 * bv as u16) >> 8) as u8)
+    },
+    Term::ByteMulLow(a, b) => {
+      let av = reduce_byte(&*a)?;
+      let bv = reduce_byte(&*b)?;
+      Ok(((av as u16 * bv as u16) & 0xFF) as u8)
+    },
+    Term::Ite(c, a, b) => {
+      let cv = reduce_bool(&*c)?;
+      if cv {
+        reduce_byte(&*a)
+      } else {
+        reduce_byte(&*b)
       }
     }
-
-    match &carry_proofs[i] {
-      Proof::ByteAddCarryEq(a, b, c) => {
-        if *a != a_bytes[i] || *b != b_bytes[i] || *c != carry {
-          return Err(VerifyError::InputMismatch { byte_index: i });
-        }
-        let sum = *a as u16 + *b as u16 + *c as u16;
-        carry = (sum >> 8) as u8;
-      }
-      _ => {
-        return Err(VerifyError::UnexpectedProofVariant {
-          expected: "ByteAddCarryEq",
-        });
-      }
-    }
+    _ => Err(VerifyError::UnexpectedTermVariant { expected: "irreducible term" })
   }
-
-  let word_a = make_word_term(&a_bytes);
-  let word_b = make_word_term(&b_bytes);
-  let word_r = make_word_term(&r_bytes);
-
-  Ok((Term::WordAdd(Box::new(word_a), Box::new(word_b)), word_r))
 }
 
-#[derive(Clone, Copy)]
-enum ByteOp {
-  And,
-  Or,
-  Xor,
-}
-
-/// Verify a bytewise binary operation (AND / OR / XOR).
-fn verify_bytewise_binop(proofs: &[Proof; 32], op: ByteOp) -> Result<(Term, Term), VerifyError> {
-  let mut a_bytes = [0u8; 32];
-  let mut b_bytes = [0u8; 32];
-  let mut r_bytes = [0u8; 32];
-
-  let expected = match op {
-    ByteOp::And => "ByteAndEq",
-    ByteOp::Or => "ByteOrEq",
-    ByteOp::Xor => "ByteXorEq",
-  };
-
-  for i in 0..32 {
-    match (&proofs[i], op) {
-      (Proof::ByteAndEq(a, b), ByteOp::And) => {
-        a_bytes[i] = *a;
-        b_bytes[i] = *b;
-        r_bytes[i] = *a & *b;
-      }
-      (Proof::ByteOrEq(a, b), ByteOp::Or) => {
-        a_bytes[i] = *a;
-        b_bytes[i] = *b;
-        r_bytes[i] = *a | *b;
-      }
-      (Proof::ByteXorEq(a, b), ByteOp::Xor) => {
-        a_bytes[i] = *a;
-        b_bytes[i] = *b;
-        r_bytes[i] = *a ^ *b;
-      }
-      _ => {
-        return Err(VerifyError::UnexpectedProofVariant { expected });
+pub fn reduce_bool(term: &Term) -> Result<bool, VerifyError> {
+  match term {
+    Term::Bool(b) => Ok(*b),
+    Term::Not(a) => Ok(!reduce_bool(&*a)?),
+    Term::And(a, b) => Ok(reduce_bool(&*a)? && reduce_bool(&*b)?),
+    Term::Or(a, b) => Ok(reduce_bool(&*a)? || reduce_bool(&*b)?),
+    Term::Xor(a, b) => Ok(reduce_bool(&*a)? != reduce_bool(&*b)?),
+    Term::Ite(c, a, b) => {
+      let cv = reduce_bool(&*c)?;
+      if cv {
+        reduce_bool(&*a)
+      } else {
+        reduce_bool(&*b)
       }
     }
+    Term::ByteAddCarry(a, b, c) => {
+      let av = reduce_byte(&*a)? as u16;
+      let bv = reduce_byte(&*b)? as u16;
+      let cv = if reduce_bool(&*c)? { 1u16 } else { 0 };
+      Ok((av + bv + cv) >= 256)
+    }
+    _ => Err(VerifyError::UnexpectedTermVariant { expected: "irreducible term" })
   }
+}
 
-  let wa = make_word_term(&a_bytes);
-  let wb = make_word_term(&b_bytes);
-  let wr = make_word_term(&r_bytes);
-
-  let lhs = match op {
-    ByteOp::And => Term::WordAnd(Box::new(wa), Box::new(wb)),
-    ByteOp::Or => Term::WordOr(Box::new(wa), Box::new(wb)),
-    ByteOp::Xor => Term::WordXor(Box::new(wa), Box::new(wb)),
-  };
-  Ok((lhs, wr))
+pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
+  match proof {
+    Proof::AndIntro(p1, p2) => {
+      let wff1 = infer_proof(p1)?;
+      let wff2 = infer_proof(p2)?;
+      Ok(WFF::And(Box::new(wff1), Box::new(wff2)))
+    },
+    Proof::EqRefl(t) => Ok(WFF::Equal(Box::new(t.clone()), Box::new(t.clone()))),
+    Proof::EqSym(p) => {
+      if let WFF::Equal(a, b) = infer_proof(p)? {
+        Ok(WFF::Equal(b, a))
+      } else {
+        Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" })
+      }
+    },
+    Proof::EqTrans(p1, p2) => {
+      if let WFF::Equal(a, b) = infer_proof(p1)? {
+        if let WFF::Equal(b2, c) = infer_proof(p2)? {
+          if *b == *b2 {
+            Ok(WFF::Equal(a, c))
+          } else {
+            Err(VerifyError::TransitivityMismatch)
+          }
+        } else {
+          Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" })
+        }
+      } else {
+        Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" })
+      }
+    },
+    Proof::ByteAddEq(a, b, c) => {
+      let cv = *c as u16;
+      let total = *a as u16 + *b as u16 + cv;
+      Ok(WFF::Equal(
+        Box::new(Term::ByteAdd(
+          Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)), Box::new(Term::Bool(*c)))),
+        Box::new(Term::Byte((total & 0xFF) as u8)),
+      ))
+    }
+    Proof::ByteAddCarryEq(a, b, c) => {
+      let cv = *c as u16;
+      let total = *a as u16 + *b as u16 + cv;
+      Ok(WFF::Equal(
+        Box::new(Term::ByteAddCarry(
+          Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)), Box::new(Term::Bool(*c)))),
+        Box::new(Term::Bool(total >= 256)),
+      ))
+    }
+    Proof::ByteMulLowEq(a, b) =>
+      Ok(WFF::Equal(
+        Box::new(Term::ByteMulLow(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
+        Box::new(Term::Byte(((*a as u16 * *b as u16) & 0xFF) as u8)),
+      )),
+    Proof::ByteMulHighEq(a, b) =>
+      Ok(WFF::Equal(
+        Box::new(Term::ByteMulHigh(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
+        Box::new(Term::Byte(((*a as u16 * *b as u16) >> 8) as u8)),
+      )),
+    Proof::ByteAndEq(a, b) =>
+      Ok(WFF::Equal(
+        Box::new(Term::ByteAnd(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
+        Box::new(Term::Byte(*a & *b))
+      )),
+    Proof::ByteOrEq(a, b) =>
+      Ok(WFF::Equal(
+        Box::new(Term::ByteOr(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
+        Box::new(Term::Byte(*a | *b))
+      )),
+    Proof::ByteXorEq(a, b) =>
+      Ok(WFF::Equal(
+        Box::new(Term::ByteXor(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
+        Box::new(Term::Byte(*a ^ *b))
+      )),
+  }
 }
 
 // ============================================================
-// Proof generation
+// Word-level functions
 // ============================================================
 
-/// Generate a Hilbert-style proof for 256-bit addition and compute the result.
-pub fn prove_word_add(a: &[u8; 32], b: &[u8; 32]) -> (Proof, [u8; 32]) {
-  let mut result = [0u8; 32];
-  let mut byte_proofs = Vec::with_capacity(32);
-  let mut carry_proofs = Vec::with_capacity(32);
-  let mut carry: u8 = 0;
-
+pub fn word_add(a: &[u8; 32], b: &[u8; 32]) -> [Box<Term>; 32] {
+  let mut carry = Box::new(Term::Bool(false));
+  // Build the carry chain LSB-first (byte 31 → byte 0) for big-endian layout
+  let mut terms: Vec<Box<Term>> = vec![Box::new(Term::Byte(0)); 32];
   for i in (0..32).rev() {
-    let sum = a[i] as u16 + b[i] as u16 + carry as u16;
-    result[i] = (sum & 0xFF) as u8;
-    let new_carry = (sum >> 8) as u8;
-    byte_proofs.push(Proof::ByteAddEq(a[i], b[i], carry));
-    carry_proofs.push(Proof::ByteAddCarryEq(a[i], b[i], carry));
-    carry = new_carry;
+    let ai = Box::new(Term::Byte(a[i]));
+    let bi = Box::new(Term::Byte(b[i]));
+    terms[i] = Box::new(Term::ByteAdd(ai.clone(), bi.clone(), carry.clone()));
+    carry = Box::new(Term::ByteAddCarry(ai, bi, carry));
   }
-  byte_proofs.reverse();
-  carry_proofs.reverse();
-
-  let proof = Proof::WordAddRule {
-    byte_proofs: Box::new(byte_proofs.try_into().expect("32 elements")),
-    carry_proofs: Box::new(carry_proofs.try_into().expect("32 elements")),
-  };
-  (proof, result)
+  array::from_fn(|i| terms[i].clone())
 }
 
-/// Generate a Hilbert-style proof for 256-bit subtraction (`a − b`).
-pub fn prove_word_sub(a: &[u8; 32], b: &[u8; 32]) -> (Proof, [u8; 32]) {
-  let mut neg_b = [0u8; 32];
-  let neg_proofs: [Proof; 32] = std::array::from_fn(|i| {
-    neg_b[i] = !b[i];
-    Proof::ByteNegEq(b[i])
-  });
+// ============================================================
+// Core WFFs 
+// ============================================================
 
-  let mut result = [0u8; 32];
-  let mut byte_add_proofs = Vec::with_capacity(32);
-  let mut carry_proofs = Vec::with_capacity(32);
-  let mut carry: u8 = 1; // +1 of two's complement
-
+pub fn wff_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let mut wff = None;
+  let mut carry = false;
   for i in (0..32).rev() {
-    let sum = a[i] as u16 + neg_b[i] as u16 + carry as u16;
-    result[i] = (sum & 0xFF) as u8;
-    let new_carry = (sum >> 8) as u8;
-    byte_add_proofs.push(Proof::ByteAddEq(a[i], neg_b[i], carry));
-    carry_proofs.push(Proof::ByteAddCarryEq(a[i], neg_b[i], carry));
-    carry = new_carry;
+    let av = a[i];
+    let bv = b[i];
+    let total = av as u16 + bv as u16 + carry as u16;
+    // Use the *claimed* output byte c[i], not the computed sum.
+    // If c is correct, this matches the proof's WFF;
+    // if c is wrong, verification fails because WFFs diverge.
+    let cur_wff = WFF::Equal(
+      Box::new(Term::ByteAdd(
+        Box::new(Term::Byte(av)),
+        Box::new(Term::Byte(bv)),
+        Box::new(Term::Bool(carry)),
+      )),
+      Box::new(Term::Byte(c[i])),
+    );
+    carry = total >= 256;
+    wff = Some(match wff {
+      None => cur_wff,
+      Some(p) => WFF::And(Box::new(p), Box::new(cur_wff)),
+    });
   }
-  byte_add_proofs.reverse();
-  carry_proofs.reverse();
-
-  let proof = Proof::WordSubRule {
-    neg_proofs: Box::new(neg_proofs),
-    byte_add_proofs: Box::new(byte_add_proofs.try_into().expect("32")),
-    carry_proofs: Box::new(carry_proofs.try_into().expect("32")),
-  };
-  (proof, result)
+  wff.unwrap()
 }
 
-/// Bitwise AND proof.
-pub fn prove_word_and(a: &[u8; 32], b: &[u8; 32]) -> (Proof, [u8; 32]) {
-  let mut result = [0u8; 32];
-  let proofs: [Proof; 32] = std::array::from_fn(|i| {
-    result[i] = a[i] & b[i];
-    Proof::ByteAndEq(a[i], b[i])
-  });
-  (Proof::WordAndRule(Box::new(proofs)), result)
-}
+// ============================================================
+// Proving Instructions
+// ============================================================
 
-/// Bitwise OR proof.
-pub fn prove_word_or(a: &[u8; 32], b: &[u8; 32]) -> (Proof, [u8; 32]) {
-  let mut result = [0u8; 32];
-  let proofs: [Proof; 32] = std::array::from_fn(|i| {
-    result[i] = a[i] | b[i];
-    Proof::ByteOrEq(a[i], b[i])
-  });
-  (Proof::WordOrRule(Box::new(proofs)), result)
-}
-
-/// Bitwise XOR proof.
-pub fn prove_word_xor(a: &[u8; 32], b: &[u8; 32]) -> (Proof, [u8; 32]) {
-  let mut result = [0u8; 32];
-  let proofs: [Proof; 32] = std::array::from_fn(|i| {
-    result[i] = a[i] ^ b[i];
-    Proof::ByteXorEq(a[i], b[i])
-  });
-  (Proof::WordXorRule(Box::new(proofs)), result)
-}
-
-/// Bitwise NOT proof.
-pub fn prove_word_not(a: &[u8; 32]) -> (Proof, [u8; 32]) {
-  let mut result = [0u8; 32];
-  let proofs: [Proof; 32] = std::array::from_fn(|i| {
-    result[i] = !a[i];
-    Proof::ByteNegEq(a[i])
-  });
-  (Proof::WordNotRule(Box::new(proofs)), result)
-}
-
-/// EQ check proof.
-pub fn prove_word_eq(a: &[u8; 32], b: &[u8; 32]) -> (Proof, [u8; 32]) {
-  let equal = a == b;
-  let mut result = [0u8; 32];
-  if equal {
-    result[31] = 1;
+pub fn prove_add(a: &[u8; 32], b: &[u8; 32], _c: &[u8; 32]) -> Option<Proof> {
+  let mut prf = None;
+  let mut carry = false;
+  // LSB-first: byte 31 → byte 0 (big-endian layout)
+  for i in (0..32).rev() {
+    let av = a[i];
+    let bv = b[i];
+    let total = av as u16 + bv as u16 + carry as u16;
+    let cur_prf = Proof::ByteAddEq(av, bv, carry);
+    carry = total >= 256;
+    prf = Some(match prf {
+      None => cur_prf,
+      Some(p) => Proof::AndIntro(Box::new(p), Box::new(cur_prf)),
+    });
   }
-  (
-    Proof::WordEqCheckRule {
-      a_bytes: *a,
-      b_bytes: *b,
-    },
-    result,
-  )
+  prf
 }
 
-/// ISZERO proof.
-pub fn prove_word_iszero(a: &[u8; 32]) -> (Proof, [u8; 32]) {
-  let zero = a.iter().all(|&b| b == 0);
-  let mut result = [0u8; 32];
-  if zero {
-    result[31] = 1;
+// ============================================================
+// Compiling: Tree → Vec<ProofRow>
+// ============================================================
+
+fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
+  match term {
+    Term::Bool(v) => {
+      let idx = rows.len() as u32;
+      let val = *v as u32;
+      rows.push(ProofRow { op: OP_BOOL, scalar0: val, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      idx
+    }
+    Term::Not(a) => {
+      let ai = compile_term_inner(a, rows);
+      let val = 1 - rows[ai as usize].value;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_NOT, arg0: ai, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      idx
+    }
+    Term::And(a, b) => {
+      let ai = compile_term_inner(a, rows);
+      let bi = compile_term_inner(b, rows);
+      let val = rows[ai as usize].value * rows[bi as usize].value;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_AND, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      idx
+    }
+    Term::Or(a, b) => {
+      let ai = compile_term_inner(a, rows);
+      let bi = compile_term_inner(b, rows);
+      let (av, bv) = (rows[ai as usize].value, rows[bi as usize].value);
+      let val = av + bv - av * bv;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_OR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      idx
+    }
+    Term::Xor(a, b) => {
+      let ai = compile_term_inner(a, rows);
+      let bi = compile_term_inner(b, rows);
+      let (av, bv) = (rows[ai as usize].value, rows[bi as usize].value);
+      let val = av + bv - 2 * av * bv;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_XOR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      idx
+    }
+    Term::Ite(c, a, b) => {
+      let ci = compile_term_inner(c, rows);
+      let ai = compile_term_inner(a, rows);
+      let bi = compile_term_inner(b, rows);
+      let cv = rows[ci as usize].value;
+      let (av, bv) = (rows[ai as usize].value, rows[bi as usize].value);
+      let val = cv * av + (1 - cv) * bv;
+      let ret = rows[ai as usize].ret_ty; // branches have same type
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_ITE, arg0: ci, arg1: ai, arg2: bi, value: val, ret_ty: ret, ..Default::default() });
+      idx
+    }
+    Term::Byte(v) => {
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE, scalar0: *v as u32, value: *v as u32, ret_ty: RET_BYTE, ..Default::default() });
+      idx
+    }
+    Term::ByteAdd(a, b, c) => {
+      let ai = compile_term_inner(a, rows);
+      let bi = compile_term_inner(b, rows);
+      let ci = compile_term_inner(c, rows);
+      let total = rows[ai as usize].value + rows[bi as usize].value + rows[ci as usize].value;
+      let val = total & 0xFF;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_ADD, arg0: ai, arg1: bi, arg2: ci, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      idx
+    }
+    Term::ByteAddCarry(a, b, c) => {
+      let ai = compile_term_inner(a, rows);
+      let bi = compile_term_inner(b, rows);
+      let ci = compile_term_inner(c, rows);
+      let total = rows[ai as usize].value + rows[bi as usize].value + rows[ci as usize].value;
+      let val = if total >= 256 { 1 } else { 0 };
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_ADD_CARRY, arg0: ai, arg1: bi, arg2: ci, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      idx
+    }
+    Term::ByteMulLow(a, b) => {
+      let ai = compile_term_inner(a, rows);
+      let bi = compile_term_inner(b, rows);
+      let val = (rows[ai as usize].value * rows[bi as usize].value) & 0xFF;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_MUL_LOW, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      idx
+    }
+    Term::ByteMulHigh(a, b) => {
+      let ai = compile_term_inner(a, rows);
+      let bi = compile_term_inner(b, rows);
+      let val = (rows[ai as usize].value * rows[bi as usize].value) >> 8;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_MUL_HIGH, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      idx
+    }
+    Term::ByteAnd(a, b) => {
+      let ai = compile_term_inner(a, rows);
+      let bi = compile_term_inner(b, rows);
+      let val = rows[ai as usize].value & rows[bi as usize].value;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_AND, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      idx
+    }
+    Term::ByteOr(a, b) => {
+      let ai = compile_term_inner(a, rows);
+      let bi = compile_term_inner(b, rows);
+      let val = rows[ai as usize].value | rows[bi as usize].value;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_OR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      idx
+    }
+    Term::ByteXor(a, b) => {
+      let ai = compile_term_inner(a, rows);
+      let bi = compile_term_inner(b, rows);
+      let val = rows[ai as usize].value ^ rows[bi as usize].value;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_XOR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      idx
+    }
   }
-  (Proof::WordIsZeroRule { a_bytes: *a }, result)
 }
 
-/// LT proof.
-pub fn prove_word_lt(a: &[u8; 32], b: &[u8; 32]) -> (Proof, [u8; 32]) {
-  let lt = *a < *b;
-  let mut result = [0u8; 32];
-  if lt {
-    result[31] = 1;
+fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
+  match proof {
+    Proof::AndIntro(p1, p2) => {
+      let p1i = compile_proof_inner(p1, rows);
+      let p2i = compile_proof_inner(p2, rows);
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_AND_INTRO, arg0: p1i, arg1: p2i, ret_ty: RET_WFF_AND, ..Default::default() });
+      idx
+    }
+    Proof::EqRefl(t) => {
+      let ti = compile_term_inner(t, rows);
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_EQ_REFL, arg0: ti, ret_ty: RET_WFF_EQ, ..Default::default() });
+      idx
+    }
+    Proof::EqSym(p) => {
+      let pi = compile_proof_inner(p, rows);
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_EQ_SYM, arg0: pi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      idx
+    }
+    Proof::EqTrans(p1, p2) => {
+      let p1i = compile_proof_inner(p1, rows);
+      let p2i = compile_proof_inner(p2, rows);
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_EQ_TRANS, arg0: p1i, arg1: p2i, ret_ty: RET_WFF_EQ, ..Default::default() });
+      idx
+    }
+    Proof::ByteAddEq(a, b, c) => {
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_ADD_EQ, scalar0: *a as u32, scalar1: *b as u32, arg0: *c as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      idx
+    }
+    Proof::ByteAddCarryEq(a, b, c) => {
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_ADD_CARRY_EQ, scalar0: *a as u32, scalar1: *b as u32, arg0: *c as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      idx
+    }
+    Proof::ByteMulLowEq(a, b) => {
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_MUL_LOW_EQ, scalar0: *a as u32, scalar1: *b as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      idx
+    }
+    Proof::ByteMulHighEq(a, b) => {
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_MUL_HIGH_EQ, scalar0: *a as u32, scalar1: *b as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      idx
+    }
+    Proof::ByteAndEq(a, b) => {
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_AND_EQ, scalar0: *a as u32, scalar1: *b as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      idx
+    }
+    Proof::ByteOrEq(a, b) => {
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_OR_EQ, scalar0: *a as u32, scalar1: *b as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      idx
+    }
+    Proof::ByteXorEq(a, b) => {
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BYTE_XOR_EQ, scalar0: *a as u32, scalar1: *b as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      idx
+    }
   }
-  (
-    Proof::WordLtRule {
-      a_bytes: *a,
-      b_bytes: *b,
-    },
-    result,
-  )
 }
 
-/// GT proof.
-pub fn prove_word_gt(a: &[u8; 32], b: &[u8; 32]) -> (Proof, [u8; 32]) {
-  let gt = *a > *b;
-  let mut result = [0u8; 32];
-  if gt {
-    result[31] = 1;
+/// Flatten a [`Proof`] tree into a `Vec<ProofRow>` (post-order).
+pub fn compile_proof(proof: &Proof) -> Vec<ProofRow> {
+  let mut rows = Vec::new();
+  compile_proof_inner(proof, &mut rows);
+  rows
+}
+
+/// Flatten a [`Term`] tree into a `Vec<ProofRow>` (post-order).
+pub fn compile_term(term: &Term) -> Vec<ProofRow> {
+  let mut rows = Vec::new();
+  compile_term_inner(term, &mut rows);
+  rows
+}
+
+// ============================================================
+// Flat verification (walk the compiled array)
+// ============================================================
+
+/// Verify a compiled proof row-by-row.
+///
+/// Checks term values are correct and proof nodes are well-formed.
+/// Returns `Ok(())` if every row passes, otherwise the first error.
+pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
+  for (i, row) in rows.iter().enumerate() {
+    // Helper: fetch a child row with bounds check.
+    let arg = |idx: u32| -> Result<&ProofRow, VerifyError> {
+      let j = idx as usize;
+      if j >= i {
+        return Err(VerifyError::UnexpectedTermVariant { expected: "valid child index" });
+      }
+      Ok(&rows[j])
+    };
+
+    match row.op {
+      // ── Leaf terms ──
+      OP_BOOL => {
+        if row.value != row.scalar0 || row.value > 1 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE => {
+        if row.value != row.scalar0 || row.value > 255 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      // ── Unary bool ──
+      OP_NOT => {
+        let a = arg(row.arg0)?;
+        if row.value != 1 - a.value {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      // ── Binary bool ──
+      OP_AND => {
+        let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
+        if row.value != a.value * b.value {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_OR => {
+        let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
+        if row.value != a.value + b.value - a.value * b.value {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_XOR => {
+        let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
+        if row.value != a.value + b.value - 2 * a.value * b.value {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      // ── Ternary: if-then-else ──
+      OP_ITE => {
+        let (c, a, b) = (arg(row.arg0)?, arg(row.arg1)?, arg(row.arg2)?);
+        if row.value != c.value * a.value + (1 - c.value) * b.value {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      // ── Byte arithmetic ──
+      OP_BYTE_ADD => {
+        let (a, b, c) = (arg(row.arg0)?, arg(row.arg1)?, arg(row.arg2)?);
+        if row.value != (a.value + b.value + c.value) & 0xFF {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_ADD_CARRY => {
+        let (a, b, c) = (arg(row.arg0)?, arg(row.arg1)?, arg(row.arg2)?);
+        let exp = if a.value + b.value + c.value >= 256 { 1 } else { 0 };
+        if row.value != exp {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_MUL_LOW => {
+        let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
+        if row.value != (a.value * b.value) & 0xFF {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_MUL_HIGH => {
+        let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
+        if row.value != (a.value * b.value) >> 8 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_AND => {
+        let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
+        if row.value != (a.value & b.value) {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_OR => {
+        let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
+        if row.value != (a.value | b.value) {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_XOR => {
+        let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
+        if row.value != (a.value ^ b.value) {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      // ── Proof: byte-add axiom ──
+      OP_BYTE_ADD_EQ => {
+        if row.scalar0 > 255 || row.scalar1 > 255 || row.arg0 > 1 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_ADD_CARRY_EQ => {
+        if row.scalar0 > 255 || row.scalar1 > 255 || row.arg0 > 1 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_MUL_LOW_EQ | OP_BYTE_MUL_HIGH_EQ => {
+        if row.scalar0 > 255 || row.scalar1 > 255 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      // ── Proof: conjunction ──
+      OP_AND_INTRO => {
+        let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
+        if a.ret_ty < RET_WFF_EQ || b.ret_ty < RET_WFF_EQ {
+          return Err(VerifyError::UnexpectedProofVariant { expected: "proof arguments" });
+        }
+      }
+      // ── Proof: reflexivity ──
+      OP_EQ_REFL => {
+        let a = arg(row.arg0)?;
+        if a.ret_ty > RET_BYTE {
+          return Err(VerifyError::UnexpectedProofVariant { expected: "term argument" });
+        }
+      }
+      // ── Proof: symmetry ──
+      OP_EQ_SYM => {
+        let a = arg(row.arg0)?;
+        if a.ret_ty != RET_WFF_EQ {
+          return Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" });
+        }
+      }
+      // ── Proof: transitivity ──
+      OP_EQ_TRANS => {
+        let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
+        if a.ret_ty != RET_WFF_EQ || b.ret_ty != RET_WFF_EQ {
+          return Err(VerifyError::UnexpectedProofVariant { expected: "equality proofs" });
+        }
+      }
+      // ── Proof: byte bitwise axioms (lookup-verifiable) ──
+      OP_BYTE_AND_EQ | OP_BYTE_OR_EQ | OP_BYTE_XOR_EQ => {
+        if row.scalar0 > 255 || row.scalar1 > 255 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      _ => return Err(VerifyError::UnexpectedTermVariant { expected: "valid opcode" }),
+    }
   }
-  (
-    Proof::WordGtRule {
-      a_bytes: *a,
-      b_bytes: *b,
-    },
-    result,
-  )
+  Ok(())
 }
 
 // ============================================================
@@ -808,181 +850,113 @@ pub fn prove_word_gt(a: &[u8; 32], b: &[u8; 32]) -> (Proof, [u8; 32]) {
 mod tests {
   use super::*;
 
-  fn u256_bytes(val: u128) -> [u8; 32] {
+  #[test]
+  fn test_compile_and_verify_simple_add() {
+    let mut a = [0u8; 32];
     let mut b = [0u8; 32];
-    b[16..32].copy_from_slice(&val.to_be_bytes());
-    b
+    a[31] = 100;
+    b[31] = 50;
+    let mut c = [0u8; 32];
+    c[31] = 150;
+
+    let proof = prove_add(&a, &b, &c).unwrap();
+    let rows = compile_proof(&proof);
+    verify_compiled(&rows).expect("compiled verification should pass");
   }
 
   #[test]
-  fn test_byte_add_eq_verify() {
-    let proof = Proof::ByteAddEq(200, 100, 0);
-    let (lhs, rhs) = verify(&proof).unwrap();
-    assert_eq!(rhs, Term::Byte(44));
-    assert_eq!(lhs, Term::ByteAdd(bt(200), bt(100), bt(0)));
+  fn test_compile_and_verify_add_with_carry() {
+    let mut a = [0u8; 32];
+    let mut b = [0u8; 32];
+    a[31] = 200;
+    b[31] = 100;
+    let mut c = [0u8; 32];
+    c[31] = 44;
+    c[30] = 1;
+
+    let proof = prove_add(&a, &b, &c).unwrap();
+    let rows = compile_proof(&proof);
+    verify_compiled(&rows).expect("compiled verification should pass");
   }
 
   #[test]
-  fn test_byte_add_carry_verify() {
-    let proof = Proof::ByteAddCarryEq(200, 100, 0);
-    let (_, rhs) = verify(&proof).unwrap();
-    assert_eq!(rhs, Term::Byte(1));
-  }
-
-  #[test]
-  fn test_word_add_simple() {
-    let a = u256_bytes(100);
-    let b = u256_bytes(200);
-    let (proof, result) = prove_word_add(&a, &b);
-    assert_eq!(result, u256_bytes(300));
-    let (lhs, rhs) = verify(&proof).unwrap();
-    assert_eq!(rhs, make_word_term(&u256_bytes(300)));
-    assert_eq!(
-      lhs,
-      Term::WordAdd(Box::new(make_word_term(&a)), Box::new(make_word_term(&b)))
-    );
-  }
-
-  #[test]
-  fn test_word_add_overflow() {
-    let a = [0xFF; 32];
-    let b = u256_bytes(1);
-    let (proof, result) = prove_word_add(&a, &b);
-    assert_eq!(result, [0u8; 32]);
-    verify(&proof).unwrap();
-  }
-
-  #[test]
-  fn test_word_sub_simple() {
-    let a = u256_bytes(300);
-    let b = u256_bytes(100);
-    let (proof, result) = prove_word_sub(&a, &b);
-    assert_eq!(result, u256_bytes(200));
-    let (lhs, rhs) = verify(&proof).unwrap();
-    assert_eq!(rhs, make_word_term(&u256_bytes(200)));
-    assert_eq!(
-      lhs,
-      Term::WordSub(Box::new(make_word_term(&a)), Box::new(make_word_term(&b)))
-    );
-  }
-
-  #[test]
-  fn test_word_sub_underflow() {
-    let a = u256_bytes(0);
-    let b = u256_bytes(1);
-    let (proof, result) = prove_word_sub(&a, &b);
-    assert_eq!(result, [0xFF; 32]);
-    verify(&proof).unwrap();
-  }
-
-  #[test]
-  fn test_word_and() {
-    let a = u256_bytes(0xFF00);
-    let b = u256_bytes(0x0FF0);
-    let (proof, result) = prove_word_and(&a, &b);
-    assert_eq!(result, u256_bytes(0x0F00));
-    verify(&proof).unwrap();
-  }
-
-  #[test]
-  fn test_word_or() {
-    let a = u256_bytes(0xFF00);
-    let b = u256_bytes(0x0FF0);
-    let (proof, result) = prove_word_or(&a, &b);
-    assert_eq!(result, u256_bytes(0xFFF0));
-    verify(&proof).unwrap();
-  }
-
-  #[test]
-  fn test_word_xor() {
-    let a = u256_bytes(0xFF00);
-    let b = u256_bytes(0x0FF0);
-    let (proof, result) = prove_word_xor(&a, &b);
-    assert_eq!(result, u256_bytes(0xF0F0));
-    verify(&proof).unwrap();
-  }
-
-  #[test]
-  fn test_word_not() {
+  fn test_compile_row_count() {
     let a = [0u8; 32];
-    let (proof, result) = prove_word_not(&a);
-    assert_eq!(result, [0xFF; 32]);
-    verify(&proof).unwrap();
+    let b = [0u8; 32];
+    let c = [0u8; 32];
+
+    let proof = prove_add(&a, &b, &c).unwrap();
+    let rows = compile_proof(&proof);
+    assert!(rows.len() > 32, "need at least one row per byte + overhead");
+    eprintln!("zero-add row count: {}", rows.len());
   }
 
   #[test]
-  fn test_word_eq_true() {
-    let a = u256_bytes(42);
-    let (proof, result) = prove_word_eq(&a, &a);
-    let mut expected = [0u8; 32];
-    expected[31] = 1;
-    assert_eq!(result, expected);
-    verify(&proof).unwrap();
+  fn test_compiled_corrupted_value_fails() {
+    let mut a = [0u8; 32];
+    let mut b = [0u8; 32];
+    a[31] = 10;
+    b[31] = 20;
+    let mut c = [0u8; 32];
+    c[31] = 30;
+
+    let proof = prove_add(&a, &b, &c).unwrap();
+    let mut rows = compile_proof(&proof);
+
+    // Corrupt the first ByteAddEq axiom's scalar → range check fails.
+    for r in rows.iter_mut() {
+      if r.op == OP_BYTE_ADD_EQ {
+        r.scalar0 = 300; // > 255, triggers range check error
+        break;
+      }
+    }
+    assert!(verify_compiled(&rows).is_err(), "corrupted value should fail");
   }
 
   #[test]
-  fn test_word_eq_false() {
-    let a = u256_bytes(1);
-    let b = u256_bytes(2);
-    let (proof, result) = prove_word_eq(&a, &b);
-    assert_eq!(result, [0u8; 32]);
-    verify(&proof).unwrap();
-  }
-
-  #[test]
-  fn test_word_iszero() {
-    let zero = [0u8; 32];
-    let (proof, result) = prove_word_iszero(&zero);
-    let mut expected = [0u8; 32];
-    expected[31] = 1;
-    assert_eq!(result, expected);
-    verify(&proof).unwrap();
-
-    let nonzero = u256_bytes(1);
-    let (proof2, result2) = prove_word_iszero(&nonzero);
-    assert_eq!(result2, [0u8; 32]);
-    verify(&proof2).unwrap();
-  }
-
-  #[test]
-  fn test_word_lt() {
-    let a = u256_bytes(10);
-    let b = u256_bytes(20);
-    let (proof, result) = prove_word_lt(&a, &b);
-    let mut expected = [0u8; 32];
-    expected[31] = 1;
-    assert_eq!(result, expected);
-    verify(&proof).unwrap();
-  }
-
-  #[test]
-  fn test_word_gt() {
-    let a = u256_bytes(20);
-    let b = u256_bytes(10);
-    let (proof, result) = prove_word_gt(&a, &b);
-    let mut expected = [0u8; 32];
-    expected[31] = 1;
-    assert_eq!(result, expected);
-    verify(&proof).unwrap();
-  }
-
-  #[test]
-  fn test_eq_sym() {
-    let a = u256_bytes(5);
-    let b = u256_bytes(10);
-    let (add_proof, _) = prove_word_add(&a, &b);
-    let sym = Proof::EqSym(Box::new(add_proof));
-    let (lhs, rhs) = verify(&sym).unwrap();
-    assert_eq!(lhs, make_word_term(&u256_bytes(15)));
-    assert_eq!(
-      rhs,
-      Term::WordAdd(Box::new(make_word_term(&a)), Box::new(make_word_term(&b)))
+  fn test_compile_term_standalone() {
+    let term = Term::ByteAdd(
+      Box::new(Term::Byte(200)),
+      Box::new(Term::Byte(100)),
+      Box::new(Term::Bool(false)),
     );
+    let rows = compile_term(&term);
+    assert_eq!(rows.last().unwrap().value, 44); // (200+100+0) & 0xFF
+    assert_eq!(rows.last().unwrap().ret_ty, RET_BYTE);
+    verify_compiled(&rows).unwrap();
   }
 
   #[test]
-  fn test_invalid_carry_rejected() {
-    let bad = Proof::ByteAddEq(1, 2, 3);
-    assert!(verify(&bad).is_err());
+  fn test_compile_bool_ops() {
+    let term = Term::Xor(
+      Box::new(Term::Bool(true)),
+      Box::new(Term::Bool(false)),
+    );
+    let rows = compile_term(&term);
+    assert_eq!(rows.last().unwrap().value, 1);
+    assert_eq!(rows.last().unwrap().ret_ty, RET_BOOL);
+    verify_compiled(&rows).unwrap();
+  }
+
+  #[test]
+  fn test_all_bytes_max() {
+    let a = [0xFF; 32];
+    let mut b = [0u8; 32];
+    b[31] = 1;
+    // 0xFF..FF + 1 = 0x00..00 (mod 2^256)
+    let mut c = [0u8; 32];
+    c[0] = 0; // MSB wraps
+    // compute expected
+    let mut carry = 0u16;
+    for i in (0..32).rev() {
+      let sum = a[i] as u16 + b[i] as u16 + carry;
+      c[i] = (sum & 0xFF) as u8;
+      carry = sum >> 8;
+    }
+
+    let proof = prove_add(&a, &b, &c).unwrap();
+    let rows = compile_proof(&proof);
+    verify_compiled(&rows).unwrap();
   }
 }
+
