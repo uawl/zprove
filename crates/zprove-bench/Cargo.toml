@@ -1,0 +1,9 @@
+[package]
+name = "zprove-bench"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+zprove-core = { path = "../zprove-core" }
+revm = { version = "34", features = ["std"] }
+rand = "0.9"

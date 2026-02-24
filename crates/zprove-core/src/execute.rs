@@ -5,8 +5,11 @@ use crate::transition::{
 use revm::{
   Context, InspectEvm, Inspector, MainBuilder, MainContext,
   context::TxEnv,
+  database::BenchmarkDB,
+  database_interface::{BENCH_CALLER, BENCH_TARGET},
   interpreter::interpreter_types::StackTr,
   interpreter::{Interpreter, InterpreterTypes, interpreter_types::Jumps},
+  state::Bytecode,
   primitives::{Address, Bytes, TxKind, U256},
 };
 
@@ -123,18 +126,7 @@ pub fn execute_and_prove(
     steps: evm.inspector.proofs.clone(),
   };
 
-  // Verify all instruction proofs
-  for (i, step) in proof.steps.iter().enumerate() {
-    if !verify_proof(step) {
-      return Err(format!("proof verification failed at step {i} (opcode 0x{:02x})", step.opcode));
-    }
-    if !verify_proof_with_rows(step) {
-      return Err(format!(
-        "proof row verification failed at step {i} (opcode 0x{:02x})",
-        step.opcode
-      ));
-    }
-  }
+  verify_transaction_proof(&proof)?;
 
   Ok(proof)
 }
@@ -160,4 +152,64 @@ pub fn execute_and_prove_with_zkp(
   value: U256,
 ) -> Result<TransactionProof, String> {
   execute_and_prove_with_rows(caller, transact_to, data, value)
+}
+
+fn verify_transaction_proof(proof: &TransactionProof) -> Result<(), String> {
+  for (i, step) in proof.steps.iter().enumerate() {
+    if !verify_proof(step) {
+      return Err(format!("proof verification failed at step {i} (opcode 0x{:02x})", step.opcode));
+    }
+    if !verify_proof_with_rows(step) {
+      return Err(format!(
+        "proof row verification failed at step {i} (opcode 0x{:02x})",
+        step.opcode
+      ));
+    }
+  }
+  Ok(())
+}
+
+/// Execute provided EVM bytecode in a benchmark DB and return transition traces.
+///
+/// This path performs real revm execution and captures per-opcode transition data,
+/// but does not enforce semantic-proof verification for each opcode.
+pub fn execute_bytecode_trace(
+  bytecode: Bytes,
+  data: Bytes,
+  value: U256,
+) -> Result<TransactionProof, String> {
+  let bytecode = Bytecode::new_legacy(bytecode);
+  let ctx = Context::mainnet().with_db(BenchmarkDB::new_bytecode(bytecode));
+  let inspector = ProvingInspector::default();
+  let mut evm = ctx.build_mainnet_with_inspector(inspector);
+
+  let tx = TxEnv::builder()
+    .caller(BENCH_CALLER)
+    .kind(TxKind::Call(BENCH_TARGET))
+    .data(data)
+    .value(value)
+    .gas_limit(1_000_000)
+    .build()
+    .map_err(|err| format!("failed to build tx env: {err:?}"))?;
+
+  let _execution_result = evm
+    .inspect_one_tx(tx)
+    .map_err(|err| format!("failed to execute tx: {err}"))?;
+
+  Ok(TransactionProof {
+    steps: evm.inspector.proofs.clone(),
+  })
+}
+
+/// Execute provided EVM bytecode in a benchmark DB and produce transition proofs.
+///
+/// This is intended for deterministic revm-backed integration tests.
+pub fn execute_bytecode_and_prove(
+  bytecode: Bytes,
+  data: Bytes,
+  value: U256,
+) -> Result<TransactionProof, String> {
+  let proof = execute_bytecode_trace(bytecode, data, value)?;
+  verify_transaction_proof(&proof)?;
+  Ok(proof)
 }

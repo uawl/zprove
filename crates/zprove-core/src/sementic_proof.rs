@@ -1,6 +1,7 @@
 
-use std::{array, fmt};
+use std::{array, collections::HashSet, fmt};
 use serde::Serialize;
+use revm_primitives::U256;
 
 // ============================================================
 // Types
@@ -103,6 +104,9 @@ pub enum Proof {
   ByteOrEq(u8, u8),
   /// `ByteXor(Byte(a), Byte(b)) = Byte(a ^ b)`.
   ByteXorEq(u8, u8),
+  /// 16-bit chunk add axiom:
+  /// `(a16 + b16 + cin) mod 2^16 = c16`.
+  U16AddEq(u16, u16, bool, u16),
   /// From `(c1 = c2)`, derive
   /// `ByteAdd(Byte(a), Byte(b), c1) = ByteAdd(Byte(a), Byte(b), c2)`.
   ByteAddThirdCongruence(Box<Proof>, u8, u8),
@@ -186,6 +190,7 @@ pub const OP_BYTE_ADD_THIRD_CONGRUENCE: u32 = 25;
 pub const OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE: u32 = 26;
 pub const OP_ITE_TRUE_EQ: u32 = 27;
 pub const OP_ITE_FALSE_EQ: u32 = 28;
+pub const OP_U16_ADD_EQ: u32 = 29;
 
 // ---- Return-type tags ----
 pub const RET_BOOL: u32    = 0;
@@ -360,6 +365,36 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
         Box::new(Term::ByteXor(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
         Box::new(Term::Byte(*a ^ *b))
       )),
+    Proof::U16AddEq(a, b, cin, c) => {
+      let a_lo = (*a & 0xFF) as u8;
+      let a_hi = (*a >> 8) as u8;
+      let b_lo = (*b & 0xFF) as u8;
+      let b_hi = (*b >> 8) as u8;
+      let c_lo = (*c & 0xFF) as u8;
+      let c_hi = (*c >> 8) as u8;
+
+      let low_total = a_lo as u16 + b_lo as u16 + *cin as u16;
+      let mid_carry = low_total >= 256;
+
+      Ok(WFF::And(
+        Box::new(WFF::Equal(
+          Box::new(Term::ByteAdd(
+            Box::new(Term::Byte(a_lo)),
+            Box::new(Term::Byte(b_lo)),
+            Box::new(Term::Bool(*cin)),
+          )),
+          Box::new(Term::Byte(c_lo)),
+        )),
+        Box::new(WFF::Equal(
+          Box::new(Term::ByteAdd(
+            Box::new(Term::Byte(a_hi)),
+            Box::new(Term::Byte(b_hi)),
+            Box::new(Term::Bool(mid_carry)),
+          )),
+          Box::new(Term::Byte(c_hi)),
+        )),
+      ))
+    }
     Proof::ByteAddThirdCongruence(p, a, b) => {
       if let WFF::Equal(c1, c2) = infer_proof(p)? {
         Ok(WFF::Equal(
@@ -729,6 +764,72 @@ fn mul_u256_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
   out
 }
 
+fn is_zero_word(x: &[u8; 32]) -> bool {
+  x.iter().all(|&v| v == 0)
+}
+
+fn div_mod_u256(a: &[u8; 32], b: &[u8; 32]) -> Option<([u8; 32], [u8; 32])> {
+  if is_zero_word(b) {
+    return None;
+  }
+
+  let ua = U256::from_be_slice(a);
+  let ub = U256::from_be_slice(b);
+  let q = ua / ub;
+  let r = ua % ub;
+  Some((q.to_be_bytes::<32>(), r.to_be_bytes::<32>()))
+}
+
+fn is_negative_word(x: &[u8; 32]) -> bool {
+  (x[0] & 0x80) != 0
+}
+
+fn twos_complement_word(x: &[u8; 32]) -> [u8; 32] {
+  let mut out = [0u8; 32];
+  for i in 0..32 {
+    out[i] = !x[i];
+  }
+
+  let mut carry = 1u16;
+  for i in (0..32).rev() {
+    let sum = out[i] as u16 + carry;
+    out[i] = (sum & 0xFF) as u8;
+    carry = sum >> 8;
+  }
+
+  out
+}
+
+fn abs_word(x: &[u8; 32]) -> [u8; 32] {
+  if is_negative_word(x) {
+    twos_complement_word(x)
+  } else {
+    *x
+  }
+}
+
+fn div_mod_s256(a: &[u8; 32], b: &[u8; 32]) -> Option<([u8; 32], [u8; 32])> {
+  if is_zero_word(b) {
+    return None;
+  }
+
+  let a_neg = is_negative_word(a);
+  let b_neg = is_negative_word(b);
+
+  let abs_a = abs_word(a);
+  let abs_b = abs_word(b);
+  let (q_mag, r_mag) = div_mod_u256(&abs_a, &abs_b).expect("non-zero divisor");
+
+  let q = if a_neg ^ b_neg { twos_complement_word(&q_mag) } else { q_mag };
+  let r = if a_neg && !is_zero_word(&r_mag) {
+    twos_complement_word(&r_mag)
+  } else {
+    r_mag
+  };
+
+  Some((q, r))
+}
+
 pub fn verify_word_mul_hybrid_witness(a: &[u8; 32], b: &[u8; 32], witness: &WordMulHybridWitness) -> bool {
   let mut replay = [0u8; 32];
   for step in &witness.add_steps {
@@ -761,20 +862,158 @@ pub fn verify_word_mul_hybrid_witness(a: &[u8; 32], b: &[u8; 32], witness: &Word
 // ============================================================
 
 pub fn wff_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
-  let sums = word_add(a, b);
-  let mut wff = None;
-  for i in (0..32).rev() {
-    let cur_wff = WFF::Equal(
-      sums[i].clone(),
-      Box::new(Term::Byte(c[i])),
+  let mut leaves = Vec::with_capacity(16);
+  let mut carry = false;
+  for chunk in (0..16).rev() {
+    let lo = chunk * 2 + 1;
+    let hi = chunk * 2;
+
+    let a16 = ((a[hi] as u16) << 8) | a[lo] as u16;
+    let b16 = ((b[hi] as u16) << 8) | b[lo] as u16;
+    let low_total = a[lo] as u16 + b[lo] as u16 + carry as u16;
+    let mid_carry = low_total >= 256;
+
+    let lhs_lo = Term::ByteAdd(
+      Box::new(Term::Byte(a[lo])),
+      Box::new(Term::Byte(b[lo])),
+      Box::new(Term::Bool(carry)),
+    );
+    let lhs_hi = Term::ByteAdd(
+      Box::new(Term::Byte(a[hi])),
+      Box::new(Term::Byte(b[hi])),
+      Box::new(Term::Bool(mid_carry)),
     );
 
-    wff = Some(match wff {
-      None => cur_wff,
-      Some(p) => WFF::And(Box::new(p), Box::new(cur_wff)),
-    });
+    leaves.push(WFF::And(
+      Box::new(WFF::Equal(Box::new(lhs_lo), Box::new(Term::Byte(c[lo])))),
+      Box::new(WFF::Equal(Box::new(lhs_hi), Box::new(Term::Byte(c[hi])))),
+    ));
+
+    let total16 = a16 as u32 + b16 as u32 + carry as u32;
+    carry = total16 >= 65536;
   }
-  wff.unwrap()
+  and_wffs(leaves)
+}
+
+pub fn wff_sub(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  wff_add(b, c, a)
+}
+
+pub fn wff_mul(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let expected = mul_u256_mod(a, b);
+  let mut leaves = mul_local_proof_leaves(a, b)
+    .into_iter()
+    .map(|p| infer_proof(&p).expect("mul_local_proof_leaves must infer"))
+    .collect::<Vec<_>>();
+
+  for i in (0..32).rev() {
+    leaves.push(WFF::Equal(
+      Box::new(Term::Byte(expected[i])),
+      Box::new(Term::Byte(c[i])),
+    ));
+  }
+
+  and_wffs(leaves)
+}
+
+pub fn wff_div(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  if is_zero_word(b) {
+    let zero = [0u8; 32];
+    return wff_add(&zero, &zero, c);
+  }
+
+  let (_q, r) = div_mod_u256(a, b).expect("checked non-zero divisor");
+  let bc = mul_u256_mod(b, c);
+  WFF::And(
+    Box::new(wff_mul(b, c, &bc)),
+    Box::new(wff_add(&bc, &r, a)),
+  )
+}
+
+pub fn wff_mod(a: &[u8; 32], b: &[u8; 32], r: &[u8; 32]) -> WFF {
+  if is_zero_word(b) {
+    let zero = [0u8; 32];
+    return wff_add(&zero, &zero, r);
+  }
+
+  let (q, _r) = div_mod_u256(a, b).expect("checked non-zero divisor");
+  let bq = mul_u256_mod(b, &q);
+  WFF::And(
+    Box::new(wff_mul(b, &q, &bq)),
+    Box::new(wff_add(&bq, r, a)),
+  )
+}
+
+pub fn wff_sdiv(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  if is_zero_word(b) {
+    let zero = [0u8; 32];
+    return wff_add(&zero, &zero, c);
+  }
+
+  let (_q, r) = div_mod_s256(a, b).expect("checked non-zero divisor");
+  let bc = mul_u256_mod(b, c);
+  WFF::And(
+    Box::new(wff_mul(b, c, &bc)),
+    Box::new(wff_add(&bc, &r, a)),
+  )
+}
+
+pub fn wff_smod(a: &[u8; 32], b: &[u8; 32], r: &[u8; 32]) -> WFF {
+  if is_zero_word(b) {
+    let zero = [0u8; 32];
+    return wff_add(&zero, &zero, r);
+  }
+
+  let (q, _r) = div_mod_s256(a, b).expect("checked non-zero divisor");
+  let bq = mul_u256_mod(b, &q);
+  WFF::And(
+    Box::new(wff_mul(b, &q, &bq)),
+    Box::new(wff_add(&bq, r, a)),
+  )
+}
+
+pub fn wff_and(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let mut leaves = Vec::with_capacity(32);
+  for i in (0..32).rev() {
+    leaves.push(WFF::Equal(
+      Box::new(Term::ByteAnd(Box::new(Term::Byte(a[i])), Box::new(Term::Byte(b[i])))),
+      Box::new(Term::Byte(c[i])),
+    ));
+  }
+  and_wffs(leaves)
+}
+
+pub fn wff_or(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let mut leaves = Vec::with_capacity(32);
+  for i in (0..32).rev() {
+    leaves.push(WFF::Equal(
+      Box::new(Term::ByteOr(Box::new(Term::Byte(a[i])), Box::new(Term::Byte(b[i])))),
+      Box::new(Term::Byte(c[i])),
+    ));
+  }
+  and_wffs(leaves)
+}
+
+pub fn wff_xor(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let mut leaves = Vec::with_capacity(32);
+  for i in (0..32).rev() {
+    leaves.push(WFF::Equal(
+      Box::new(Term::ByteXor(Box::new(Term::Byte(a[i])), Box::new(Term::Byte(b[i])))),
+      Box::new(Term::Byte(c[i])),
+    ));
+  }
+  and_wffs(leaves)
+}
+
+pub fn wff_not(a: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let mut leaves = Vec::with_capacity(32);
+  for i in (0..32).rev() {
+    leaves.push(WFF::Equal(
+      Box::new(Term::ByteXor(Box::new(Term::Byte(a[i])), Box::new(Term::Byte(0xFF)))),
+      Box::new(Term::Byte(c[i])),
+    ));
+  }
+  and_wffs(leaves)
 }
 
 // ============================================================
@@ -782,43 +1021,161 @@ pub fn wff_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
 // ============================================================
 
 pub fn prove_add(a: &[u8; 32], b: &[u8; 32], _c: &[u8; 32]) -> Proof {
-  let mut prf = None;
-  let mut carry_term = Box::new(Term::Bool(false));
+  let mut leaves = Vec::with_capacity(16);
   let mut carry_bool = false;
-  let mut carry_eq_proof = Proof::EqRefl(Term::Bool(false));
-  // LSB-first: byte 31 → byte 0 (big-endian layout)
-  for i in (0..32).rev() {
-    let av = a[i];
-    let bv = b[i];
-    let total = av as u16 + bv as u16 + carry_bool as u16;
 
-    let add_congr = Proof::ByteAddThirdCongruence(
-      Box::new(carry_eq_proof.clone()),
-      av,
-      bv,
-    );
-    let add_axiom = Proof::ByteAddEq(av, bv, carry_bool);
-    let cur_prf = Proof::EqTrans(Box::new(add_congr), Box::new(add_axiom));
+  for chunk in (0..16).rev() {
+    let lo = chunk * 2 + 1;
+    let hi = chunk * 2;
+    let a16 = ((a[hi] as u16) << 8) | a[lo] as u16;
+    let b16 = ((b[hi] as u16) << 8) | b[lo] as u16;
+    let total16 = a16 as u32 + b16 as u32 + carry_bool as u32;
+    let c16 = (total16 & 0xFFFF) as u16;
 
-    let carry_congr = Proof::ByteAddCarryThirdCongruence(
-      Box::new(carry_eq_proof),
-      av,
-      bv,
-    );
-    let carry_axiom = Proof::ByteAddCarryEq(av, bv, carry_bool);
-    carry_eq_proof = Proof::EqTrans(Box::new(carry_congr), Box::new(carry_axiom));
-
-    let ai = Box::new(Term::Byte(av));
-    let bi = Box::new(Term::Byte(bv));
-    carry_term = Box::new(Term::ByteAddCarry(ai, bi, carry_term));
-    carry_bool = total >= 256;
-
-    prf = Some(match prf {
-      None => cur_prf,
-      Some(p) => Proof::AndIntro(Box::new(p), Box::new(cur_prf)),
-    });
+    leaves.push(Proof::U16AddEq(a16, b16, carry_bool, c16));
+    carry_bool = total16 >= 65536;
   }
-  prf.expect("prove_add must produce 32-byte conjunction proof")
+
+  and_proofs(leaves)
+}
+
+pub fn prove_sub(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
+  prove_add(b, c, a)
+}
+
+fn and_proofs(mut leaves: Vec<Proof>) -> Proof {
+  let first = leaves.remove(0);
+  leaves.into_iter().fold(first, |acc, p| Proof::AndIntro(Box::new(acc), Box::new(p)))
+}
+
+fn and_wffs(mut leaves: Vec<WFF>) -> WFF {
+  let first = leaves.remove(0);
+  leaves.into_iter().fold(first, |acc, w| WFF::And(Box::new(acc), Box::new(w)))
+}
+
+fn mul_local_proof_leaves(a: &[u8; 32], b: &[u8; 32]) -> Vec<Proof> {
+  let mut leaves = Vec::new();
+  let mut seen_mul_low_value = HashSet::new();
+  let mut seen_mul_high_value = HashSet::new();
+
+  for k in 0..32 {
+    for i in 0..=k {
+      let j = k - i;
+      let av = a[31 - i];
+      let bv = b[31 - j];
+      if av == 0 || bv == 0 {
+        continue;
+      }
+
+      let prod = av as u16 * bv as u16;
+      let low = (prod & 0xFF) as u8;
+      let high = (prod >> 8) as u8;
+
+      if seen_mul_low_value.insert(low) {
+        leaves.push(Proof::ByteMulLowEq(av, bv));
+      }
+      if k + 1 < 32 && prod >= 256 && seen_mul_high_value.insert(high) {
+        leaves.push(Proof::ByteMulHighEq(av, bv));
+      }
+    }
+  }
+
+  leaves
+}
+
+pub fn prove_mul(a: &[u8; 32], b: &[u8; 32], _c: &[u8; 32]) -> Proof {
+  let expected = mul_u256_mod(a, b);
+  let mut leaves = mul_local_proof_leaves(a, b);
+
+  for i in (0..32).rev() {
+    leaves.push(Proof::EqRefl(Term::Byte(expected[i])));
+  }
+
+  and_proofs(leaves)
+}
+
+pub fn prove_div(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
+  if is_zero_word(b) {
+    let zero = [0u8; 32];
+    return prove_add(&zero, &zero, c);
+  }
+
+  let (_q, r) = div_mod_u256(a, b).expect("checked non-zero divisor");
+  let bc = mul_u256_mod(b, c);
+  let p_mul = prove_mul(b, c, &bc);
+  let p_add = prove_add(&bc, &r, a);
+  Proof::AndIntro(Box::new(p_mul), Box::new(p_add))
+}
+
+pub fn prove_mod(a: &[u8; 32], b: &[u8; 32], r: &[u8; 32]) -> Proof {
+  if is_zero_word(b) {
+    let zero = [0u8; 32];
+    return prove_add(&zero, &zero, r);
+  }
+
+  let (q, _r) = div_mod_u256(a, b).expect("checked non-zero divisor");
+  let bq = mul_u256_mod(b, &q);
+  let p_mul = prove_mul(b, &q, &bq);
+  let p_add = prove_add(&bq, r, a);
+  Proof::AndIntro(Box::new(p_mul), Box::new(p_add))
+}
+
+pub fn prove_sdiv(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
+  if is_zero_word(b) {
+    let zero = [0u8; 32];
+    return prove_add(&zero, &zero, c);
+  }
+
+  let (_q, r) = div_mod_s256(a, b).expect("checked non-zero divisor");
+  let bc = mul_u256_mod(b, c);
+  let p_mul = prove_mul(b, c, &bc);
+  let p_add = prove_add(&bc, &r, a);
+  Proof::AndIntro(Box::new(p_mul), Box::new(p_add))
+}
+
+pub fn prove_smod(a: &[u8; 32], b: &[u8; 32], r: &[u8; 32]) -> Proof {
+  if is_zero_word(b) {
+    let zero = [0u8; 32];
+    return prove_add(&zero, &zero, r);
+  }
+
+  let (q, _r) = div_mod_s256(a, b).expect("checked non-zero divisor");
+  let bq = mul_u256_mod(b, &q);
+  let p_mul = prove_mul(b, &q, &bq);
+  let p_add = prove_add(&bq, r, a);
+  Proof::AndIntro(Box::new(p_mul), Box::new(p_add))
+}
+
+pub fn prove_and(a: &[u8; 32], b: &[u8; 32], _c: &[u8; 32]) -> Proof {
+  let mut leaves = Vec::with_capacity(32);
+  for i in (0..32).rev() {
+    leaves.push(Proof::ByteAndEq(a[i], b[i]));
+  }
+  and_proofs(leaves)
+}
+
+pub fn prove_or(a: &[u8; 32], b: &[u8; 32], _c: &[u8; 32]) -> Proof {
+  let mut leaves = Vec::with_capacity(32);
+  for i in (0..32).rev() {
+    leaves.push(Proof::ByteOrEq(a[i], b[i]));
+  }
+  and_proofs(leaves)
+}
+
+pub fn prove_xor(a: &[u8; 32], b: &[u8; 32], _c: &[u8; 32]) -> Proof {
+  let mut leaves = Vec::with_capacity(32);
+  for i in (0..32).rev() {
+    leaves.push(Proof::ByteXorEq(a[i], b[i]));
+  }
+  and_proofs(leaves)
+}
+
+pub fn prove_not(a: &[u8; 32], _c: &[u8; 32]) -> Proof {
+  let mut leaves = Vec::with_capacity(32);
+  for i in (0..32).rev() {
+    leaves.push(Proof::ByteXorEq(a[i], 0xFF));
+  }
+  and_proofs(leaves)
 }
 
 // ============================================================
@@ -1023,6 +1380,25 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
       rows.push(ProofRow { op: OP_BYTE_XOR_EQ, scalar0: *a as u32, scalar1: *b as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
       idx
     }
+    Proof::U16AddEq(a, b, cin, c) => {
+      let carry_in = *cin as u32;
+      let total = *a as u32 + *b as u32 + carry_in;
+      let sum16 = total & 0xFFFF;
+      let carry_out = if total >= 65536 { 1 } else { 0 };
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U16_ADD_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        scalar2: carry_in,
+        arg0: *c as u32,
+        arg1: carry_out,
+        value: sum16,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
+      idx
+    }
     Proof::ByteAddThirdCongruence(p, a, b) => {
       let pi = compile_proof_inner(p, rows);
       let idx = rows.len() as u32;
@@ -1190,6 +1566,18 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
           return Err(VerifyError::ByteDecideFailed);
         }
       }
+      OP_U16_ADD_EQ => {
+        if row.scalar0 > 0xFFFF || row.scalar1 > 0xFFFF || row.scalar2 > 1 || row.arg0 > 0xFFFF || row.arg1 > 1 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        let total = row.scalar0 + row.scalar1 + row.scalar2;
+        if row.value != (total & 0xFFFF) || row.arg0 != row.value || row.arg1 != if total >= 65536 { 1 } else { 0 } {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        if row.ret_ty != RET_WFF_AND {
+          return Err(VerifyError::UnexpectedProofVariant { expected: "u16-add proof row returns conjunction" });
+        }
+      }
       // ── Proof: conjunction ──
       OP_AND_INTRO => {
         let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
@@ -1312,7 +1700,7 @@ mod tests {
 
     let proof = prove_add(&a, &b, &c);
     let rows = compile_proof(&proof);
-    assert!(rows.len() > 32, "need at least one row per byte + overhead");
+    assert!(!rows.is_empty(), "compiled proof must contain rows");
     eprintln!("zero-add row count: {}", rows.len());
   }
 
@@ -1328,13 +1716,21 @@ mod tests {
     let proof = prove_add(&a, &b, &c);
     let mut rows = compile_proof(&proof);
 
-    // Corrupt the first ByteAddEq axiom's scalar → range check fails.
+    // Corrupt the first ADD-family axiom scalar/range so compiled verification fails.
+    let mut corrupted = false;
     for r in rows.iter_mut() {
+      if r.op == OP_U16_ADD_EQ {
+        r.scalar0 = 70_000; // > 0xFFFF
+        corrupted = true;
+        break;
+      }
       if r.op == OP_BYTE_ADD_EQ {
         r.scalar0 = 300; // > 255, triggers range check error
+        corrupted = true;
         break;
       }
     }
+    assert!(corrupted, "expected at least one add-family row to corrupt");
     assert!(verify_compiled(&rows).is_err(), "corrupted value should fail");
   }
 
