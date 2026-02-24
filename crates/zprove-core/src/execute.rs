@@ -1,6 +1,6 @@
 use crate::transition::{
   InstructionTransitionProof, TransactionProof, opcode_input_count, opcode_output_count,
-  prove_instruction, verify_proof,
+  prove_instruction, verify_proof, verify_proof_with_rows,
 };
 use revm::{
   Context, InspectEvm, Inspector, MainBuilder, MainContext,
@@ -128,7 +128,36 @@ pub fn execute_and_prove(
     if !verify_proof(step) {
       return Err(format!("proof verification failed at step {i} (opcode 0x{:02x})", step.opcode));
     }
+    if !verify_proof_with_rows(step) {
+      return Err(format!(
+        "proof row verification failed at step {i} (opcode 0x{:02x})",
+        step.opcode
+      ));
+    }
   }
 
   Ok(proof)
+}
+
+/// Execute an EVM transaction and prove each instruction transition,
+/// requiring semantic proof validity and compiled ProofRow validity.
+pub fn execute_and_prove_with_rows(
+  caller: Address,
+  transact_to: Address,
+  data: Bytes,
+  value: U256,
+) -> Result<TransactionProof, String> {
+  execute_and_prove(caller, transact_to, data, value)
+}
+
+/// Backward-compatible alias.
+///
+/// Despite the name, this now uses the ProofRow verification path.
+pub fn execute_and_prove_with_zkp(
+  caller: Address,
+  transact_to: Address,
+  data: Bytes,
+  value: U256,
+) -> Result<TransactionProof, String> {
+  execute_and_prove_with_rows(caller, transact_to, data, value)
 }

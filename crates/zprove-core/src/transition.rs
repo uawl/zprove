@@ -10,7 +10,11 @@
 //! every step of a transaction's execution.
 
 use crate::sementic_proof::{
-  Proof, WFF, infer_proof, prove_add, wff_add
+  Proof, WFF, compile_proof, infer_proof, prove_add, verify_compiled, wff_add
+};
+use crate::zk_proof::{
+  prove_and_verify_expected_wff_match_stark,
+  prove_and_verify_inferred_wff_stark,
 };
 
 // ============================================================
@@ -145,7 +149,26 @@ pub fn opcode_output_count(op: u8) -> usize {
 /// `computed_outputs` against the actual EVM outputs to ensure consistency.
 pub fn prove_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Option<Proof> {
   match op {
-    opcode::ADD => prove_add(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::ADD => Some(prove_add(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::SUB
+    | opcode::MUL
+    | opcode::DIV
+    | opcode::SDIV
+    | opcode::MOD
+    | opcode::SMOD
+    | opcode::ADDMOD
+    | opcode::MULMOD
+    | opcode::EXP
+    | opcode::LT
+    | opcode::GT
+    | opcode::SLT
+    | opcode::SGT
+    | opcode::EQ
+    | opcode::ISZERO
+    | opcode::AND
+    | opcode::OR
+    | opcode::XOR
+    | opcode::NOT => todo!("semantic proof path not implemented yet for opcode 0x{op:02x}"),
     // Structural ops: no semantic proof needed
     _ => None,
   }
@@ -158,6 +181,25 @@ pub fn prove_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> O
 pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Option<WFF> {
   match op {
     opcode::ADD => Some(wff_add(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::SUB
+    | opcode::MUL
+    | opcode::DIV
+    | opcode::SDIV
+    | opcode::MOD
+    | opcode::SMOD
+    | opcode::ADDMOD
+    | opcode::MULMOD
+    | opcode::EXP
+    | opcode::LT
+    | opcode::GT
+    | opcode::SLT
+    | opcode::SGT
+    | opcode::EQ
+    | opcode::ISZERO
+    | opcode::AND
+    | opcode::OR
+    | opcode::XOR
+    | opcode::NOT => todo!("WFF path not implemented yet for opcode 0x{op:02x}"),
     // Structural ops: no semantic proof needed
     _ => None,
   }
@@ -181,6 +223,66 @@ pub fn verify_proof(proof: &InstructionTransitionProof) -> bool {
   }
 }
 
+/// Verify an instruction transition with both:
+/// 1) Hilbert-style semantic proof checking, and
+/// 2) compiled ProofRow verification (`compile_proof` + `verify_compiled`).
+///
+/// This is the main verification path for production transition checks.
+pub fn verify_proof_with_rows(proof: &InstructionTransitionProof) -> bool {
+  if !verify_proof(proof) {
+    return false;
+  }
+
+  match &proof.semantic_proof {
+    Some(semantic_proof) => {
+      let rows = compile_proof(semantic_proof);
+      verify_compiled(&rows).is_ok()
+    }
+    _ => true,
+  }
+}
+
+/// Backward-compatible alias.
+///
+/// ZKP path uses a ProofRow-shaped trace in AIR.
+pub fn verify_proof_with_zkp(proof: &InstructionTransitionProof) -> bool {
+  match &proof.semantic_proof {
+    Some(semantic_proof) => {
+      let rows = compile_proof(semantic_proof);
+      let infer_wff_ok = prove_and_verify_inferred_wff_stark(&rows);
+
+      let expected_wff_ok = match proof.opcode {
+        opcode::ADD => wff_instruction(proof.opcode, &proof.stack_inputs, &proof.stack_outputs)
+          .map(|public_wff| prove_and_verify_expected_wff_match_stark(semantic_proof, &public_wff))
+          .unwrap_or(false),
+        opcode::SUB
+        | opcode::MUL
+        | opcode::DIV
+        | opcode::SDIV
+        | opcode::MOD
+        | opcode::SMOD
+        | opcode::ADDMOD
+        | opcode::MULMOD
+        | opcode::EXP
+        | opcode::LT
+        | opcode::GT
+        | opcode::SLT
+        | opcode::SGT
+        | opcode::EQ
+        | opcode::ISZERO
+        | opcode::AND
+        | opcode::OR
+        | opcode::XOR
+        | opcode::NOT => false,
+        _ => true,
+      };
+
+      infer_wff_ok && expected_wff_ok
+    }
+    None => true,
+  }
+}
+
 // ============================================================
 // Tests
 // ============================================================
@@ -196,7 +298,7 @@ mod tests {
   }
 
   #[test]
-  fn test_add_simple() {
+  fn test_binary_arith_simple_transition() {
     let a = u256_bytes(1000);
     let b = u256_bytes(2000);
     let c = u256_bytes(3000);
@@ -212,7 +314,7 @@ mod tests {
   }
 
   #[test]
-  fn test_add_with_carry() {
+  fn test_binary_arith_with_carry_transition() {
     // 0xFF...FF + 1 = 0 (overflow)
     let a = [0xFF; 32];
     let mut b = [0u8; 32];
@@ -230,7 +332,7 @@ mod tests {
   }
 
   #[test]
-  fn test_add_large_values() {
+  fn test_binary_arith_large_values_transition() {
     // 0x80...00 + 0x80...00 = 0 (two large values)
     let mut a = [0u8; 32];
     a[0] = 0x80;
@@ -248,7 +350,7 @@ mod tests {
   }
 
   #[test]
-  fn test_add_wrong_output_fails() {
+  fn test_binary_arith_wrong_output_fails() {
     let a = u256_bytes(100);
     let b = u256_bytes(200);
     let wrong = u256_bytes(999); // incorrect result
@@ -291,7 +393,44 @@ mod tests {
   }
 
   #[test]
-  fn test_transaction_add_chain() {
+  fn test_transition_semantic_and_proofrow_verification() {
+    let a = u256_bytes(12345);
+    let b = u256_bytes(67890);
+    let c = u256_bytes(80235);
+
+    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
+    let itp = InstructionTransitionProof {
+      opcode: opcode::ADD,
+      pc: 0,
+      stack_inputs: vec![a, b],
+      stack_outputs: vec![c],
+      semantic_proof: Some(proof),
+    };
+
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_transition_semantic_or_proofrow_fail_on_wrong_output() {
+    let a = u256_bytes(100);
+    let b = u256_bytes(200);
+    let wrong = u256_bytes(999);
+
+    let maybe_proof = prove_instruction(opcode::ADD, &[a, b], &[wrong]);
+    if let Some(proof) = maybe_proof {
+      let itp = InstructionTransitionProof {
+        opcode: opcode::ADD,
+        pc: 0,
+        stack_inputs: vec![a, b],
+        stack_outputs: vec![wrong],
+        semantic_proof: Some(proof),
+      };
+      assert!(!verify_proof_with_rows(&itp));
+    }
+  }
+
+  #[test]
+  fn test_transaction_arithmetic_chain() {
     let a = u256_bytes(100);
     let b = u256_bytes(200);
     let c = u256_bytes(300);

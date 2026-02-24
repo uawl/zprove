@@ -1,29 +1,39 @@
-//! Circle STARK proof generation and verification for EVM state transitions.
+//! Circle STARK proof generation and verification for semantic proof rows.
 //!
-//! Arithmetizes the byte-level semantic proofs into an AIR over the Mersenne-31
-//! field, then proves correctness using the Plonky3 Circle STARK framework.
+//! Stage A/B overview:
+//! - Stage 1 proves inferred-WFF semantic constraints over compiled `ProofRow`s.
+//! - Stage 2 proves inferred WFF equals public WFF via serialized equality trace.
 //!
-//! # Architecture
-//!
-//! The AIR has 32 rows (one per byte position) with columns:
-//!
-//! | Column    | Description                                    |
-//! |-----------|------------------------------------------------|
-//! | `a`       | Byte from first operand                        |
-//! | `b`       | Byte from second operand                       |
-//! | `carry_in`| Carry input from previous byte (0 or 1)        |
-//! | `sum`     | `(a + b + carry_in) mod 256`                   |
-//! | `carry_out`| `(a + b + carry_in) / 256`  (0 or 1)          |
-//! | `expected`| Expected output byte                           |
-//!
-//! Constraints:
-//!   1. `a + b + carry_in = sum + 256 * carry_out`
-//!   2. `sum = expected`
-//!   3. `carry_out ∈ {0, 1}`
-//!   4. Transition: `carry_in[next] = carry_out[current]`
-//!   5. First row: `carry_in = 0`
+//! The current Stage-1 semantic AIR kernel enforces the byte-add equality rows
+//! (`OP_BYTE_ADD_EQ`) embedded in `ProofRow` encoding.
 
-use core::borrow::Borrow;
+use crate::sementic_proof::{
+  NUM_PROOF_COLS,
+  OP_AND_INTRO,
+  OP_BYTE_ADD_CARRY_EQ,
+  OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+  OP_BYTE_ADD_EQ,
+  OP_BYTE_ADD_THIRD_CONGRUENCE,
+  OP_BYTE_AND_EQ,
+  OP_BYTE_MUL_HIGH_EQ,
+  OP_BYTE_MUL_LOW_EQ,
+  OP_BYTE_OR_EQ,
+  OP_BYTE_XOR_EQ,
+  OP_BYTE_XOR,
+  OP_EQ_REFL,
+  OP_EQ_SYM,
+  OP_EQ_TRANS,
+  OP_ITE_FALSE_EQ,
+  OP_ITE_TRUE_EQ,
+  infer_proof,
+  Proof,
+  ProofRow,
+  Term,
+  RET_WFF_EQ,
+  WFF,
+  compile_proof,
+  verify_compiled,
+};
 
 use p3_air::{Air, AirBuilder, BaseAir};
 use p3_challenger::{HashChallenger, SerializingChallenger32};
@@ -57,139 +67,162 @@ type Challenger = SerializingChallenger32<Val, HashChallenger<u8, ByteHash, 32>>
 pub type Pcs = CirclePcs<Val, ValMmcs, ChallengeMmcs>;
 pub type CircleStarkConfig = StarkConfig<Pcs, Challenge, Challenger>;
 
-// ============================================================
-// Trace row layout
-// ============================================================
+pub type CircleStarkProof = p3_uni_stark::Proof<CircleStarkConfig>;
+pub type CircleStarkVerifyResult = Result<(), p3_uni_stark::VerificationError<p3_uni_stark::PcsError<CircleStarkConfig>>>;
 
-/// Number of columns in the byte-add AIR.
-pub const NUM_ADD_COLS: usize = 6;
+// `ProofRow` column indices (same order as semantic_proof::ProofRow fields).
+const COL_OP: usize = 0;
+const COL_SCALAR0: usize = 1;
+const COL_SCALAR1: usize = 2;
+const COL_SCALAR2: usize = 3;
+const COL_ARG0: usize = 4;
+const COL_ARG1: usize = 5;
+const COL_ARG2: usize = 6;
+const COL_VALUE: usize = 7;
+const COL_RET_TY: usize = 8;
 
-/// Trace row for byte-level addition with carry chain.
-#[repr(C)]
-#[derive(Clone, Debug)]
-pub struct ByteAddRow<F> {
-  /// Byte from operand `a`.
-  pub a: F,
-  /// Byte from operand `b`.
-  pub b: F,
-  /// Carry input (0 or 1).
-  pub carry_in: F,
-  /// `(a + b + carry_in) mod 256`.
-  pub sum: F,
-  /// `(a + b + carry_in) / 256` — 0 or 1.
-  pub carry_out: F,
-  /// Expected output byte.
-  pub expected: F,
+const MATCH_COL_INFERRED: usize = 0;
+const MATCH_COL_EXPECTED: usize = 1;
+const NUM_WFF_MATCH_COLS: usize = 2;
+
+pub struct StageAProof {
+  pub inferred_wff_proof: CircleStarkProof,
+  pub public_wff_match_proof: CircleStarkProof,
+  expected_public_wff: WFF,
 }
 
-impl<F> Borrow<ByteAddRow<F>> for [F] {
-  fn borrow(&self) -> &ByteAddRow<F> {
-    debug_assert_eq!(self.len(), NUM_ADD_COLS);
-    let (prefix, rows, _suffix) = unsafe { self.align_to::<ByteAddRow<F>>() };
-    debug_assert!(prefix.is_empty());
-    &rows[0]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageARowClass {
+  SemanticConstraint,
+  Structural,
+}
+
+fn route_stage_a_row_op(op: u32) -> Result<StageARowClass, String> {
+  match op {
+    OP_BYTE_ADD_EQ => Ok(StageARowClass::SemanticConstraint),
+    op if op <= OP_BYTE_XOR => Ok(StageARowClass::Structural),
+    OP_AND_INTRO
+    | OP_EQ_TRANS
+    | OP_EQ_REFL
+    | OP_EQ_SYM
+    | OP_BYTE_ADD_CARRY_EQ
+    | OP_BYTE_ADD_THIRD_CONGRUENCE
+    | OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE
+    | OP_BYTE_MUL_LOW_EQ
+    | OP_BYTE_MUL_HIGH_EQ
+    | OP_BYTE_AND_EQ
+    | OP_BYTE_OR_EQ
+    | OP_BYTE_XOR_EQ
+    | OP_ITE_TRUE_EQ
+    | OP_ITE_FALSE_EQ => Ok(StageARowClass::Structural),
+    other => Err(format!("unsupported Stage A proof-row op: {other}")),
   }
+}
+
+fn has_stage_a_semantic_rows(rows: &[ProofRow]) -> Result<bool, String> {
+  let mut has_semantic = false;
+  for row in rows {
+    match route_stage_a_row_op(row.op)? {
+      StageARowClass::SemanticConstraint => has_semantic = true,
+      StageARowClass::Structural => {}
+    }
+  }
+  Ok(has_semantic)
 }
 
 // ============================================================
 // AIR definition
 // ============================================================
 
-/// AIR for 256-bit (32-byte) addition with ripple-carry.
+/// AIR for Stage-1 semantic constraints using `ProofRow` trace columns.
 ///
-/// Proves that `a[0..32] + b[0..32] = expected[0..32]` (mod 2^256)
-/// using a 32-row trace with byte-level carry propagation.
-pub struct ByteAddAir;
+/// The current kernel verifies byte-add equality constraints encoded in
+/// `OP_BYTE_ADD_EQ` rows.
+pub struct StageASemanticAir;
 
-impl<F> BaseAir<F> for ByteAddAir {
+impl<F> BaseAir<F> for StageASemanticAir {
   fn width(&self) -> usize {
-    NUM_ADD_COLS
+    NUM_PROOF_COLS
   }
 }
 
-impl<AB: AirBuilder> Air<AB> for ByteAddAir {
+/// AIR for checking inferred WFF bytes equal expected WFF bytes.
+///
+/// Each row compares one byte:
+/// - inferred byte from compiled `OP_BYTE_ADD_EQ` rows
+/// - expected byte from transition output
+pub struct WffMatchAir;
+
+impl<F> BaseAir<F> for WffMatchAir {
+  fn width(&self) -> usize {
+    NUM_WFF_MATCH_COLS
+  }
+}
+
+impl<AB: AirBuilder> Air<AB> for WffMatchAir {
+  fn eval(&self, builder: &mut AB) {
+    let main = builder.main();
+    let local = main.row_slice(0).expect("empty trace");
+    let local = &*local;
+
+    builder.assert_eq(local[MATCH_COL_INFERRED].clone(), local[MATCH_COL_EXPECTED].clone());
+  }
+}
+
+impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
   fn eval(&self, builder: &mut AB) {
     let main = builder.main();
     let local = main.row_slice(0).expect("empty trace");
     let next = main.row_slice(1).expect("single-row trace");
 
-    let local: &ByteAddRow<AB::Var> = (*local).borrow();
-    let next: &ByteAddRow<AB::Var> = (*next).borrow();
+    let local = &*local;
+    let next = &*next;
+
+    let op_const = AB::Expr::from_u16(OP_BYTE_ADD_EQ as u16);
+    let ret_ty_const = AB::Expr::from_u16(RET_WFF_EQ as u16);
 
     let c256 = AB::Expr::from_u16(256);
+
+    let a = local[COL_SCALAR0].clone();
+    let b = local[COL_SCALAR1].clone();
+    let carry_out = local[COL_SCALAR2].clone();
+    let carry_in = local[COL_ARG0].clone();
+    let expected = local[COL_ARG1].clone();
+    let sum = local[COL_VALUE].clone();
 
     // ── Constraint 1: a + b + carry_in = sum + 256 * carry_out ──
     // Equivalently: a + b + carry_in - sum - 256 * carry_out = 0
     builder.assert_zero(
-      local.a.clone().into()
-        + local.b.clone().into()
-        + local.carry_in.clone().into()
-        - local.sum.clone().into()
-        - c256 * local.carry_out.clone().into(),
+      a.clone().into()
+        + b.clone().into()
+        + carry_in.clone().into()
+        - sum.clone().into()
+        - c256 * carry_out.clone().into(),
     );
 
     // ── Constraint 2: sum = expected ──
-    builder.assert_eq(local.sum.clone(), local.expected.clone());
+    builder.assert_eq(sum.clone(), expected.clone());
 
     // ── Constraint 3: carry_out ∈ {0, 1} ──
-    builder.assert_bool(local.carry_out.clone());
+    builder.assert_bool(carry_out.clone());
 
     // ── Constraint 4: carry_in ∈ {0, 1} ──
-    builder.assert_bool(local.carry_in.clone());
+    builder.assert_bool(carry_in.clone());
 
-    // ── Constraint 5: First row carry_in = 0 ──
-    builder.when_first_row().assert_zero(local.carry_in.clone());
+    // ── Constraint 5: fixed opcode/ret-ty tags for ProofRow encoding ──
+    builder.assert_zero(local[COL_OP].clone().into() - op_const);
+    builder.assert_zero(local[COL_RET_TY].clone().into() - ret_ty_const);
+    builder.assert_zero(local[COL_ARG2].clone());
 
-    // ── Constraint 6: Transition carry chain ──
+    // ── Constraint 6: First row carry_in = 0 ──
+    builder.when_first_row().assert_zero(carry_in.clone());
+
+    // ── Constraint 7: Transition carry chain ──
     // next.carry_in = local.carry_out
     builder
       .when_transition()
-      .assert_eq(next.carry_in.clone(), local.carry_out.clone());
+      .assert_eq(next[COL_ARG0].clone(), carry_out.clone());
   }
-}
-
-// ============================================================
-// Trace generation
-// ============================================================
-
-/// Generate the execution trace for a 32-byte addition.
-///
-/// `a` and `b` are 32-byte big-endian inputs.
-/// `expected` is the 32-byte big-endian expected result.
-///
-/// The trace has 32 rows, processing from LSB (byte 31) to MSB (byte 0).
-pub fn generate_add_trace(a: &[u8; 32], b: &[u8; 32], expected: &[u8; 32]) -> RowMajorMatrix<Val> {
-  let n_rows = 32usize;
-  let mut trace = RowMajorMatrix::new(Val::zero_vec(n_rows * NUM_ADD_COLS), NUM_ADD_COLS);
-
-  let (prefix, rows, _suffix) = unsafe { trace.values.align_to_mut::<ByteAddRow<Val>>() };
-  debug_assert!(prefix.is_empty());
-  assert_eq!(rows.len(), n_rows);
-
-  let mut carry: u16 = 0;
-
-  // Row 0 = byte 31 (LSB), Row 31 = byte 0 (MSB)
-  for row in 0..32 {
-    let byte_idx = 31 - row; // big-endian → LSB first
-    let av = a[byte_idx] as u16;
-    let bv = b[byte_idx] as u16;
-    let total = av + bv + carry;
-    let sum = total & 0xFF;
-    let carry_out = total >> 8;
-
-    rows[row] = ByteAddRow {
-      a: Val::from_u16(av as u16),
-      b: Val::from_u16(bv as u16),
-      carry_in: Val::from_u16(carry as u16),
-      sum: Val::from_u16(sum as u16),
-      carry_out: Val::from_u16(carry_out as u16),
-      expected: Val::from_u16(expected[byte_idx] as u16),
-    };
-
-    carry = carry_out;
-  }
-
-  trace
 }
 
 // ============================================================
@@ -227,26 +260,343 @@ pub fn make_circle_config() -> CircleStarkConfig {
 // Prove & Verify
 // ============================================================
 
-/// Generate a Circle STARK proof for a 256-bit addition.
+/// Build a Stage-A semantic trace (ProofRow layout) from compiled proof rows.
 ///
-/// Returns the serialized proof.
-pub fn prove_add_stark(
-  a: &[u8; 32],
-  b: &[u8; 32],
-  expected: &[u8; 32],
-) -> p3_uni_stark::Proof<CircleStarkConfig> {
-  let config = make_circle_config();
-  let trace = generate_add_trace(a, b, expected);
+/// Routing policy by `row.op`:
+/// - semantic kernel rows are included,
+/// - structural rows are ignored,
+/// - unknown rows are rejected.
+pub fn generate_stage_a_semantic_trace(rows: &[ProofRow]) -> Result<RowMajorMatrix<Val>, String> {
+  let mut semantic_rows: Vec<&ProofRow> = Vec::new();
+  for row in rows {
+    match route_stage_a_row_op(row.op)? {
+      StageARowClass::SemanticConstraint => semantic_rows.push(row),
+      StageARowClass::Structural => {}
+    }
+  }
 
-  p3_uni_stark::prove(&config, &ByteAddAir, trace, &[])
+  if semantic_rows.is_empty() {
+    return Err("no stage-a semantic rows in compiled proof".to_string());
+  }
+
+  let n_rows = semantic_rows.len();
+  let mut trace = RowMajorMatrix::new(Val::zero_vec(n_rows * NUM_PROOF_COLS), NUM_PROOF_COLS);
+
+  for (i, row) in semantic_rows.iter().enumerate() {
+    let base = i * NUM_PROOF_COLS;
+    trace.values[base + COL_OP] = Val::from_u16(row.op as u16);
+    trace.values[base + COL_SCALAR0] = Val::from_u16(row.scalar0 as u16);
+    trace.values[base + COL_SCALAR1] = Val::from_u16(row.scalar1 as u16);
+    trace.values[base + COL_SCALAR2] = Val::from_u16(row.scalar2 as u16);
+    trace.values[base + COL_ARG0] = Val::from_u16(row.arg0 as u16);
+    trace.values[base + COL_ARG1] = Val::from_u16(row.arg1 as u16);
+    trace.values[base + COL_ARG2] = Val::from_u16(row.arg2 as u16);
+    trace.values[base + COL_VALUE] = Val::from_u16(row.value as u16);
+    trace.values[base + COL_RET_TY] = Val::from_u16(row.ret_ty as u16);
+  }
+
+  Ok(trace)
 }
 
-/// Verify a Circle STARK proof for a 256-bit addition.
-pub fn verify_add_stark(
-  proof: &p3_uni_stark::Proof<CircleStarkConfig>,
-) -> Result<(), p3_uni_stark::VerificationError<p3_uni_stark::PcsError<CircleStarkConfig>>> {
+const WFF_TAG_EQUAL: u8 = 1;
+const WFF_TAG_AND: u8 = 2;
+
+const TERM_TAG_BOOL: u8 = 1;
+const TERM_TAG_NOT: u8 = 2;
+const TERM_TAG_AND: u8 = 3;
+const TERM_TAG_OR: u8 = 4;
+const TERM_TAG_XOR: u8 = 5;
+const TERM_TAG_ITE: u8 = 6;
+const TERM_TAG_BYTE: u8 = 7;
+const TERM_TAG_BYTE_ADD: u8 = 8;
+const TERM_TAG_BYTE_ADD_CARRY: u8 = 9;
+const TERM_TAG_BYTE_MUL_LOW: u8 = 10;
+const TERM_TAG_BYTE_MUL_HIGH: u8 = 11;
+const TERM_TAG_BYTE_AND: u8 = 12;
+const TERM_TAG_BYTE_OR: u8 = 13;
+const TERM_TAG_BYTE_XOR: u8 = 14;
+
+fn serialize_term(term: &Term, out: &mut Vec<u8>) {
+  match term {
+    Term::Bool(v) => {
+      out.push(TERM_TAG_BOOL);
+      out.push(*v as u8);
+    }
+    Term::Not(a) => {
+      out.push(TERM_TAG_NOT);
+      serialize_term(a, out);
+    }
+    Term::And(a, b) => {
+      out.push(TERM_TAG_AND);
+      serialize_term(a, out);
+      serialize_term(b, out);
+    }
+    Term::Or(a, b) => {
+      out.push(TERM_TAG_OR);
+      serialize_term(a, out);
+      serialize_term(b, out);
+    }
+    Term::Xor(a, b) => {
+      out.push(TERM_TAG_XOR);
+      serialize_term(a, out);
+      serialize_term(b, out);
+    }
+    Term::Ite(c, a, b) => {
+      out.push(TERM_TAG_ITE);
+      serialize_term(c, out);
+      serialize_term(a, out);
+      serialize_term(b, out);
+    }
+    Term::Byte(v) => {
+      out.push(TERM_TAG_BYTE);
+      out.push(*v);
+    }
+    Term::ByteAdd(a, b, c) => {
+      out.push(TERM_TAG_BYTE_ADD);
+      serialize_term(a, out);
+      serialize_term(b, out);
+      serialize_term(c, out);
+    }
+    Term::ByteAddCarry(a, b, c) => {
+      out.push(TERM_TAG_BYTE_ADD_CARRY);
+      serialize_term(a, out);
+      serialize_term(b, out);
+      serialize_term(c, out);
+    }
+    Term::ByteMulLow(a, b) => {
+      out.push(TERM_TAG_BYTE_MUL_LOW);
+      serialize_term(a, out);
+      serialize_term(b, out);
+    }
+    Term::ByteMulHigh(a, b) => {
+      out.push(TERM_TAG_BYTE_MUL_HIGH);
+      serialize_term(a, out);
+      serialize_term(b, out);
+    }
+    Term::ByteAnd(a, b) => {
+      out.push(TERM_TAG_BYTE_AND);
+      serialize_term(a, out);
+      serialize_term(b, out);
+    }
+    Term::ByteOr(a, b) => {
+      out.push(TERM_TAG_BYTE_OR);
+      serialize_term(a, out);
+      serialize_term(b, out);
+    }
+    Term::ByteXor(a, b) => {
+      out.push(TERM_TAG_BYTE_XOR);
+      serialize_term(a, out);
+      serialize_term(b, out);
+    }
+  }
+}
+
+fn serialize_wff(wff: &WFF, out: &mut Vec<u8>) {
+  match wff {
+    WFF::Equal(lhs, rhs) => {
+      out.push(WFF_TAG_EQUAL);
+      serialize_term(lhs, out);
+      serialize_term(rhs, out);
+    }
+    WFF::And(a, b) => {
+      out.push(WFF_TAG_AND);
+      serialize_wff(a, out);
+      serialize_wff(b, out);
+    }
+  }
+}
+
+fn serialize_wff_bytes(wff: &WFF) -> Vec<u8> {
+  let mut out = Vec::new();
+  serialize_wff(wff, &mut out);
+  out
+}
+
+/// Build a WFF-match trace from inferred/public WFF byte serializations.
+///
+/// This is the second ZKP stage:
+/// - stage 1 proves inferred WFF rows are valid (`OP_BYTE_ADD_EQ` constraints)
+/// - stage 2 proves inferred WFF serialization equals public WFF serialization.
+pub fn generate_wff_match_trace_from_wffs(
+  inferred_wff: &WFF,
+  public_wff: &WFF,
+) -> Result<RowMajorMatrix<Val>, String> {
+  let inferred_bytes = serialize_wff_bytes(inferred_wff);
+  let expected_bytes = serialize_wff_bytes(public_wff);
+
+  if inferred_bytes.len() != expected_bytes.len() {
+    return Err(format!(
+      "serialized WFF length mismatch: inferred={} public={}",
+      inferred_bytes.len(),
+      expected_bytes.len()
+    ));
+  }
+
+  if inferred_bytes.is_empty() {
+    return Err("serialized WFF cannot be empty".to_string());
+  }
+
+  let padded_rows = inferred_bytes.len().next_power_of_two();
+  let mut trace = RowMajorMatrix::new(Val::zero_vec(padded_rows * NUM_WFF_MATCH_COLS), NUM_WFF_MATCH_COLS);
+  for row in 0..inferred_bytes.len() {
+    let base = row * NUM_WFF_MATCH_COLS;
+    trace.values[base + MATCH_COL_INFERRED] = Val::from_u16(inferred_bytes[row] as u16);
+    trace.values[base + MATCH_COL_EXPECTED] = Val::from_u16(expected_bytes[row] as u16);
+  }
+
+  for row in inferred_bytes.len()..padded_rows {
+    let base = row * NUM_WFF_MATCH_COLS;
+    trace.values[base + MATCH_COL_INFERRED] = Val::from_u16(0);
+    trace.values[base + MATCH_COL_EXPECTED] = Val::from_u16(0);
+  }
+
+  Ok(trace)
+}
+
+/// Prove compiled ProofRows using the Stage-A backend.
+pub fn prove_compiled_rows_stark(
+  rows: &[ProofRow],
+) -> Result<CircleStarkProof, String> {
+  prove_inferred_wff_stark(rows)
+}
+
+/// Stage-1 generic ZKP: prove inferred WFF validity from compiled ProofRows.
+pub fn prove_inferred_wff_stark(rows: &[ProofRow]) -> Result<CircleStarkProof, String> {
+  for row in rows {
+    let _ = route_stage_a_row_op(row.op)?;
+  }
+
+  if !has_stage_a_semantic_rows(rows)? {
+    return Err("stage-a semantic kernel unavailable for this proof-row set".to_string());
+  }
+
   let config = make_circle_config();
-  p3_uni_stark::verify(&config, &ByteAddAir, proof, &[])
+  let trace = generate_stage_a_semantic_trace(rows)?;
+  Ok(p3_uni_stark::prove(&config, &StageASemanticAir, trace, &[]))
+}
+
+/// Verify stage-1 inferred-WFF proof.
+pub fn verify_inferred_wff_stark(proof: &CircleStarkProof) -> CircleStarkVerifyResult {
+  let config = make_circle_config();
+  p3_uni_stark::verify(&config, &StageASemanticAir, proof, &[])
+}
+
+/// Convenience helper: prove and verify compiled rows in one call.
+pub fn prove_and_verify_compiled_rows_stark(rows: &[ProofRow]) -> bool {
+  prove_and_verify_inferred_wff_stark(rows)
+}
+
+/// Stage-1 generic convenience helper.
+pub fn prove_and_verify_inferred_wff_stark(rows: &[ProofRow]) -> bool {
+  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prove_compiled_rows_stark(rows)));
+  let proof = match proved {
+    Ok(Ok(proof)) => proof,
+    Ok(Err(_)) => return false,
+    Err(_) => return false,
+  };
+  match verify_inferred_wff_stark(&proof) {
+    Ok(()) => true,
+    Err(_) => false,
+  }
+}
+
+/// Prove stage-2 WFF match from compiled rows and expected output bytes.
+pub fn prove_wff_match_stark(
+  private_pi: &Proof,
+  public_wff: &WFF,
+) -> Result<CircleStarkProof, String> {
+  prove_expected_wff_match_stark(private_pi, public_wff)
+}
+
+/// Stage-2 generic ZKP: prove inferred WFF equals externally expected WFF.
+pub fn prove_expected_wff_match_stark(
+  private_pi: &Proof,
+  public_wff: &WFF,
+) -> Result<CircleStarkProof, String> {
+  let inferred_wff = infer_proof(private_pi)
+    .map_err(|err| format!("failed to infer WFF from private proof: {err}"))?;
+
+  let rows = compile_proof(private_pi);
+  for row in rows {
+    let _ = route_stage_a_row_op(row.op)?;
+  }
+
+  let config = make_circle_config();
+  let trace = generate_wff_match_trace_from_wffs(&inferred_wff, public_wff)?;
+  Ok(p3_uni_stark::prove(&config, &WffMatchAir, trace, &[]))
+}
+
+/// Verify stage-2 WFF match proof.
+pub fn verify_wff_match_stark(proof: &CircleStarkProof) -> CircleStarkVerifyResult {
+  let config = make_circle_config();
+  p3_uni_stark::verify(&config, &WffMatchAir, proof, &[])
+}
+
+/// Convenience helper for stage-2 prove+verify.
+pub fn prove_and_verify_wff_match_stark(private_pi: &Proof, public_wff: &WFF) -> bool {
+  prove_and_verify_expected_wff_match_stark(private_pi, public_wff)
+}
+
+/// Stage-2 generic convenience helper.
+pub fn prove_and_verify_expected_wff_match_stark(private_pi: &Proof, public_wff: &WFF) -> bool {
+  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    prove_expected_wff_match_stark(private_pi, public_wff)
+  }));
+  let proof = match proved {
+    Ok(Ok(proof)) => proof,
+    Ok(Err(_)) => return false,
+    Err(_) => return false,
+  };
+  match verify_wff_match_stark(&proof) {
+    Ok(()) => true,
+    Err(_) => false,
+  }
+}
+
+/// Stage A: public input = `wff_i`, private input = `pi_i`.
+///
+/// Produces:
+/// 1) proof that `pi_i` is a valid derivation (`infer_wff`), and
+/// 2) proof that inferred WFF equals public `wff_i`.
+pub fn prove_stage_a(public_wff: &WFF, private_pi: &Proof) -> Result<StageAProof, String> {
+  let rows = compile_proof(private_pi);
+
+  verify_compiled(&rows).map_err(|err| format!("compiled proof validation failed: {err}"))?;
+  let inferred_wff = infer_proof(private_pi).map_err(|err| format!("infer_proof failed: {err}"))?;
+  if inferred_wff != *public_wff {
+    return Err("inferred WFF does not match public WFF".to_string());
+  }
+
+  let inferred_wff_proof = prove_inferred_wff_stark(&rows)?;
+  let public_wff_match_proof = prove_expected_wff_match_stark(private_pi, public_wff)?;
+
+  Ok(StageAProof {
+    inferred_wff_proof,
+    public_wff_match_proof,
+    expected_public_wff: public_wff.clone(),
+  })
+}
+
+pub fn verify_stage_a(public_wff: &WFF, stage_a_proof: &StageAProof) -> bool {
+  if *public_wff != stage_a_proof.expected_public_wff {
+    return false;
+  }
+
+  let stage1_ok = verify_inferred_wff_stark(&stage_a_proof.inferred_wff_proof).is_ok();
+
+  stage1_ok && verify_wff_match_stark(&stage_a_proof.public_wff_match_proof).is_ok()
+}
+
+pub fn prove_and_verify_stage_a(public_wff: &WFF, private_pi: &Proof) -> bool {
+  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    prove_stage_a(public_wff, private_pi)
+  }));
+  let stage_a = match proved {
+    Ok(Ok(proof)) => proof,
+    Ok(Err(_)) => return false,
+    Err(_) => return false,
+  };
+  verify_stage_a(public_wff, &stage_a)
 }
 
 // ============================================================
@@ -256,6 +606,7 @@ pub fn verify_add_stark(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::sementic_proof::{compile_proof, infer_proof, prove_add, wff_add};
 
   fn u256_bytes(val: u128) -> [u8; 32] {
     let mut b = [0u8; 32];
@@ -275,55 +626,131 @@ mod tests {
   }
 
   #[test]
-  fn test_trace_generation() {
+  fn test_stage_a_semantic_trace_generation() {
     let a = u256_bytes(1000);
     let b = u256_bytes(2000);
     let c = compute_add(&a, &b);
-    let trace = generate_add_trace(&a, &b, &c);
-    assert_eq!(trace.width(), NUM_ADD_COLS);
+    let semantic = prove_add(&a, &b, &c);
+    let rows = compile_proof(&semantic);
+    let trace = generate_stage_a_semantic_trace(&rows).expect("semantic trace generation should succeed");
+    assert_eq!(trace.width(), NUM_PROOF_COLS);
     assert_eq!(trace.height(), 32);
   }
 
   #[test]
-  fn test_prove_and_verify_add_simple() {
+  fn test_prove_and_verify_stage1_simple_semantic_rows() {
     let a = u256_bytes(1000);
     let b = u256_bytes(2000);
     let c = compute_add(&a, &b);
 
-    let proof = prove_add_stark(&a, &b, &c);
-    verify_add_stark(&proof).expect("verification failed");
+    let semantic = prove_add(&a, &b, &c);
+    let rows = compile_proof(&semantic);
+    let proof = prove_inferred_wff_stark(&rows).expect("stage-1 proof should succeed");
+    verify_inferred_wff_stark(&proof).expect("stage-1 verification failed");
   }
 
   #[test]
-  fn test_prove_and_verify_add_overflow() {
+  fn test_prove_and_verify_stage1_overflow_semantic_rows() {
     let a = [0xFF; 32];
     let mut b = [0u8; 32];
     b[31] = 1;
     let c = compute_add(&a, &b);
 
-    let proof = prove_add_stark(&a, &b, &c);
-    verify_add_stark(&proof).expect("verification failed");
+    let semantic = prove_add(&a, &b, &c);
+    let rows = compile_proof(&semantic);
+    let proof = prove_inferred_wff_stark(&rows).expect("stage-1 proof should succeed");
+    verify_inferred_wff_stark(&proof).expect("stage-1 verification failed");
   }
 
   #[test]
-  fn test_prove_and_verify_add_large() {
+  fn test_prove_and_verify_stage1_large_semantic_rows() {
     let mut a = [0xABu8; 32];
     a[0] = 0x7F;
     let mut b = [0xCDu8; 32];
     b[0] = 0x3E;
     let c = compute_add(&a, &b);
 
-    let proof = prove_add_stark(&a, &b, &c);
-    verify_add_stark(&proof).expect("verification failed");
+    let semantic = prove_add(&a, &b, &c);
+    let rows = compile_proof(&semantic);
+    let proof = prove_inferred_wff_stark(&rows).expect("stage-1 proof should succeed");
+    verify_inferred_wff_stark(&proof).expect("stage-1 verification failed");
   }
 
   #[test]
-  fn test_prove_and_verify_add_zero() {
+  fn test_prove_and_verify_stage1_zero_semantic_rows() {
     let a = [0u8; 32];
     let b = [0u8; 32];
     let c = [0u8; 32];
 
-    let proof = prove_add_stark(&a, &b, &c);
-    verify_add_stark(&proof).expect("verification failed");
+    let semantic = prove_add(&a, &b, &c);
+    let rows = compile_proof(&semantic);
+    let proof = prove_inferred_wff_stark(&rows).expect("stage-1 proof should succeed");
+    verify_inferred_wff_stark(&proof).expect("stage-1 verification failed");
+  }
+
+  #[test]
+  fn test_prove_and_verify_stage1_from_compiled_rows() {
+    let a = u256_bytes(1234);
+    let b = u256_bytes(5678);
+    let c = compute_add(&a, &b);
+
+    let semantic = prove_add(&a, &b, &c);
+    let rows = compile_proof(&semantic);
+    assert!(prove_and_verify_compiled_rows_stark(&rows));
+  }
+
+  #[test]
+  fn test_prove_and_verify_stage2_wff_match() {
+    let a = u256_bytes(1111);
+    let b = u256_bytes(2222);
+    let c = compute_add(&a, &b);
+
+    let semantic = prove_add(&a, &b, &c);
+    let public_wff = wff_add(&a, &b, &c);
+    assert!(prove_and_verify_wff_match_stark(&semantic, &public_wff));
+  }
+
+  #[test]
+  fn test_wff_match_fails_on_wrong_output() {
+    let a = u256_bytes(100);
+    let b = u256_bytes(200);
+    let c = compute_add(&a, &b);
+    let mut wrong = c;
+    wrong[31] ^= 1;
+
+    let semantic = prove_add(&a, &b, &c);
+    let wrong_public_wff = wff_add(&a, &b, &wrong);
+    assert!(!prove_and_verify_wff_match_stark(&semantic, &wrong_public_wff));
+  }
+
+  #[test]
+  fn test_stage_a_success() {
+    let a = u256_bytes(777);
+    let b = u256_bytes(888);
+    let c = compute_add(&a, &b);
+
+    let public_wff = wff_add(&a, &b, &c);
+    let private_pi = prove_add(&a, &b, &c);
+    assert!(prove_and_verify_stage_a(&public_wff, &private_pi));
+  }
+
+  #[test]
+  fn test_stage_a_fails_on_wrong_public_wff() {
+    let a = u256_bytes(10);
+    let b = u256_bytes(20);
+    let c = compute_add(&a, &b);
+    let mut wrong = c;
+    wrong[31] ^= 1;
+
+    let private_pi = prove_add(&a, &b, &c);
+    let wrong_public_wff = wff_add(&a, &b, &wrong);
+    assert!(!prove_and_verify_stage_a(&wrong_public_wff, &private_pi));
+  }
+
+  #[test]
+  fn test_stage_a_supports_non_add_infer_path() {
+    let private_pi = Proof::EqRefl(Term::Byte(42));
+    let public_wff = infer_proof(&private_pi).expect("infer_proof should succeed");
+    assert!(!prove_and_verify_stage_a(&public_wff, &private_pi));
   }
 }
