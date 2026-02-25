@@ -1,7 +1,10 @@
 use crate::transition::{
-  InstructionTransitionProof, TransactionProof, opcode_input_count, opcode_output_count,
-  prove_instruction, verify_proof, verify_proof_with_rows,
+  InstructionTransitionProof, InstructionTransitionStatement, TransactionProof, VmState,
+  opcode_input_count, opcode_output_count, prove_instruction,
+  prove_instruction_zk_receipts_parallel, verify_instruction_zk_receipt, verify_proof,
+  verify_proof_with_rows,
 };
+use revm::bytecode::opcode;
 use revm::{
   Context, InspectEvm, Inspector, MainBuilder, MainContext,
   context::TxEnv,
@@ -9,13 +12,15 @@ use revm::{
   database_interface::{BENCH_CALLER, BENCH_TARGET},
   interpreter::interpreter_types::StackTr,
   interpreter::{Interpreter, InterpreterTypes, interpreter_types::Jumps},
-  state::Bytecode,
   primitives::{Address, Bytes, TxKind, U256},
+  state::Bytecode,
 };
 
 // ============================================================
 // U256 ↔ [u8; 32] helpers
 // ============================================================
+
+const DEFAULT_ZKP_BATCH_CAPACITY: usize = 256;
 
 fn u256_to_bytes(val: U256) -> [u8; 32] {
   val.to_be_bytes::<32>()
@@ -151,13 +156,54 @@ pub fn execute_and_prove_with_zkp(
   data: Bytes,
   value: U256,
 ) -> Result<TransactionProof, String> {
-  execute_and_prove_with_rows(caller, transact_to, data, value)
+  execute_and_prove_with_zkp_parallel(caller, transact_to, data, value, 0)
+}
+
+/// Execute an EVM transaction and verify ZKP receipts for supported semantic opcodes.
+///
+/// ZKP receipt proving is parallelized with a lock-free queue worker pool.
+/// `worker_count = 0` means auto-select from available CPU parallelism.
+pub fn execute_and_prove_with_zkp_parallel(
+  caller: Address,
+  transact_to: Address,
+  data: Bytes,
+  value: U256,
+  worker_count: usize,
+) -> Result<TransactionProof, String> {
+  execute_and_prove_with_zkp_parallel_batched(
+    caller,
+    transact_to,
+    data,
+    value,
+    worker_count,
+    DEFAULT_ZKP_BATCH_CAPACITY,
+  )
+}
+
+/// Execute an EVM transaction and verify ZKP receipts in buffered parallel batches.
+///
+/// Steps are accumulated in memory and flushed to proving when `batch_capacity`
+/// is reached, then verified on CPU.
+pub fn execute_and_prove_with_zkp_parallel_batched(
+  caller: Address,
+  transact_to: Address,
+  data: Bytes,
+  value: U256,
+  worker_count: usize,
+  batch_capacity: usize,
+) -> Result<TransactionProof, String> {
+  let proof = execute_and_prove(caller, transact_to, data, value)?;
+  verify_transaction_proof_with_zkp_parallel(&proof, worker_count, batch_capacity)?;
+  Ok(proof)
 }
 
 fn verify_transaction_proof(proof: &TransactionProof) -> Result<(), String> {
   for (i, step) in proof.steps.iter().enumerate() {
     if !verify_proof(step) {
-      return Err(format!("proof verification failed at step {i} (opcode 0x{:02x})", step.opcode));
+      return Err(format!(
+        "proof verification failed at step {i} (opcode 0x{:02x})",
+        step.opcode
+      ));
     }
     if !verify_proof_with_rows(step) {
       return Err(format!(
@@ -166,6 +212,94 @@ fn verify_transaction_proof(proof: &TransactionProof) -> Result<(), String> {
       ));
     }
   }
+  Ok(())
+}
+
+fn supports_zkp_receipt(op: u8) -> bool {
+  matches!(
+    op,
+    opcode::ADD
+      | opcode::SUB
+      | opcode::MUL
+      | opcode::DIV
+      | opcode::MOD
+      | opcode::SDIV
+      | opcode::SMOD
+      | opcode::AND
+      | opcode::OR
+      | opcode::XOR
+      | opcode::NOT
+  )
+}
+
+fn statement_from_step(step: &InstructionTransitionProof) -> InstructionTransitionStatement {
+  InstructionTransitionStatement {
+    opcode: step.opcode,
+    s_i: VmState {
+      opcode: step.opcode,
+      pc: step.pc,
+      sp: step.stack_inputs.len(),
+      stack: step.stack_inputs.clone(),
+      memory_root: [0u8; 32],
+    },
+    s_next: VmState {
+      opcode: step.opcode,
+      pc: step.pc + 1,
+      sp: step.stack_outputs.len(),
+      stack: step.stack_outputs.clone(),
+      memory_root: [0u8; 32],
+    },
+    accesses: Vec::new(),
+  }
+}
+
+fn flush_and_verify_zkp_batch(
+  statements: &mut Vec<InstructionTransitionStatement>,
+  steps: &mut Vec<InstructionTransitionProof>,
+  worker_count: usize,
+) -> Result<(), String> {
+  if steps.is_empty() {
+    return Ok(());
+  }
+
+  let proving_steps = std::mem::take(steps);
+  let batch_statements = std::mem::take(statements);
+  let receipts = prove_instruction_zk_receipts_parallel(proving_steps, worker_count)?;
+  for (local_idx, (statement, receipt)) in batch_statements.iter().zip(receipts.iter()).enumerate() {
+    if !verify_instruction_zk_receipt(statement, receipt) {
+      return Err(format!(
+        "zkp receipt verification failed at batched item {local_idx} (opcode 0x{:02x})",
+        statement.opcode
+      ));
+    }
+  }
+
+  Ok(())
+}
+
+fn verify_transaction_proof_with_zkp_parallel(
+  proof: &TransactionProof,
+  worker_count: usize,
+  batch_capacity: usize,
+) -> Result<(), String> {
+  verify_transaction_proof(proof)?;
+
+  let cap = batch_capacity.max(1);
+  let mut statements = Vec::with_capacity(cap);
+  let mut steps = Vec::with_capacity(cap);
+
+  for step in &proof.steps {
+    if step.semantic_proof.is_some() && supports_zkp_receipt(step.opcode) {
+      statements.push(statement_from_step(step));
+      steps.push(step.clone());
+      if steps.len() >= cap {
+        flush_and_verify_zkp_batch(&mut statements, &mut steps, worker_count)?;
+      }
+    }
+  }
+
+  flush_and_verify_zkp_batch(&mut statements, &mut steps, worker_count)?;
+
   Ok(())
 }
 
@@ -211,5 +345,37 @@ pub fn execute_bytecode_and_prove(
 ) -> Result<TransactionProof, String> {
   let proof = execute_bytecode_trace(bytecode, data, value)?;
   verify_transaction_proof(&proof)?;
+  Ok(proof)
+}
+
+/// Execute provided EVM bytecode and verify ZKP receipts for supported opcodes.
+///
+/// ZKP receipt proving is parallelized with a lock-free queue worker pool.
+/// `worker_count = 0` means auto-select from available CPU parallelism.
+pub fn execute_bytecode_and_prove_with_zkp_parallel(
+  bytecode: Bytes,
+  data: Bytes,
+  value: U256,
+  worker_count: usize,
+) -> Result<TransactionProof, String> {
+  execute_bytecode_and_prove_with_zkp_parallel_batched(
+    bytecode,
+    data,
+    value,
+    worker_count,
+    DEFAULT_ZKP_BATCH_CAPACITY,
+  )
+}
+
+/// Execute provided EVM bytecode and verify ZKP receipts using buffered batches.
+pub fn execute_bytecode_and_prove_with_zkp_parallel_batched(
+  bytecode: Bytes,
+  data: Bytes,
+  value: U256,
+  worker_count: usize,
+  batch_capacity: usize,
+) -> Result<TransactionProof, String> {
+  let proof = execute_bytecode_trace(bytecode, data, value)?;
+  verify_transaction_proof_with_zkp_parallel(&proof, worker_count, batch_capacity)?;
   Ok(proof)
 }

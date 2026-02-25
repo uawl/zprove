@@ -7,36 +7,31 @@
 //! The current Stage-1 semantic AIR kernel enforces the byte-add equality rows
 //! (`OP_BYTE_ADD_EQ`) embedded in `ProofRow` encoding.
 
-use crate::sementic_proof::{
-  NUM_PROOF_COLS,
-  OP_BYTE_ADD_EQ,
-  infer_proof,
-  Proof,
-  ProofRow,
-  RET_BYTE,
-  RET_WFF_AND,
-  Term,
-  RET_WFF_EQ,
-  WFF,
-  compile_proof,
-  verify_compiled,
-};
 use crate::memory_proof::{CqMemoryEvent, CqRw};
+use crate::semantic_proof::{
+  NUM_PROOF_COLS, OP_BYTE_ADD_EQ, Proof, ProofRow, RET_BYTE, RET_WFF_AND, RET_WFF_EQ, Term, WFF,
+  compile_proof, infer_proof, verify_compiled,
+};
 
-use p3_air::{Air, AirBuilder, BaseAir};
-use p3_challenger::{HashChallenger, SerializingChallenger32};
+use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir};
+use p3_challenger::{DuplexChallenger, HashChallenger, SerializingChallenger32};
 use p3_circle::CirclePcs;
 use p3_commit::ExtensionMmcs;
-use p3_field::extension::BinomialExtensionField;
 use p3_field::PrimeCharacteristicRing;
+use p3_field::extension::BinomialExtensionField;
 use p3_fri::FriParameters;
 use p3_keccak::Keccak256Hash;
 use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
-use p3_mersenne_31::Mersenne31;
 use p3_merkle_tree::MerkleTreeMmcs;
-use p3_symmetric::{CompressionFunctionFromHasher, SerializingHasher};
+use p3_mersenne_31::{Mersenne31, Poseidon2Mersenne31};
+use p3_symmetric::{
+  CompressionFunctionFromHasher, CryptographicHasher, PaddingFreeSponge, SerializingHasher,
+  TruncatedPermutation,
+};
 use p3_uni_stark::StarkConfig;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 
 // ============================================================
 // Type aliases for Circle STARK over M31
@@ -45,18 +40,68 @@ use p3_uni_stark::StarkConfig;
 pub type Val = Mersenne31;
 pub type Challenge = BinomialExtensionField<Val, 3>;
 
-type ByteHash = Keccak256Hash;
-type FieldHash = SerializingHasher<ByteHash>;
-type Compress = CompressionFunctionFromHasher<ByteHash, 2, 32>;
-type ValMmcs = MerkleTreeMmcs<Val, u8, FieldHash, Compress, 32>;
-type ChallengeMmcs = ExtensionMmcs<Val, Challenge, ValMmcs>;
-type Challenger = SerializingChallenger32<Val, HashChallenger<u8, ByteHash, 32>>;
+// ---- Poseidon2 over Mersenne31 — used as the default hash/commitment backend ----
+pub type P2Perm = Poseidon2Mersenne31<16>;
+pub type P2Hash = PaddingFreeSponge<P2Perm, 16, 8, 8>;
+pub type P2Compress = TruncatedPermutation<P2Perm, 2, 8, 16>;
+pub type P2ValMmcs = MerkleTreeMmcs<Val, Val, P2Hash, P2Compress, 8>;
+pub type P2ChallengeMmcs = ExtensionMmcs<Val, Challenge, P2ValMmcs>;
+pub type P2Challenger = DuplexChallenger<Val, P2Perm, 16, 8>;
 
-pub type Pcs = CirclePcs<Val, ValMmcs, ChallengeMmcs>;
-pub type CircleStarkConfig = StarkConfig<Pcs, Challenge, Challenger>;
+pub type Pcs = CirclePcs<Val, P2ValMmcs, P2ChallengeMmcs>;
+pub type CircleStarkConfig = StarkConfig<Pcs, Challenge, P2Challenger>;
 
 pub type CircleStarkProof = p3_uni_stark::Proof<CircleStarkConfig>;
-pub type CircleStarkVerifyResult = Result<(), p3_uni_stark::VerificationError<p3_uni_stark::PcsError<CircleStarkConfig>>>;
+pub type CircleStarkVerifyResult =
+  Result<(), p3_uni_stark::VerificationError<p3_uni_stark::PcsError<CircleStarkConfig>>>;
+
+// Keccak types kept around in case needed elsewhere (not used by default config)
+#[allow(dead_code)]
+type KeccakByteHash = Keccak256Hash;
+#[allow(dead_code)]
+type KeccakFieldHash = SerializingHasher<KeccakByteHash>;
+#[allow(dead_code)]
+type KeccakCompress = CompressionFunctionFromHasher<KeccakByteHash, 2, 32>;
+#[allow(dead_code)]
+type KeccakChallenger = SerializingChallenger32<Val, HashChallenger<u8, KeccakByteHash, 32>>;
+
+pub const RECEIPT_BIND_TAG_STACK: u32 = 1;
+pub const RECEIPT_BIND_TAG_LUT: u32 = 2;
+pub const RECEIPT_BIND_TAG_WFF: u32 = 3;
+const RECEIPT_BIND_PUBLIC_VALUES_LEN: usize = 10;
+
+fn default_receipt_bind_public_values() -> Vec<Val> {
+  vec![Val::from_u32(0); RECEIPT_BIND_PUBLIC_VALUES_LEN]
+}
+
+fn default_receipt_bind_public_values_for_tag(tag: u32) -> Vec<Val> {
+  let mut values = default_receipt_bind_public_values();
+  values[0] = Val::from_u32(tag);
+  values
+}
+
+pub fn make_receipt_binding_public_values(tag: u32, opcode: u8, expected_wff: &WFF) -> Vec<Val> {
+  let mut rng = SmallRng::seed_from_u64(0xC0DEC0DE_u64);
+  let poseidon = Poseidon2Mersenne31::<16>::new_from_rng_128(&mut rng);
+  let sponge = PaddingFreeSponge::<_, 16, 8, 8>::new(poseidon);
+
+  let mut input = Vec::new();
+  input.push(Val::from_u32(tag));
+  input.push(Val::from_u32(opcode as u32));
+  input.push(Val::from_u32(serialize_wff_bytes(expected_wff).len() as u32));
+  input.extend(
+    serialize_wff_bytes(expected_wff)
+      .into_iter()
+      .map(Val::from_u8),
+  );
+
+  let digest = sponge.hash_iter(input);
+  let mut public_values = Vec::with_capacity(RECEIPT_BIND_PUBLIC_VALUES_LEN);
+  public_values.push(Val::from_u32(tag));
+  public_values.push(Val::from_u32(opcode as u32));
+  public_values.extend_from_slice(&digest);
+  public_values
+}
 
 // ============================================================
 // Stack IR framework (offset-friendly scaffold)
@@ -90,39 +135,42 @@ const NUM_STACK_IR_COLS: usize = 10;
 
 fn row_pop_count(op: u32) -> Option<u32> {
   match op {
-    crate::sementic_proof::OP_BOOL
-    | crate::sementic_proof::OP_BYTE
-    | crate::sementic_proof::OP_BYTE_ADD_EQ
-    | crate::sementic_proof::OP_U16_ADD_EQ
-    | crate::sementic_proof::OP_BYTE_ADD_CARRY_EQ
-    | crate::sementic_proof::OP_BYTE_MUL_LOW_EQ
-    | crate::sementic_proof::OP_BYTE_MUL_HIGH_EQ
-    | crate::sementic_proof::OP_BYTE_AND_EQ
-    | crate::sementic_proof::OP_BYTE_OR_EQ
-    | crate::sementic_proof::OP_BYTE_XOR_EQ => Some(0),
+    crate::semantic_proof::OP_BOOL
+    | crate::semantic_proof::OP_BYTE
+    | crate::semantic_proof::OP_BYTE_ADD_EQ
+    | crate::semantic_proof::OP_U16_ADD_EQ
+    | crate::semantic_proof::OP_U29_ADD_EQ
+    | crate::semantic_proof::OP_U24_ADD_EQ
+    | crate::semantic_proof::OP_U15_MUL_EQ
+    | crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ
+    | crate::semantic_proof::OP_BYTE_MUL_LOW_EQ
+    | crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ
+    | crate::semantic_proof::OP_BYTE_AND_EQ
+    | crate::semantic_proof::OP_BYTE_OR_EQ
+    | crate::semantic_proof::OP_BYTE_XOR_EQ => Some(0),
 
-    crate::sementic_proof::OP_NOT
-    | crate::sementic_proof::OP_EQ_REFL
-    | crate::sementic_proof::OP_EQ_SYM
-    | crate::sementic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE
-    | crate::sementic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => Some(1),
+    crate::semantic_proof::OP_NOT
+    | crate::semantic_proof::OP_EQ_REFL
+    | crate::semantic_proof::OP_EQ_SYM
+    | crate::semantic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE
+    | crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => Some(1),
 
-    crate::sementic_proof::OP_AND
-    | crate::sementic_proof::OP_OR
-    | crate::sementic_proof::OP_XOR
-    | crate::sementic_proof::OP_BYTE_MUL_LOW
-    | crate::sementic_proof::OP_BYTE_MUL_HIGH
-    | crate::sementic_proof::OP_BYTE_AND
-    | crate::sementic_proof::OP_BYTE_OR
-    | crate::sementic_proof::OP_BYTE_XOR
-    | crate::sementic_proof::OP_AND_INTRO
-    | crate::sementic_proof::OP_EQ_TRANS
-    | crate::sementic_proof::OP_ITE_TRUE_EQ
-    | crate::sementic_proof::OP_ITE_FALSE_EQ => Some(2),
+    crate::semantic_proof::OP_AND
+    | crate::semantic_proof::OP_OR
+    | crate::semantic_proof::OP_XOR
+    | crate::semantic_proof::OP_BYTE_MUL_LOW
+    | crate::semantic_proof::OP_BYTE_MUL_HIGH
+    | crate::semantic_proof::OP_BYTE_AND
+    | crate::semantic_proof::OP_BYTE_OR
+    | crate::semantic_proof::OP_BYTE_XOR
+    | crate::semantic_proof::OP_AND_INTRO
+    | crate::semantic_proof::OP_EQ_TRANS
+    | crate::semantic_proof::OP_ITE_TRUE_EQ
+    | crate::semantic_proof::OP_ITE_FALSE_EQ => Some(2),
 
-    crate::sementic_proof::OP_ITE
-    | crate::sementic_proof::OP_BYTE_ADD
-    | crate::sementic_proof::OP_BYTE_ADD_CARRY => Some(3),
+    crate::semantic_proof::OP_ITE
+    | crate::semantic_proof::OP_BYTE_ADD
+    | crate::semantic_proof::OP_BYTE_ADD_CARRY => Some(3),
 
     _ => None,
   }
@@ -138,7 +186,8 @@ pub fn build_stack_ir_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<StackIrSt
 
   for row in rows {
     let pop = row_pop_count(row.op)
-      .ok_or_else(|| format!("row op {} is not stack-ir encodable yet", row.op))? as i64;
+      .ok_or_else(|| format!("row op {} is not stack-ir encodable yet", row.op))?
+      as i64;
     let push: i64 = 1;
 
     let sp_before = sp;
@@ -166,20 +215,35 @@ pub fn build_stack_ir_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<StackIrSt
   }
 
   if sp != 1 {
-    return Err(format!("stack-ir build ended with invalid final stack size: {sp}"));
+    return Err(format!(
+      "stack-ir build ended with invalid final stack size: {sp}"
+    ));
   }
 
   Ok(out)
 }
 
-pub fn build_stack_ir_trace_from_steps(steps: &[StackIrStep]) -> Result<RowMajorMatrix<Val>, String> {
+pub fn build_stack_ir_trace_from_steps(
+  steps: &[StackIrStep],
+) -> Result<RowMajorMatrix<Val>, String> {
   if steps.is_empty() {
     return Err("cannot build stack-ir trace from empty steps".to_string());
   }
 
   let ensure_u16 = |name: &str, value: u32, row: usize| -> Result<(), String> {
     if value > u16::MAX as u32 {
-      return Err(format!("stack-ir {name} out of u16 range at row {row}: {value}"));
+      return Err(format!(
+        "stack-ir {name} out of u16 range at row {row}: {value}"
+      ));
+    }
+    Ok(())
+  };
+
+  let ensure_m31 = |name: &str, value: u32, row: usize| -> Result<(), String> {
+    if value >= 0x7fff_ffff {
+      return Err(format!(
+        "stack-ir {name} out of M31 range at row {row}: {value}"
+      ));
     }
     Ok(())
   };
@@ -190,10 +254,10 @@ pub fn build_stack_ir_trace_from_steps(steps: &[StackIrStep]) -> Result<RowMajor
     ensure_u16("push", step.push, i)?;
     ensure_u16("sp_before", step.sp_before, i)?;
     ensure_u16("sp_after", step.sp_after, i)?;
-    ensure_u16("scalar0", step.scalar0, i)?;
-    ensure_u16("scalar1", step.scalar1, i)?;
-    ensure_u16("scalar2", step.scalar2, i)?;
-    ensure_u16("value", step.value, i)?;
+    ensure_m31("scalar0", step.scalar0, i)?;
+    ensure_m31("scalar1", step.scalar1, i)?;
+    ensure_m31("scalar2", step.scalar2, i)?;
+    ensure_m31("value", step.value, i)?;
     ensure_u16("ret_ty", step.ret_ty, i)?;
   }
 
@@ -207,10 +271,10 @@ pub fn build_stack_ir_trace_from_steps(steps: &[StackIrStep]) -> Result<RowMajor
     trace.values[base + STACK_COL_PUSH] = Val::from_u16(step.push as u16);
     trace.values[base + STACK_COL_SP_BEFORE] = Val::from_u16(step.sp_before as u16);
     trace.values[base + STACK_COL_SP_AFTER] = Val::from_u16(step.sp_after as u16);
-    trace.values[base + STACK_COL_SCALAR0] = Val::from_u16(step.scalar0 as u16);
-    trace.values[base + STACK_COL_SCALAR1] = Val::from_u16(step.scalar1 as u16);
-    trace.values[base + STACK_COL_SCALAR2] = Val::from_u16(step.scalar2 as u16);
-    trace.values[base + STACK_COL_VALUE] = Val::from_u16(step.value as u16);
+    trace.values[base + STACK_COL_SCALAR0] = Val::from_u32(step.scalar0);
+    trace.values[base + STACK_COL_SCALAR1] = Val::from_u32(step.scalar1);
+    trace.values[base + STACK_COL_SCALAR2] = Val::from_u32(step.scalar2);
+    trace.values[base + STACK_COL_VALUE] = Val::from_u32(step.value);
     trace.values[base + STACK_COL_RET_TY] = Val::from_u16(step.ret_ty as u16);
   }
 
@@ -219,7 +283,7 @@ pub fn build_stack_ir_trace_from_steps(steps: &[StackIrStep]) -> Result<RowMajor
     let steady_sp = last.sp_after;
     for i in steps.len()..n_rows {
       let base = i * NUM_STACK_IR_COLS;
-      trace.values[base + STACK_COL_OP] = Val::from_u16(crate::sementic_proof::OP_EQ_REFL as u16);
+      trace.values[base + STACK_COL_OP] = Val::from_u16(crate::semantic_proof::OP_EQ_REFL as u16);
       trace.values[base + STACK_COL_POP] = Val::from_u16(1);
       trace.values[base + STACK_COL_PUSH] = Val::from_u16(1);
       trace.values[base + STACK_COL_SP_BEFORE] = Val::from_u16(steady_sp as u16);
@@ -248,8 +312,11 @@ impl<F> BaseAir<F> for StackIrAir {
   }
 }
 
-impl<AB: AirBuilder> Air<AB> for StackIrAir {
+impl<AB: AirBuilderWithPublicValues> Air<AB> for StackIrAir {
   fn eval(&self, builder: &mut AB) {
+    let pis = builder.public_values();
+    builder.assert_eq(pis[0], AB::Expr::from_u32(RECEIPT_BIND_TAG_STACK));
+
     let main = builder.main();
     let local = main.row_slice(0).expect("empty trace");
     let next = main.row_slice(1).expect("single-row trace");
@@ -266,21 +333,24 @@ impl<AB: AirBuilder> Air<AB> for StackIrAir {
     let value = local[STACK_COL_VALUE].clone();
     let ret_ty = local[STACK_COL_RET_TY].clone();
 
-    let t_bool = crate::sementic_proof::OP_BOOL as u16;
-    let t_byte = crate::sementic_proof::OP_BYTE as u16;
-    let t_eq_refl = crate::sementic_proof::OP_EQ_REFL as u16;
-    let t_and_intro = crate::sementic_proof::OP_AND_INTRO as u16;
-    let t_eq_trans = crate::sementic_proof::OP_EQ_TRANS as u16;
-    let t_add_congr = crate::sementic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE as u16;
-    let t_add_carry_congr = crate::sementic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE as u16;
-    let t_add_eq = crate::sementic_proof::OP_BYTE_ADD_EQ as u16;
-    let t_u16_add_eq = crate::sementic_proof::OP_U16_ADD_EQ as u16;
-    let t_add_carry_eq = crate::sementic_proof::OP_BYTE_ADD_CARRY_EQ as u16;
-    let t_mul_low_eq = crate::sementic_proof::OP_BYTE_MUL_LOW_EQ as u16;
-    let t_mul_high_eq = crate::sementic_proof::OP_BYTE_MUL_HIGH_EQ as u16;
-    let t_and_eq = crate::sementic_proof::OP_BYTE_AND_EQ as u16;
-    let t_or_eq = crate::sementic_proof::OP_BYTE_OR_EQ as u16;
-    let t_xor_eq = crate::sementic_proof::OP_BYTE_XOR_EQ as u16;
+    let t_bool = crate::semantic_proof::OP_BOOL as u16;
+    let t_byte = crate::semantic_proof::OP_BYTE as u16;
+    let t_eq_refl = crate::semantic_proof::OP_EQ_REFL as u16;
+    let t_and_intro = crate::semantic_proof::OP_AND_INTRO as u16;
+    let t_eq_trans = crate::semantic_proof::OP_EQ_TRANS as u16;
+    let t_add_congr = crate::semantic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE as u16;
+    let t_add_carry_congr = crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE as u16;
+    let t_add_eq = crate::semantic_proof::OP_BYTE_ADD_EQ as u16;
+    let t_u16_add_eq = crate::semantic_proof::OP_U16_ADD_EQ as u16;
+    let t_u29_add_eq = crate::semantic_proof::OP_U29_ADD_EQ as u16;
+    let t_u24_add_eq = crate::semantic_proof::OP_U24_ADD_EQ as u16;
+    let t_u15_mul_eq = crate::semantic_proof::OP_U15_MUL_EQ as u16;
+    let t_add_carry_eq = crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ as u16;
+    let t_mul_low_eq = crate::semantic_proof::OP_BYTE_MUL_LOW_EQ as u16;
+    let t_mul_high_eq = crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ as u16;
+    let t_and_eq = crate::semantic_proof::OP_BYTE_AND_EQ as u16;
+    let t_or_eq = crate::semantic_proof::OP_BYTE_OR_EQ as u16;
+    let t_xor_eq = crate::semantic_proof::OP_BYTE_XOR_EQ as u16;
 
     let c_bool = AB::Expr::from_u16(t_bool);
     let c_byte = AB::Expr::from_u16(t_byte);
@@ -291,6 +361,9 @@ impl<AB: AirBuilder> Air<AB> for StackIrAir {
     let c_add_carry_congr = AB::Expr::from_u16(t_add_carry_congr);
     let c_add_eq = AB::Expr::from_u16(t_add_eq);
     let c_u16_add_eq = AB::Expr::from_u16(t_u16_add_eq);
+    let c_u29_add_eq = AB::Expr::from_u16(t_u29_add_eq);
+    let c_u24_add_eq = AB::Expr::from_u16(t_u24_add_eq);
+    let c_u15_mul_eq = AB::Expr::from_u16(t_u15_mul_eq);
     let c_add_carry_eq = AB::Expr::from_u16(t_add_carry_eq);
     let c_mul_low_eq = AB::Expr::from_u16(t_mul_low_eq);
     let c_mul_high_eq = AB::Expr::from_u16(t_mul_high_eq);
@@ -311,6 +384,9 @@ impl<AB: AirBuilder> Air<AB> for StackIrAir {
       t_add_carry_congr,
       t_add_eq,
       t_u16_add_eq,
+      t_u29_add_eq,
+      t_u24_add_eq,
+      t_u15_mul_eq,
       t_add_carry_eq,
       t_mul_low_eq,
       t_mul_high_eq,
@@ -323,7 +399,7 @@ impl<AB: AirBuilder> Air<AB> for StackIrAir {
       let mut g = AB::Expr::from_u16(1);
       for t in allowed_tags {
         if t != target {
-          g = g * (op.clone().into() - AB::Expr::from_u16(t));
+          g *= op.clone().into() - AB::Expr::from_u16(t);
         }
       }
       g
@@ -338,6 +414,9 @@ impl<AB: AirBuilder> Air<AB> for StackIrAir {
       * (op.clone().into() - c_add_carry_congr.clone())
       * (op.clone().into() - c_add_eq.clone())
       * (op.clone().into() - c_u16_add_eq.clone())
+      * (op.clone().into() - c_u29_add_eq.clone())
+      * (op.clone().into() - c_u24_add_eq.clone())
+      * (op.clone().into() - c_u15_mul_eq.clone())
       * (op.clone().into() - c_add_carry_eq.clone())
       * (op.clone().into() - c_mul_low_eq.clone())
       * (op.clone().into() - c_mul_high_eq.clone())
@@ -351,7 +430,9 @@ impl<AB: AirBuilder> Air<AB> for StackIrAir {
     );
 
     builder.when_first_row().assert_zero(sp_before.clone());
-    builder.when_transition().assert_eq(next[STACK_COL_SP_BEFORE].clone(), sp_after.clone());
+    builder
+      .when_transition()
+      .assert_eq(next[STACK_COL_SP_BEFORE].clone(), sp_after.clone());
 
     let bool_gate = gate(t_bool);
     let byte_gate = gate(t_byte);
@@ -362,6 +443,9 @@ impl<AB: AirBuilder> Air<AB> for StackIrAir {
     let add_carry_congr_gate = gate(t_add_carry_congr);
     let add_eq_gate = gate(t_add_eq);
     let u16_add_eq_gate = gate(t_u16_add_eq);
+    let u29_add_eq_gate = gate(t_u29_add_eq);
+    let u24_add_eq_gate = gate(t_u24_add_eq);
+    let u15_mul_eq_gate = gate(t_u15_mul_eq);
     let add_carry_eq_gate = gate(t_add_carry_eq);
     let mul_low_eq_gate = gate(t_mul_low_eq);
     let mul_high_eq_gate = gate(t_mul_high_eq);
@@ -371,81 +455,148 @@ impl<AB: AirBuilder> Air<AB> for StackIrAir {
 
     builder.assert_zero(bool_gate.clone() * (pop.clone().into() - c_zero.clone()));
     builder.assert_zero(bool_gate.clone() * (push.clone().into() - c_one.clone()));
-    builder.assert_zero(bool_gate.clone() * (ret_ty.clone().into() - AB::Expr::from_u16(crate::sementic_proof::RET_BOOL as u16)));
+    builder.assert_zero(
+      bool_gate.clone()
+        * (ret_ty.clone().into() - AB::Expr::from_u16(crate::semantic_proof::RET_BOOL as u16)),
+    );
     builder.assert_zero(bool_gate * (value.clone().into() - scalar0.clone().into()));
 
     builder.assert_zero(byte_gate.clone() * (pop.clone().into() - c_zero.clone()));
     builder.assert_zero(byte_gate.clone() * (push.clone().into() - c_one.clone()));
-    builder.assert_zero(byte_gate.clone() * (ret_ty.clone().into() - AB::Expr::from_u16(RET_BYTE as u16)));
+    builder.assert_zero(
+      byte_gate.clone() * (ret_ty.clone().into() - AB::Expr::from_u16(RET_BYTE as u16)),
+    );
     builder.assert_zero(byte_gate * (value.clone().into() - scalar0.clone().into()));
 
     builder.assert_zero(eq_refl_gate.clone() * (pop.clone().into() - c_one.clone()));
     builder.assert_zero(eq_refl_gate.clone() * (push.clone().into() - c_one.clone()));
-    builder.assert_zero(eq_refl_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+    builder
+      .assert_zero(eq_refl_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
     builder.assert_zero(and_intro_gate.clone() * (pop.clone().into() - c_two));
     builder.assert_zero(and_intro_gate.clone() * (push.clone().into() - c_one));
-    builder.assert_zero(and_intro_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)));
+    builder.assert_zero(
+      and_intro_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
+    );
 
     builder.assert_zero(eq_trans_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(2)));
     builder.assert_zero(eq_trans_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(eq_trans_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+    builder
+      .assert_zero(eq_trans_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
     builder.assert_zero(add_congr_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(1)));
     builder.assert_zero(add_congr_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(add_congr_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+    builder.assert_zero(
+      add_congr_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
+    );
 
-    builder.assert_zero(add_carry_congr_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(add_carry_congr_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(add_carry_congr_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+    builder
+      .assert_zero(add_carry_congr_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(1)));
+    builder
+      .assert_zero(add_carry_congr_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
+    builder.assert_zero(
+      add_carry_congr_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
+    );
 
     builder.assert_zero(add_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
     builder.assert_zero(add_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(add_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+    builder
+      .assert_zero(add_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
     builder.assert_zero(u16_add_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
     builder.assert_zero(u16_add_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(u16_add_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)));
+    builder.assert_zero(
+      u16_add_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
+    );
+
+    builder.assert_zero(u29_add_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
+    builder.assert_zero(u29_add_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
+    builder.assert_zero(
+      u29_add_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
+    );
+
+    builder.assert_zero(u24_add_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
+    builder.assert_zero(u24_add_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
+    builder.assert_zero(
+      u24_add_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
+    );
+
+    builder.assert_zero(u15_mul_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
+    builder.assert_zero(u15_mul_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
+    builder.assert_zero(
+      u15_mul_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
+    );
 
     builder.assert_zero(add_carry_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
     builder.assert_zero(add_carry_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(add_carry_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+    builder.assert_zero(
+      add_carry_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
+    );
 
     builder.assert_zero(mul_low_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
     builder.assert_zero(mul_low_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(mul_low_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+    builder.assert_zero(
+      mul_low_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
+    );
 
     builder.assert_zero(mul_high_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
     builder.assert_zero(mul_high_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(mul_high_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+    builder.assert_zero(
+      mul_high_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
+    );
 
     builder.assert_zero(and_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
     builder.assert_zero(and_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(and_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+    builder
+      .assert_zero(and_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
     builder.assert_zero(or_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
     builder.assert_zero(or_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(or_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+    builder
+      .assert_zero(or_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
     builder.assert_zero(xor_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
     builder.assert_zero(xor_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(xor_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+    builder
+      .assert_zero(xor_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
   }
 }
 
 pub fn prove_stack_ir_scaffold_stark(rows: &[ProofRow]) -> Result<CircleStarkProof, String> {
+  prove_stack_ir_scaffold_stark_with_public_values(
+    rows,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_STACK),
+  )
+}
+
+pub fn prove_stack_ir_scaffold_stark_with_public_values(
+  rows: &[ProofRow],
+  public_values: &[Val],
+) -> Result<CircleStarkProof, String> {
   let trace = build_stack_ir_trace_from_rows(rows)?;
   let config = make_circle_config();
-  Ok(p3_uni_stark::prove(&config, &StackIrAir, trace, &[]))
+  Ok(p3_uni_stark::prove(&config, &StackIrAir, trace, public_values))
 }
 
 pub fn verify_stack_ir_scaffold_stark(proof: &CircleStarkProof) -> CircleStarkVerifyResult {
+  verify_stack_ir_scaffold_stark_with_public_values(
+    proof,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_STACK),
+  )
+}
+
+pub fn verify_stack_ir_scaffold_stark_with_public_values(
+  proof: &CircleStarkProof,
+  public_values: &[Val],
+) -> CircleStarkVerifyResult {
   let config = make_circle_config();
-  p3_uni_stark::verify(&config, &StackIrAir, proof, &[])
+  p3_uni_stark::verify(&config, &StackIrAir, proof, public_values)
 }
 
 pub fn prove_and_verify_stack_ir_scaffold_stark(rows: &[ProofRow]) -> bool {
-  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prove_stack_ir_scaffold_stark(rows)));
+  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    prove_stack_ir_scaffold_stark(rows)
+  }));
   let proof = match proved {
     Ok(Ok(proof)) => proof,
     Ok(Err(_)) => return false,
@@ -461,6 +612,11 @@ pub fn prove_and_verify_stack_ir_scaffold_stark(rows: &[ProofRow]) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LutOpcode {
   ByteAddEq,
+  U29AddEq,
+  U24AddEq,
+  U15AddEq,
+  BitAddEq,
+  U15MulEq,
   U16AddEq,
   ByteAddCarryEq,
   ByteMulLowEq,
@@ -491,14 +647,69 @@ const NUM_LUT_COLS: usize = 6;
 fn lut_opcode_tag(op: LutOpcode) -> u16 {
   match op {
     LutOpcode::ByteAddEq => 1,
-    LutOpcode::U16AddEq => 2,
-    LutOpcode::ByteAddCarryEq => 3,
-    LutOpcode::ByteMulLowEq => 4,
-    LutOpcode::ByteMulHighEq => 5,
-    LutOpcode::ByteAndEq => 6,
-    LutOpcode::ByteOrEq => 7,
-    LutOpcode::ByteXorEq => 8,
+    LutOpcode::U29AddEq => 2,
+    LutOpcode::U24AddEq => 3,
+    LutOpcode::U15AddEq => 4,
+    LutOpcode::BitAddEq => 5,
+    LutOpcode::U15MulEq => 6,
+    LutOpcode::U16AddEq => 7,
+    LutOpcode::ByteAddCarryEq => 8,
+    LutOpcode::ByteMulLowEq => 9,
+    LutOpcode::ByteMulHighEq => 10,
+    LutOpcode::ByteAndEq => 11,
+    LutOpcode::ByteOrEq => 12,
+    LutOpcode::ByteXorEq => 13,
   }
+}
+
+fn append_u16_row_as_u15_steps(row: &ProofRow, out: &mut Vec<LutStep>) -> Result<(), String> {
+  if row.scalar0 > 0xFFFF
+    || row.scalar1 > 0xFFFF
+    || row.scalar2 > 1
+    || row.value > 0xFFFF
+    || row.arg1 > 1
+  {
+    return Err("u16 row out of range for u15 expansion".to_string());
+  }
+
+  let a0 = row.scalar0 & 0x7FFF;
+  let a1 = row.scalar0 >> 15;
+  let b0 = row.scalar1 & 0x7FFF;
+  let b1 = row.scalar1 >> 15;
+  let s0 = row.value & 0x7FFF;
+  let s1 = row.value >> 15;
+  let cin = row.scalar2;
+
+  let low_total = a0 + b0 + cin;
+  let carry0 = if low_total >= 32768 { 1 } else { 0 };
+  if (low_total & 0x7FFF) != s0 {
+    return Err("u16->u15 expansion low-limb mismatch".to_string());
+  }
+
+  let high_total = a1 + b1 + carry0;
+  let carry1 = if high_total >= 2 { 1 } else { 0 };
+  if (high_total & 1) != s1 || carry1 != row.arg1 {
+    return Err("u16->u15 expansion high-bit mismatch".to_string());
+  }
+
+  out.push(LutStep {
+    op: LutOpcode::U15AddEq,
+    in0: a0,
+    in1: b0,
+    in2: cin,
+    out0: s0,
+    out1: carry0,
+  });
+  out.push(LutStep {
+    op: LutOpcode::BitAddEq,
+    in0: a1,
+    in1: b1,
+    in2: carry0,
+    out0: s1,
+    out1: carry1,
+  });
+
+  Ok(())
 }
 
 pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, String> {
@@ -506,7 +717,7 @@ pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, Stri
 
   for row in rows {
     let step = match row.op {
-      crate::sementic_proof::OP_BYTE_ADD_EQ => LutStep {
+      crate::semantic_proof::OP_BYTE_ADD_EQ => LutStep {
         op: LutOpcode::ByteAddEq,
         in0: row.scalar0,
         in1: row.scalar1,
@@ -514,15 +725,38 @@ pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, Stri
         out0: row.value,
         out1: row.scalar2,
       },
-      crate::sementic_proof::OP_U16_ADD_EQ => LutStep {
-        op: LutOpcode::U16AddEq,
+      crate::semantic_proof::OP_U16_ADD_EQ => {
+        append_u16_row_as_u15_steps(row, &mut out)?;
+        continue;
+      }
+      crate::semantic_proof::OP_U29_ADD_EQ => LutStep {
+        op: LutOpcode::U29AddEq,
         in0: row.scalar0,
         in1: row.scalar1,
         in2: row.scalar2,
         out0: row.value,
         out1: row.arg1,
       },
-      crate::sementic_proof::OP_BYTE_ADD_CARRY_EQ => {
+      crate::semantic_proof::OP_U24_ADD_EQ => LutStep {
+        op: LutOpcode::U24AddEq,
+        in0: row.scalar0,
+        in1: row.scalar1,
+        in2: row.scalar2,
+        out0: row.value,
+        out1: row.arg1,
+      },
+      crate::semantic_proof::OP_U15_MUL_EQ => {
+        let total = row.scalar0 * row.scalar1;
+        LutStep {
+          op: LutOpcode::U15MulEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: total & 0x7FFF,
+          out1: total >> 15,
+        }
+      }
+      crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ => {
         let total = row.scalar0 + row.scalar1 + row.arg0;
         LutStep {
           op: LutOpcode::ByteAddCarryEq,
@@ -533,7 +767,7 @@ pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, Stri
           out1: total & 0xFF,
         }
       }
-      crate::sementic_proof::OP_BYTE_MUL_LOW_EQ => LutStep {
+      crate::semantic_proof::OP_BYTE_MUL_LOW_EQ => LutStep {
         op: LutOpcode::ByteMulLowEq,
         in0: row.scalar0,
         in1: row.scalar1,
@@ -541,7 +775,7 @@ pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, Stri
         out0: (row.scalar0 * row.scalar1) & 0xFF,
         out1: 0,
       },
-      crate::sementic_proof::OP_BYTE_MUL_HIGH_EQ => LutStep {
+      crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ => LutStep {
         op: LutOpcode::ByteMulHighEq,
         in0: row.scalar0,
         in1: row.scalar1,
@@ -549,7 +783,7 @@ pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, Stri
         out0: (row.scalar0 * row.scalar1) >> 8,
         out1: 0,
       },
-      crate::sementic_proof::OP_BYTE_AND_EQ => LutStep {
+      crate::semantic_proof::OP_BYTE_AND_EQ => LutStep {
         op: LutOpcode::ByteAndEq,
         in0: row.scalar0,
         in1: row.scalar1,
@@ -557,7 +791,7 @@ pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, Stri
         out0: row.scalar0 & row.scalar1,
         out1: 0,
       },
-      crate::sementic_proof::OP_BYTE_OR_EQ => LutStep {
+      crate::semantic_proof::OP_BYTE_OR_EQ => LutStep {
         op: LutOpcode::ByteOrEq,
         in0: row.scalar0,
         in1: row.scalar1,
@@ -565,7 +799,7 @@ pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, Stri
         out0: row.scalar0 | row.scalar1,
         out1: 0,
       },
-      crate::sementic_proof::OP_BYTE_XOR_EQ => LutStep {
+      crate::semantic_proof::OP_BYTE_XOR_EQ => LutStep {
         op: LutOpcode::ByteXorEq,
         in0: row.scalar0,
         in1: row.scalar1,
@@ -590,9 +824,44 @@ pub fn build_lut_trace_from_steps(steps: &[LutStep]) -> Result<RowMajorMatrix<Va
     return Err("cannot build LUT trace from empty steps".to_string());
   }
 
+  validate_lut_steps(steps)?;
+
+  let n_rows = steps.len().max(4).next_power_of_two();
+  let mut trace = RowMajorMatrix::new(Val::zero_vec(n_rows * NUM_LUT_COLS), NUM_LUT_COLS);
+
+  for (i, step) in steps.iter().enumerate() {
+    let base = i * NUM_LUT_COLS;
+    trace.values[base + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(step.op));
+    trace.values[base + LUT_COL_IN0] = Val::from_u32(step.in0);
+    trace.values[base + LUT_COL_IN1] = Val::from_u32(step.in1);
+    trace.values[base + LUT_COL_IN2] = Val::from_u32(step.in2);
+    trace.values[base + LUT_COL_OUT0] = Val::from_u32(step.out0);
+    trace.values[base + LUT_COL_OUT1] = Val::from_u32(step.out1);
+  }
+
+  for i in steps.len()..n_rows {
+    let base = i * NUM_LUT_COLS;
+    trace.values[base + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
+    trace.values[base + LUT_COL_IN0] = Val::from_u16(0);
+    trace.values[base + LUT_COL_IN1] = Val::from_u16(0);
+    trace.values[base + LUT_COL_IN2] = Val::from_u16(0);
+    trace.values[base + LUT_COL_OUT0] = Val::from_u16(0);
+    trace.values[base + LUT_COL_OUT1] = Val::from_u16(0);
+  }
+
+  Ok(trace)
+}
+
+fn validate_lut_steps(steps: &[LutStep]) -> Result<(), String> {
+  if steps.is_empty() {
+    return Err("cannot validate empty LUT steps".to_string());
+  }
+
   let ensure_le = |name: &str, value: u32, max: u32, row: usize| -> Result<(), String> {
     if value > max {
-      return Err(format!("lut {name} out of range at row {row}: {value} > {max}"));
+      return Err(format!(
+        "lut {name} out of range at row {row}: {value} > {max}"
+      ));
     }
     Ok(())
   };
@@ -612,6 +881,41 @@ pub fn build_lut_trace_from_steps(steps: &[LutStep]) -> Result<RowMajorMatrix<Va
         ensure_le("in2", step.in2, 1, i)?;
         ensure_le("out0", step.out0, 0xFFFF, i)?;
         ensure_le("out1", step.out1, 1, i)?;
+      }
+      LutOpcode::U29AddEq => {
+        ensure_le("in0", step.in0, (1u32 << 29) - 1, i)?;
+        ensure_le("in1", step.in1, (1u32 << 29) - 1, i)?;
+        ensure_le("in2", step.in2, 1, i)?;
+        ensure_le("out0", step.out0, (1u32 << 29) - 1, i)?;
+        ensure_le("out1", step.out1, 1, i)?;
+      }
+      LutOpcode::U24AddEq => {
+        ensure_le("in0", step.in0, (1u32 << 24) - 1, i)?;
+        ensure_le("in1", step.in1, (1u32 << 24) - 1, i)?;
+        ensure_le("in2", step.in2, 1, i)?;
+        ensure_le("out0", step.out0, (1u32 << 24) - 1, i)?;
+        ensure_le("out1", step.out1, 1, i)?;
+      }
+      LutOpcode::U15AddEq => {
+        ensure_le("in0", step.in0, 0x7FFF, i)?;
+        ensure_le("in1", step.in1, 0x7FFF, i)?;
+        ensure_le("in2", step.in2, 1, i)?;
+        ensure_le("out0", step.out0, 0x7FFF, i)?;
+        ensure_le("out1", step.out1, 1, i)?;
+      }
+      LutOpcode::BitAddEq => {
+        ensure_le("in0", step.in0, 1, i)?;
+        ensure_le("in1", step.in1, 1, i)?;
+        ensure_le("in2", step.in2, 1, i)?;
+        ensure_le("out0", step.out0, 1, i)?;
+        ensure_le("out1", step.out1, 1, i)?;
+      }
+      LutOpcode::U15MulEq => {
+        ensure_le("in0", step.in0, 0x7FFF, i)?;
+        ensure_le("in1", step.in1, 0x7FFF, i)?;
+        ensure_le("in2", step.in2, 0, i)?;
+        ensure_le("out0", step.out0, 0x7FFF, i)?;
+        ensure_le("out1", step.out1, 0x7FFF, i)?;
       }
       LutOpcode::ByteAddCarryEq => {
         ensure_le("in0", step.in0, 255, i)?;
@@ -637,30 +941,7 @@ pub fn build_lut_trace_from_steps(steps: &[LutStep]) -> Result<RowMajorMatrix<Va
     }
   }
 
-  let n_rows = steps.len().max(4).next_power_of_two();
-  let mut trace = RowMajorMatrix::new(Val::zero_vec(n_rows * NUM_LUT_COLS), NUM_LUT_COLS);
-
-  for (i, step) in steps.iter().enumerate() {
-    let base = i * NUM_LUT_COLS;
-    trace.values[base + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(step.op));
-    trace.values[base + LUT_COL_IN0] = Val::from_u16(step.in0 as u16);
-    trace.values[base + LUT_COL_IN1] = Val::from_u16(step.in1 as u16);
-    trace.values[base + LUT_COL_IN2] = Val::from_u16(step.in2 as u16);
-    trace.values[base + LUT_COL_OUT0] = Val::from_u16(step.out0 as u16);
-    trace.values[base + LUT_COL_OUT1] = Val::from_u16(step.out1 as u16);
-  }
-
-  for i in steps.len()..n_rows {
-    let base = i * NUM_LUT_COLS;
-    trace.values[base + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddCarryEq));
-    trace.values[base + LUT_COL_IN0] = Val::from_u16(0);
-    trace.values[base + LUT_COL_IN1] = Val::from_u16(0);
-    trace.values[base + LUT_COL_IN2] = Val::from_u16(0);
-    trace.values[base + LUT_COL_OUT0] = Val::from_u16(0);
-    trace.values[base + LUT_COL_OUT1] = Val::from_u16(0);
-  }
-
-  Ok(trace)
+  Ok(())
 }
 
 pub struct LutKernelAir;
@@ -671,8 +952,11 @@ impl<F> BaseAir<F> for LutKernelAir {
   }
 }
 
-impl<AB: AirBuilder> Air<AB> for LutKernelAir {
+impl<AB: AirBuilderWithPublicValues> Air<AB> for LutKernelAir {
   fn eval(&self, builder: &mut AB) {
+    let pis = builder.public_values();
+    builder.assert_eq(pis[0], AB::Expr::from_u32(RECEIPT_BIND_TAG_LUT));
+
     let main = builder.main();
     let local = main.row_slice(0).expect("empty trace");
     let local = &*local;
@@ -685,6 +969,11 @@ impl<AB: AirBuilder> Air<AB> for LutKernelAir {
     let out1 = local[LUT_COL_OUT1].clone();
 
     let c_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
+    let c_u29_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U29AddEq));
+    let c_u24_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U24AddEq));
+    let c_u15_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U15AddEq));
+    let c_bit_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::BitAddEq));
+    let c_u15_mul = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U15MulEq));
     let c_u16_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U16AddEq));
     let c_add_carry = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAddCarryEq));
     let c_mul_low = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteMulLowEq));
@@ -696,6 +985,11 @@ impl<AB: AirBuilder> Air<AB> for LutKernelAir {
     let c256 = AB::Expr::from_u16(256);
 
     let allowed_poly = (op.clone().into() - c_add.clone())
+      * (op.clone().into() - c_u29_add.clone())
+      * (op.clone().into() - c_u24_add.clone())
+      * (op.clone().into() - c_u15_add.clone())
+      * (op.clone().into() - c_bit_add.clone())
+      * (op.clone().into() - c_u15_mul.clone())
       * (op.clone().into() - c_u16_add.clone())
       * (op.clone().into() - c_add_carry.clone())
       * (op.clone().into() - c_mul_low.clone())
@@ -706,6 +1000,11 @@ impl<AB: AirBuilder> Air<AB> for LutKernelAir {
     builder.assert_zero(allowed_poly);
 
     let t_add = lut_opcode_tag(LutOpcode::ByteAddEq);
+    let t_u29_add = lut_opcode_tag(LutOpcode::U29AddEq);
+    let t_u24_add = lut_opcode_tag(LutOpcode::U24AddEq);
+    let t_u15_add = lut_opcode_tag(LutOpcode::U15AddEq);
+    let t_bit_add = lut_opcode_tag(LutOpcode::BitAddEq);
+    let t_u15_mul = lut_opcode_tag(LutOpcode::U15MulEq);
     let t_u16_add = lut_opcode_tag(LutOpcode::U16AddEq);
     let t_add_carry = lut_opcode_tag(LutOpcode::ByteAddCarryEq);
     let t_mul_low = lut_opcode_tag(LutOpcode::ByteMulLowEq);
@@ -714,18 +1013,37 @@ impl<AB: AirBuilder> Air<AB> for LutKernelAir {
     let t_or = lut_opcode_tag(LutOpcode::ByteOrEq);
     let t_xor = lut_opcode_tag(LutOpcode::ByteXorEq);
 
-    let all_tags = [t_add, t_u16_add, t_add_carry, t_mul_low, t_mul_high, t_and, t_or, t_xor];
+    let all_tags = [
+      t_add,
+      t_u29_add,
+      t_u24_add,
+      t_u15_add,
+      t_bit_add,
+      t_u15_mul,
+      t_u16_add,
+      t_add_carry,
+      t_mul_low,
+      t_mul_high,
+      t_and,
+      t_or,
+      t_xor,
+    ];
     let gate = |target_tag: u16| {
       let mut g = AB::Expr::from_u16(1);
       for t in all_tags {
         if t != target_tag {
-          g = g * (op.clone().into() - AB::Expr::from_u16(t));
+          g *= op.clone().into() - AB::Expr::from_u16(t);
         }
       }
       g
     };
 
     let g_add = gate(t_add);
+    let g_u29_add = gate(t_u29_add);
+    let g_u24_add = gate(t_u24_add);
+    let g_u15_add = gate(t_u15_add);
+    let g_bit_add = gate(t_bit_add);
+    let g_u15_mul = gate(t_u15_mul);
     let g_u16_add = gate(t_u16_add);
     let g_add_carry = gate(t_add_carry);
     let g_mul_low = gate(t_mul_low);
@@ -735,41 +1053,149 @@ impl<AB: AirBuilder> Air<AB> for LutKernelAir {
     let g_xor = gate(t_xor);
 
     let total = in0.clone().into() + in1.clone().into() + in2.clone().into();
+    let c32768 = AB::Expr::from_u32(32768);
+    let c16777216 = AB::Expr::from_u32(1u32 << 24);
+    let c536870912 = AB::Expr::from_u32(1u32 << 29);
+    let c2 = AB::Expr::from_u16(2);
     let c65536 = AB::Expr::from_u32(65536);
 
-    builder.assert_zero(g_add.clone() * (total.clone() - out0.clone().into() - c256.clone() * out1.clone().into()));
-    builder.assert_zero(g_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))));
+    builder.assert_zero(
+      g_add.clone() * (total.clone() - out0.clone().into() - c256.clone() * out1.clone().into()),
+    );
+    builder.assert_zero(
+      g_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
+    );
 
-    builder.assert_zero(g_u16_add.clone() * (total.clone() - out0.clone().into() - c65536.clone() * out1.clone().into()));
-    builder.assert_zero(g_u16_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))));
+    builder.assert_zero(
+      g_u29_add.clone()
+        * (total.clone() - out0.clone().into() - c536870912.clone() * out1.clone().into()),
+    );
+    builder.assert_zero(
+      g_u29_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
+    );
 
-    builder.assert_zero(g_add_carry.clone() * (total.clone() - out1.clone().into() - c256.clone() * out0.clone().into()));
-    builder.assert_zero(g_add_carry.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))));
+    builder.assert_zero(
+      g_u24_add.clone()
+        * (total.clone() - out0.clone().into() - c16777216.clone() * out1.clone().into()),
+    );
+    builder.assert_zero(
+      g_u24_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
+    );
 
-    builder.assert_zero(g_mul_low.clone() * ((in0.clone().into() * in1.clone().into()) - out0.clone().into() - c256.clone() * out1.clone().into()));
+    builder.assert_zero(
+      g_u16_add.clone()
+        * (total.clone() - out0.clone().into() - c65536.clone() * out1.clone().into()),
+    );
+    builder.assert_zero(
+      g_u16_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
+    );
+
+    builder.assert_zero(
+      g_u15_add.clone()
+        * (total.clone() - out0.clone().into() - c32768.clone() * out1.clone().into()),
+    );
+    builder.assert_zero(
+      g_u15_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
+    );
+
+    builder.assert_zero(
+      g_bit_add.clone() * (total.clone() - out0.clone().into() - c2.clone() * out1.clone().into()),
+    );
+    builder.assert_zero(
+      g_bit_add.clone() * (in0.clone().into() * (in0.clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_bit_add.clone() * (in1.clone().into() * (in1.clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_bit_add.clone() * (in2.clone().into() * (in2.clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_bit_add.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_bit_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
+    );
+
+    builder.assert_zero(
+      g_u15_mul.clone()
+        * ((in0.clone().into() * in1.clone().into())
+          - out0.clone().into()
+          - c32768.clone() * out1.clone().into()),
+    );
+    builder.assert_zero(g_u15_mul.clone() * in2.clone());
+
+    builder.assert_zero(
+      g_add_carry.clone()
+        * (total.clone() - out1.clone().into() - c256.clone() * out0.clone().into()),
+    );
+    builder.assert_zero(
+      g_add_carry.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))),
+    );
+
+    builder.assert_zero(
+      g_mul_low.clone()
+        * ((in0.clone().into() * in1.clone().into())
+          - out0.clone().into()
+          - c256.clone() * out1.clone().into()),
+    );
     builder.assert_zero(g_mul_low.clone() * in2.clone());
 
-    builder.assert_zero(g_mul_high.clone() * ((in0.clone().into() * in1.clone().into()) - out1.clone().into() - c256.clone() * out0.clone().into()));
+    builder.assert_zero(
+      g_mul_high.clone()
+        * ((in0.clone().into() * in1.clone().into())
+          - out1.clone().into()
+          - c256.clone() * out0.clone().into()),
+    );
     builder.assert_zero(g_mul_high.clone() * in2.clone());
 
-    builder.assert_zero(g_and.clone() * (out0.clone().into() - (in0.clone().into() * in1.clone().into())));
-    builder.assert_zero(g_and.clone() * (in0.clone().into() * (in0.clone().into() - AB::Expr::from_u16(1))));
-    builder.assert_zero(g_and.clone() * (in1.clone().into() * (in1.clone().into() - AB::Expr::from_u16(1))));
-    builder.assert_zero(g_and.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))));
+    builder.assert_zero(
+      g_and.clone() * (out0.clone().into() - (in0.clone().into() * in1.clone().into())),
+    );
+    builder.assert_zero(
+      g_and.clone() * (in0.clone().into() * (in0.clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_and.clone() * (in1.clone().into() * (in1.clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_and.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))),
+    );
     builder.assert_zero(g_and.clone() * in2.clone());
     builder.assert_zero(g_and.clone() * out1.clone());
 
-    builder.assert_zero(g_or.clone() * (out0.clone().into() - (in0.clone().into() + in1.clone().into() - in0.clone().into() * in1.clone().into())));
-    builder.assert_zero(g_or.clone() * (in0.clone().into() * (in0.clone().into() - AB::Expr::from_u16(1))));
-    builder.assert_zero(g_or.clone() * (in1.clone().into() * (in1.clone().into() - AB::Expr::from_u16(1))));
-    builder.assert_zero(g_or.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))));
+    builder.assert_zero(
+      g_or.clone()
+        * (out0.clone().into()
+          - (in0.clone().into() + in1.clone().into() - in0.clone().into() * in1.clone().into())),
+    );
+    builder.assert_zero(
+      g_or.clone() * (in0.clone().into() * (in0.clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_or.clone() * (in1.clone().into() * (in1.clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_or.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))),
+    );
     builder.assert_zero(g_or.clone() * in2.clone());
     builder.assert_zero(g_or.clone() * out1.clone());
 
-    builder.assert_zero(g_xor.clone() * (out0.clone().into() - (in0.clone().into() + in1.clone().into() - AB::Expr::from_u16(2) * in0.clone().into() * in1.clone().into())));
-    builder.assert_zero(g_xor.clone() * (in0.clone().into() * (in0.clone().into() - AB::Expr::from_u16(1))));
-    builder.assert_zero(g_xor.clone() * (in1.clone().into() * (in1.clone().into() - AB::Expr::from_u16(1))));
-    builder.assert_zero(g_xor.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))));
+    builder.assert_zero(
+      g_xor.clone()
+        * (out0.clone().into()
+          - (in0.clone().into() + in1.clone().into()
+            - AB::Expr::from_u16(2) * in0.clone().into() * in1.clone().into())),
+    );
+    builder.assert_zero(
+      g_xor.clone() * (in0.clone().into() * (in0.clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_xor.clone() * (in1.clone().into() * (in1.clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_xor.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))),
+    );
     builder.assert_zero(g_xor.clone() * in2.clone());
     builder.assert_zero(g_xor.clone() * out1.clone());
 
@@ -779,18 +1205,40 @@ impl<AB: AirBuilder> Air<AB> for LutKernelAir {
 }
 
 pub fn prove_lut_kernel_stark(steps: &[LutStep]) -> Result<CircleStarkProof, String> {
+  prove_lut_kernel_stark_with_public_values(
+    steps,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
+  )
+}
+
+pub fn prove_lut_kernel_stark_with_public_values(
+  steps: &[LutStep],
+  public_values: &[Val],
+) -> Result<CircleStarkProof, String> {
   let trace = build_lut_trace_from_steps(steps)?;
   let config = make_circle_config();
-  Ok(p3_uni_stark::prove(&config, &LutKernelAir, trace, &[]))
+  Ok(p3_uni_stark::prove(&config, &LutKernelAir, trace, public_values))
 }
 
 pub fn verify_lut_kernel_stark(proof: &CircleStarkProof) -> CircleStarkVerifyResult {
+  verify_lut_kernel_stark_with_public_values(
+    proof,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
+  )
+}
+
+pub fn verify_lut_kernel_stark_with_public_values(
+  proof: &CircleStarkProof,
+  public_values: &[Val],
+) -> CircleStarkVerifyResult {
   let config = make_circle_config();
-  p3_uni_stark::verify(&config, &LutKernelAir, proof, &[])
+  p3_uni_stark::verify(&config, &LutKernelAir, proof, public_values)
 }
 
 pub fn prove_and_verify_lut_kernel_stark_from_steps(steps: &[LutStep]) -> bool {
-  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prove_lut_kernel_stark(steps)));
+  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    prove_lut_kernel_stark(steps)
+  }));
   let proof = match proved {
     Ok(Ok(proof)) => proof,
     Ok(Err(_)) => return false,
@@ -846,7 +1294,9 @@ fn encode_value_u32_pair(value: &[u8; 32]) -> (u32, u32) {
   (u32::from_be_bytes(lo), u32::from_be_bytes(hi))
 }
 
-pub fn build_memory_bus_steps_from_events(events: &[CqMemoryEvent]) -> Result<Vec<MemoryBusStep>, String> {
+pub fn build_memory_bus_steps_from_events(
+  events: &[CqMemoryEvent],
+) -> Result<Vec<MemoryBusStep>, String> {
   if events.is_empty() {
     return Err("cannot build memory bus steps from empty events".to_string());
   }
@@ -883,7 +1333,9 @@ pub fn build_memory_bus_steps_from_events(events: &[CqMemoryEvent]) -> Result<Ve
   Ok(out)
 }
 
-pub fn build_memory_bus_trace_from_steps(steps: &[MemoryBusStep]) -> Result<RowMajorMatrix<Val>, String> {
+pub fn build_memory_bus_trace_from_steps(
+  steps: &[MemoryBusStep],
+) -> Result<RowMajorMatrix<Val>, String> {
   if steps.is_empty() {
     return Err("cannot build memory bus trace from empty steps".to_string());
   }
@@ -896,7 +1348,9 @@ pub fn build_memory_bus_trace_from_steps(steps: &[MemoryBusStep]) -> Result<RowM
       return Err(format!("memory bus rw must be boolean at row {i}"));
     }
     if step.same_cell_next > 1 {
-      return Err(format!("memory bus same_cell_next must be boolean at row {i}"));
+      return Err(format!(
+        "memory bus same_cell_next must be boolean at row {i}"
+      ));
     }
 
     let base = i * NUM_MEM_BUS_COLS;
@@ -949,21 +1403,24 @@ impl<AB: AirBuilder> Air<AB> for MemoryBusAir {
     builder.assert_bool(same.clone());
 
     builder.when_transition().assert_zero(
-      same.clone() * (next[MEM_BUS_COL_ADDR].clone().into() - local[MEM_BUS_COL_ADDR].clone().into()),
+      same.clone()
+        * (next[MEM_BUS_COL_ADDR].clone().into() - local[MEM_BUS_COL_ADDR].clone().into()),
     );
     builder.when_transition().assert_zero(
-      same.clone() * (next[MEM_BUS_COL_WIDTH].clone().into() - local[MEM_BUS_COL_WIDTH].clone().into()),
+      same.clone()
+        * (next[MEM_BUS_COL_WIDTH].clone().into() - local[MEM_BUS_COL_WIDTH].clone().into()),
     );
 
     builder.when_transition().assert_zero(
-      same.clone() * (next[MEM_BUS_COL_STEP].clone().into() - local[MEM_BUS_COL_STEP].clone().into()),
+      same.clone()
+        * (next[MEM_BUS_COL_STEP].clone().into() - local[MEM_BUS_COL_STEP].clone().into()),
     );
-    builder.when_transition().assert_zero(
-      same.clone() * (local[MEM_BUS_COL_RW].clone().into() - AB::Expr::from_u16(0)),
-    );
-    builder.when_transition().assert_zero(
-      same.clone() * (next[MEM_BUS_COL_RW].clone().into() - AB::Expr::from_u16(1)),
-    );
+    builder
+      .when_transition()
+      .assert_zero(same.clone() * (local[MEM_BUS_COL_RW].clone().into() - AB::Expr::from_u16(0)));
+    builder
+      .when_transition()
+      .assert_zero(same.clone() * (next[MEM_BUS_COL_RW].clone().into() - AB::Expr::from_u16(1)));
 
     builder.when_transition().assert_zero(
       same.clone()
@@ -982,7 +1439,9 @@ pub fn prove_memory_bus_stark(steps: &[MemoryBusStep]) -> Result<CircleStarkProo
   Ok(p3_uni_stark::prove(&config, &MemoryBusAir, trace, &[]))
 }
 
-pub fn prove_memory_bus_stark_from_events(events: &[CqMemoryEvent]) -> Result<CircleStarkProof, String> {
+pub fn prove_memory_bus_stark_from_events(
+  events: &[CqMemoryEvent],
+) -> Result<CircleStarkProof, String> {
   let steps = build_memory_bus_steps_from_events(events)?;
   prove_memory_bus_stark(&steps)
 }
@@ -993,7 +1452,9 @@ pub fn verify_memory_bus_stark(proof: &CircleStarkProof) -> CircleStarkVerifyRes
 }
 
 pub fn prove_and_verify_memory_bus_stark(steps: &[MemoryBusStep]) -> bool {
-  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prove_memory_bus_stark(steps)));
+  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    prove_memory_bus_stark(steps)
+  }));
   let proof = match proved {
     Ok(Ok(proof)) => proof,
     Ok(Err(_)) => return false,
@@ -1010,106 +1471,22 @@ pub fn prove_and_verify_memory_bus_stark_from_events(events: &[CqMemoryEvent]) -
   prove_and_verify_memory_bus_stark(&steps)
 }
 
-#[cfg(test)]
-mod memory_bus_tests {
-  use super::{
-    build_memory_bus_steps_from_events,
-    build_memory_bus_trace_from_steps,
-    prove_and_verify_memory_bus_stark_from_events,
-  };
-  use crate::memory_proof::{CqMemoryEvent, CqRw};
-  use p3_matrix::Matrix;
-
-  #[test]
-  fn test_memory_bus_steps_sort_and_same_cell_flag() {
-    let events = vec![
-      CqMemoryEvent {
-        addr: 10,
-        step: 2,
-        value: [2u8; 32],
-        rw: CqRw::Write,
-        width: 32,
-      },
-      CqMemoryEvent {
-        addr: 10,
-        step: 2,
-        value: [2u8; 32],
-        rw: CqRw::Read,
-        width: 32,
-      },
-      CqMemoryEvent {
-        addr: 11,
-        step: 1,
-        value: [1u8; 32],
-        rw: CqRw::Read,
-        width: 32,
-      },
-    ];
-
-    let steps = build_memory_bus_steps_from_events(&events).expect("step build should succeed");
-    assert_eq!(steps.len(), 3);
-    assert_eq!(steps[0].addr, 10);
-    assert_eq!(steps[0].rw, 0);
-    assert_eq!(steps[0].same_cell_next, 1);
-    assert_eq!(steps[1].addr, 10);
-    assert_eq!(steps[1].rw, 1);
-    assert_eq!(steps[1].same_cell_next, 0);
-  }
-
-  #[test]
-  fn test_memory_bus_trace_builds() {
-    let events = vec![CqMemoryEvent {
-      addr: 5,
-      step: 1,
-      value: [0xAB; 32],
-      rw: CqRw::Read,
-      width: 32,
-    }];
-
-    let steps = build_memory_bus_steps_from_events(&events).expect("step build should succeed");
-    let trace = build_memory_bus_trace_from_steps(&steps).expect("trace build should succeed");
-    assert!(trace.height() >= 4);
-  }
-
-  #[test]
-  fn test_memory_bus_stark_roundtrip_from_events() {
-    let events = vec![
-      CqMemoryEvent {
-        addr: 64,
-        step: 9,
-        value: [0x11; 32],
-        rw: CqRw::Read,
-        width: 32,
-      },
-      CqMemoryEvent {
-        addr: 64,
-        step: 9,
-        value: [0x11; 32],
-        rw: CqRw::Write,
-        width: 32,
-      },
-    ];
-
-    assert!(prove_and_verify_memory_bus_stark_from_events(&events));
-  }
-}
-
 pub fn build_lut_steps_from_rows_add_family(rows: &[ProofRow]) -> Result<Vec<LutStep>, String> {
   let mut out = Vec::new();
   let mut seen_add_family = false;
 
   for row in rows {
     match row.op {
-      crate::sementic_proof::OP_BOOL
-      | crate::sementic_proof::OP_BYTE
-      | crate::sementic_proof::OP_EQ_REFL
-      | crate::sementic_proof::OP_AND_INTRO
-      | crate::sementic_proof::OP_EQ_TRANS
-      | crate::sementic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE
-      | crate::sementic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => {
+      crate::semantic_proof::OP_BOOL
+      | crate::semantic_proof::OP_BYTE
+      | crate::semantic_proof::OP_EQ_REFL
+      | crate::semantic_proof::OP_AND_INTRO
+      | crate::semantic_proof::OP_EQ_TRANS
+      | crate::semantic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE
+      | crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => {
         seen_add_family = true;
       }
-      crate::sementic_proof::OP_BYTE_ADD_EQ => out.push(LutStep {
+      crate::semantic_proof::OP_BYTE_ADD_EQ => out.push(LutStep {
         op: LutOpcode::ByteAddEq,
         in0: row.scalar0,
         in1: row.scalar1,
@@ -1117,15 +1494,26 @@ pub fn build_lut_steps_from_rows_add_family(rows: &[ProofRow]) -> Result<Vec<Lut
         out0: row.value,
         out1: row.scalar2,
       }),
-      crate::sementic_proof::OP_U16_ADD_EQ => out.push(LutStep {
-        op: LutOpcode::U16AddEq,
+      crate::semantic_proof::OP_U16_ADD_EQ => {
+        append_u16_row_as_u15_steps(row, &mut out)?;
+      }
+      crate::semantic_proof::OP_U29_ADD_EQ => out.push(LutStep {
+        op: LutOpcode::U29AddEq,
         in0: row.scalar0,
         in1: row.scalar1,
         in2: row.scalar2,
         out0: row.value,
         out1: row.arg1,
       }),
-      crate::sementic_proof::OP_BYTE_ADD_CARRY_EQ => {
+      crate::semantic_proof::OP_U24_ADD_EQ => out.push(LutStep {
+        op: LutOpcode::U24AddEq,
+        in0: row.scalar0,
+        in1: row.scalar1,
+        in2: row.scalar2,
+        out0: row.value,
+        out1: row.arg1,
+      }),
+      crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ => {
         let total = row.scalar0 + row.scalar1 + row.arg0;
         out.push(LutStep {
           op: LutOpcode::ByteAddCarryEq,
@@ -1170,16 +1558,16 @@ pub fn build_lut_steps_from_rows_mul_family(rows: &[ProofRow]) -> Result<Vec<Lut
 
   for row in rows {
     match row.op {
-      crate::sementic_proof::OP_BOOL
-      | crate::sementic_proof::OP_BYTE
-      | crate::sementic_proof::OP_EQ_REFL
-      | crate::sementic_proof::OP_AND_INTRO
-      | crate::sementic_proof::OP_EQ_TRANS
-      | crate::sementic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE
-      | crate::sementic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => {
+      crate::semantic_proof::OP_BOOL
+      | crate::semantic_proof::OP_BYTE
+      | crate::semantic_proof::OP_EQ_REFL
+      | crate::semantic_proof::OP_AND_INTRO
+      | crate::semantic_proof::OP_EQ_TRANS
+      | crate::semantic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE
+      | crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => {
         seen_mul_family = true;
       }
-      crate::sementic_proof::OP_BYTE_ADD_EQ => out.push(LutStep {
+      crate::semantic_proof::OP_BYTE_ADD_EQ => out.push(LutStep {
         op: LutOpcode::ByteAddEq,
         in0: row.scalar0,
         in1: row.scalar1,
@@ -1187,15 +1575,37 @@ pub fn build_lut_steps_from_rows_mul_family(rows: &[ProofRow]) -> Result<Vec<Lut
         out0: row.value,
         out1: row.scalar2,
       }),
-      crate::sementic_proof::OP_U16_ADD_EQ => out.push(LutStep {
-        op: LutOpcode::U16AddEq,
+      crate::semantic_proof::OP_U16_ADD_EQ => {
+        append_u16_row_as_u15_steps(row, &mut out)?;
+      }
+      crate::semantic_proof::OP_U29_ADD_EQ => out.push(LutStep {
+        op: LutOpcode::U29AddEq,
         in0: row.scalar0,
         in1: row.scalar1,
         in2: row.scalar2,
         out0: row.value,
         out1: row.arg1,
       }),
-      crate::sementic_proof::OP_BYTE_ADD_CARRY_EQ => {
+      crate::semantic_proof::OP_U24_ADD_EQ => out.push(LutStep {
+        op: LutOpcode::U24AddEq,
+        in0: row.scalar0,
+        in1: row.scalar1,
+        in2: row.scalar2,
+        out0: row.value,
+        out1: row.arg1,
+      }),
+      crate::semantic_proof::OP_U15_MUL_EQ => {
+        let total = row.scalar0 * row.scalar1;
+        out.push(LutStep {
+          op: LutOpcode::U15MulEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: total & 0x7FFF,
+          out1: total >> 15,
+        });
+      }
+      crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ => {
         let total = row.scalar0 + row.scalar1 + row.arg0;
         out.push(LutStep {
           op: LutOpcode::ByteAddCarryEq,
@@ -1203,28 +1613,6 @@ pub fn build_lut_steps_from_rows_mul_family(rows: &[ProofRow]) -> Result<Vec<Lut
           in1: row.scalar1,
           in2: row.arg0,
           out0: if total >= 256 { 1 } else { 0 },
-          out1: total & 0xFF,
-        });
-      }
-      crate::sementic_proof::OP_BYTE_MUL_LOW_EQ => {
-        let total = row.scalar0 * row.scalar1;
-        out.push(LutStep {
-          op: LutOpcode::ByteMulLowEq,
-          in0: row.scalar0,
-          in1: row.scalar1,
-          in2: 0,
-          out0: total & 0xFF,
-          out1: total >> 8,
-        });
-      }
-      crate::sementic_proof::OP_BYTE_MUL_HIGH_EQ => {
-        let total = row.scalar0 * row.scalar1;
-        out.push(LutStep {
-          op: LutOpcode::ByteMulHighEq,
-          in0: row.scalar0,
-          in1: row.scalar1,
-          in2: 0,
-          out0: total >> 8,
           out1: total & 0xFF,
         });
       }
@@ -1283,12 +1671,18 @@ pub fn build_lut_steps_from_rows_bit_family(rows: &[ProofRow]) -> Result<Vec<Lut
 
   for row in rows {
     match row.op {
-      crate::sementic_proof::OP_AND_INTRO => {
+      crate::semantic_proof::OP_AND_INTRO => {
         seen_bit_family = true;
       }
-      crate::sementic_proof::OP_BYTE_AND_EQ => push_bitwise_steps(&mut out, LutOpcode::ByteAndEq, row.scalar0, row.scalar1),
-      crate::sementic_proof::OP_BYTE_OR_EQ => push_bitwise_steps(&mut out, LutOpcode::ByteOrEq, row.scalar0, row.scalar1),
-      crate::sementic_proof::OP_BYTE_XOR_EQ => push_bitwise_steps(&mut out, LutOpcode::ByteXorEq, row.scalar0, row.scalar1),
+      crate::semantic_proof::OP_BYTE_AND_EQ => {
+        push_bitwise_steps(&mut out, LutOpcode::ByteAndEq, row.scalar0, row.scalar1)
+      }
+      crate::semantic_proof::OP_BYTE_OR_EQ => {
+        push_bitwise_steps(&mut out, LutOpcode::ByteOrEq, row.scalar0, row.scalar1)
+      }
+      crate::semantic_proof::OP_BYTE_XOR_EQ => {
+        push_bitwise_steps(&mut out, LutOpcode::ByteXorEq, row.scalar0, row.scalar1)
+      }
       other => return Err(format!("non-bit-family row in BIT kernel path: {other}")),
     }
   }
@@ -1341,14 +1735,16 @@ pub struct StageAProof {
 fn route_stage_a_row_op(op: u32) -> Result<(), String> {
   match op {
     OP_BYTE_ADD_EQ
-    | crate::sementic_proof::OP_U16_ADD_EQ
-    | crate::sementic_proof::OP_BOOL
-    | crate::sementic_proof::OP_BYTE
-    | crate::sementic_proof::OP_EQ_REFL
-    | crate::sementic_proof::OP_AND_INTRO
-    | crate::sementic_proof::OP_EQ_TRANS
-    | crate::sementic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE
-    | crate::sementic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => Ok(()),
+    | crate::semantic_proof::OP_U16_ADD_EQ
+    | crate::semantic_proof::OP_U29_ADD_EQ
+    | crate::semantic_proof::OP_U24_ADD_EQ
+    | crate::semantic_proof::OP_BOOL
+    | crate::semantic_proof::OP_BYTE
+    | crate::semantic_proof::OP_EQ_REFL
+    | crate::semantic_proof::OP_AND_INTRO
+    | crate::semantic_proof::OP_EQ_TRANS
+    | crate::semantic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE
+    | crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => Ok(()),
     other => Err(format!("unsupported Stage A proof-row op: {other}")),
   }
 }
@@ -1357,7 +1753,11 @@ fn has_stage_a_semantic_rows(rows: &[ProofRow]) -> Result<bool, String> {
   let mut found = false;
   for row in rows {
     route_stage_a_row_op(row.op)?;
-    if row.op == OP_BYTE_ADD_EQ || row.op == crate::sementic_proof::OP_U16_ADD_EQ {
+    if row.op == OP_BYTE_ADD_EQ
+      || row.op == crate::semantic_proof::OP_U16_ADD_EQ
+      || row.op == crate::semantic_proof::OP_U29_ADD_EQ
+      || row.op == crate::semantic_proof::OP_U24_ADD_EQ
+    {
       found = true;
     }
   }
@@ -1393,13 +1793,19 @@ impl<F> BaseAir<F> for WffMatchAir {
   }
 }
 
-impl<AB: AirBuilder> Air<AB> for WffMatchAir {
+impl<AB: AirBuilderWithPublicValues> Air<AB> for WffMatchAir {
   fn eval(&self, builder: &mut AB) {
+    let pis = builder.public_values();
+    builder.assert_eq(pis[0], AB::Expr::from_u32(RECEIPT_BIND_TAG_WFF));
+
     let main = builder.main();
     let local = main.row_slice(0).expect("empty trace");
     let local = &*local;
 
-    builder.assert_eq(local[MATCH_COL_INFERRED].clone(), local[MATCH_COL_EXPECTED].clone());
+    builder.assert_eq(
+      local[MATCH_COL_INFERRED].clone(),
+      local[MATCH_COL_EXPECTED].clone(),
+    );
   }
 }
 
@@ -1412,50 +1818,177 @@ impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
     let local = &*local;
     let next = &*next;
 
-    let op_const = AB::Expr::from_u16(OP_BYTE_ADD_EQ as u16);
-    let ret_ty_const = AB::Expr::from_u16(RET_WFF_EQ as u16);
+    let op = local[COL_OP].clone();
+    let t_byte = OP_BYTE_ADD_EQ as u16;
+    let t_u16 = crate::semantic_proof::OP_U16_ADD_EQ as u16;
+    let t_u29 = crate::semantic_proof::OP_U29_ADD_EQ as u16;
+    let t_u24 = crate::semantic_proof::OP_U24_ADD_EQ as u16;
 
-    let c256 = AB::Expr::from_u16(256);
+    let tags = [t_byte, t_u16, t_u29, t_u24];
+    let gate = |target: u16| {
+      let mut g = AB::Expr::from_u16(1);
+      for t in tags {
+        if t != target {
+          g *= op.clone().into() - AB::Expr::from_u16(t);
+        }
+      }
+      g
+    };
+
+    let g_byte = gate(t_byte);
+    let g_u16 = gate(t_u16);
+    let g_u29 = gate(t_u29);
+    let g_u24 = gate(t_u24);
+
+    let allowed_poly = (op.clone().into() - AB::Expr::from_u16(t_byte))
+      * (op.clone().into() - AB::Expr::from_u16(t_u16))
+      * (op.clone().into() - AB::Expr::from_u16(t_u29))
+      * (op.clone().into() - AB::Expr::from_u16(t_u24));
+    builder.assert_zero(allowed_poly);
 
     let a = local[COL_SCALAR0].clone();
     let b = local[COL_SCALAR1].clone();
-    let carry_out = local[COL_SCALAR2].clone();
-    let carry_in = local[COL_ARG0].clone();
-    let expected = local[COL_ARG1].clone();
     let sum = local[COL_VALUE].clone();
 
-    // ── Constraint 1: a + b + carry_in = sum + 256 * carry_out ──
-    // Equivalently: a + b + carry_in - sum - 256 * carry_out = 0
     builder.assert_zero(
-      a.clone().into()
-        + b.clone().into()
-        + carry_in.clone().into()
-        - sum.clone().into()
-        - c256 * carry_out.clone().into(),
+      g_byte.clone()
+        * (a.clone().into() + b.clone().into() + local[COL_ARG0].clone().into()
+          - sum.clone().into()
+          - AB::Expr::from_u16(256) * local[COL_SCALAR2].clone().into()),
+    );
+    builder.assert_zero(
+      g_u16.clone()
+        * (a.clone().into() + b.clone().into() + local[COL_SCALAR2].clone().into()
+          - sum.clone().into()
+          - AB::Expr::from_u32(1u32 << 16) * local[COL_ARG1].clone().into()),
+    );
+    builder.assert_zero(
+      g_u29.clone()
+        * (a.clone().into() + b.clone().into() + local[COL_SCALAR2].clone().into()
+          - sum.clone().into()
+          - AB::Expr::from_u32(1u32 << 29) * local[COL_ARG1].clone().into()),
+    );
+    builder.assert_zero(
+      g_u24.clone()
+        * (a.clone().into() + b.clone().into() + local[COL_SCALAR2].clone().into()
+          - sum.clone().into()
+          - AB::Expr::from_u32(1u32 << 24) * local[COL_ARG1].clone().into()),
     );
 
-    // ── Constraint 2: sum = expected ──
-    builder.assert_eq(sum.clone(), expected.clone());
+    builder.assert_zero(g_byte.clone() * (sum.clone().into() - local[COL_ARG1].clone().into()));
+    builder.assert_zero(g_u16.clone() * (sum.clone().into() - local[COL_ARG0].clone().into()));
+    builder.assert_zero(g_u29.clone() * (sum.clone().into() - local[COL_ARG0].clone().into()));
+    builder.assert_zero(g_u24.clone() * (sum.clone().into() - local[COL_ARG0].clone().into()));
 
-    // ── Constraint 3: carry_out ∈ {0, 1} ──
-    builder.assert_bool(carry_out.clone());
+    builder.assert_zero(
+      g_byte.clone()
+        * (local[COL_SCALAR2].clone().into()
+          * (local[COL_SCALAR2].clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_byte.clone()
+        * (local[COL_ARG0].clone().into() * (local[COL_ARG0].clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_u16.clone()
+        * (local[COL_ARG1].clone().into() * (local[COL_ARG1].clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_u29.clone()
+        * (local[COL_ARG1].clone().into() * (local[COL_ARG1].clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_u24.clone()
+        * (local[COL_ARG1].clone().into() * (local[COL_ARG1].clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_u16.clone()
+        * (local[COL_SCALAR2].clone().into()
+          * (local[COL_SCALAR2].clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_u29.clone()
+        * (local[COL_SCALAR2].clone().into()
+          * (local[COL_SCALAR2].clone().into() - AB::Expr::from_u16(1))),
+    );
+    builder.assert_zero(
+      g_u24.clone()
+        * (local[COL_SCALAR2].clone().into()
+          * (local[COL_SCALAR2].clone().into() - AB::Expr::from_u16(1))),
+    );
 
-    // ── Constraint 4: carry_in ∈ {0, 1} ──
-    builder.assert_bool(carry_in.clone());
-
-    // ── Constraint 5: fixed opcode/ret-ty tags for ProofRow encoding ──
-    builder.assert_zero(local[COL_OP].clone().into() - op_const);
-    builder.assert_zero(local[COL_RET_TY].clone().into() - ret_ty_const);
     builder.assert_zero(local[COL_ARG2].clone());
+    builder.assert_zero(
+      g_byte.clone() * (local[COL_RET_TY].clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
+    );
+    builder.assert_zero(
+      g_u16.clone() * (local[COL_RET_TY].clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
+    );
+    builder.assert_zero(
+      g_u29.clone() * (local[COL_RET_TY].clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
+    );
+    builder.assert_zero(
+      g_u24.clone() * (local[COL_RET_TY].clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
+    );
 
-    // ── Constraint 6: First row carry_in = 0 ──
-    builder.when_first_row().assert_zero(carry_in.clone());
-
-    // ── Constraint 7: Transition carry chain ──
-    // next.carry_in = local.carry_out
     builder
-      .when_transition()
-      .assert_eq(next[COL_ARG0].clone(), carry_out.clone());
+      .when_first_row()
+      .assert_zero(g_byte.clone() * local[COL_ARG0].clone().into());
+    builder
+      .when_first_row()
+      .assert_zero(g_u16.clone() * local[COL_SCALAR2].clone().into());
+    builder
+      .when_first_row()
+      .assert_zero(g_u29.clone() * local[COL_SCALAR2].clone().into());
+    builder
+      .when_first_row()
+      .assert_zero(g_u24.clone() * local[COL_SCALAR2].clone().into());
+
+    let next_op = next[COL_OP].clone();
+    let next_gate = |target: u16| {
+      let mut g = AB::Expr::from_u16(1);
+      for t in tags {
+        if t != target {
+          g *= next_op.clone().into() - AB::Expr::from_u16(t);
+        }
+      }
+      g
+    };
+    let ng_byte = next_gate(t_byte);
+    let ng_u16 = next_gate(t_u16);
+    let ng_u29 = next_gate(t_u29);
+    let ng_u24 = next_gate(t_u24);
+
+    let local_cout_byte = local[COL_SCALAR2].clone().into();
+    let local_cout_u16 = local[COL_ARG1].clone().into();
+    let local_cout_u29 = local[COL_ARG1].clone().into();
+    let local_cout_u24 = local[COL_ARG1].clone().into();
+
+    let next_cin_byte = next[COL_ARG0].clone().into();
+    let next_cin_u16 = next[COL_SCALAR2].clone().into();
+    let next_cin_u29 = next[COL_SCALAR2].clone().into();
+    let next_cin_u24 = next[COL_SCALAR2].clone().into();
+
+    let local_cases = [
+      (g_byte, local_cout_byte),
+      (g_u16, local_cout_u16),
+      (g_u29, local_cout_u29),
+      (g_u24, local_cout_u24),
+    ];
+    let next_cases = [
+      (ng_byte, next_cin_byte),
+      (ng_u16, next_cin_u16),
+      (ng_u29, next_cin_u29),
+      (ng_u24, next_cin_u24),
+    ];
+
+    for (lg, lcout) in local_cases.iter() {
+      for (ng, ncin) in next_cases.iter() {
+        builder
+          .when_transition()
+          .assert_zero(lg.clone() * ng.clone() * (ncin.clone() - lcout.clone()));
+      }
+    }
   }
 }
 
@@ -1463,20 +1996,35 @@ impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
 // Config builder
 // ============================================================
 
-/// Build a Circle STARK configuration over M31 with Keccak hashing.
+/// Build a Circle STARK configuration over M31 with Poseidon2 hashing.
 pub fn make_circle_config() -> CircleStarkConfig {
-  let byte_hash = Keccak256Hash {};
-  let field_hash = SerializingHasher::new(byte_hash);
-  let compress = CompressionFunctionFromHasher::new(byte_hash);
-  let val_mmcs = MerkleTreeMmcs::new(field_hash, compress);
-  let challenge_mmcs = ExtensionMmcs::new(val_mmcs.clone());
+  make_circle_config_with_params(40, 8, 0)
+}
+
+/// Tunable Circle STARK config (Poseidon2 hash backend).
+///
+/// - `num_queries`: FRI query count. Soundness ≈ num_queries × log_blowup bits. Default 40.
+/// - `query_pow_bits`: grinding bits for query phase (2^n hashes). Default 8. Set 0 to disable.
+/// - `log_final_poly_len`: log2 of FRI final polynomial degree limit. Default 0.
+pub fn make_circle_config_with_params(
+  num_queries: usize,
+  query_pow_bits: usize,
+  log_final_poly_len: usize,
+) -> CircleStarkConfig {
+  let mut rng = SmallRng::seed_from_u64(0x5EED_C0DE_u64);
+  let perm = P2Perm::new_from_rng_128(&mut rng);
+
+  let hash = P2Hash::new(perm.clone());
+  let compress = P2Compress::new(perm.clone());
+  let val_mmcs = P2ValMmcs::new(hash, compress);
+  let challenge_mmcs = P2ChallengeMmcs::new(val_mmcs.clone());
 
   let fri_params = FriParameters {
     log_blowup: 1,
-    log_final_poly_len: 0,
-    num_queries: 40,
+    log_final_poly_len,
+    num_queries,
     commit_proof_of_work_bits: 0,
-    query_proof_of_work_bits: 8,
+    query_proof_of_work_bits: query_pow_bits,
     mmcs: challenge_mmcs,
   };
 
@@ -1486,7 +2034,7 @@ pub fn make_circle_config() -> CircleStarkConfig {
     _phantom: core::marker::PhantomData,
   };
 
-  let challenger = SerializingChallenger32::from_hasher(vec![], byte_hash);
+  let challenger = P2Challenger::new(perm);
   StarkConfig::new(pcs, challenger)
 }
 
@@ -1503,7 +2051,14 @@ pub fn make_circle_config() -> CircleStarkConfig {
 pub fn generate_stage_a_semantic_trace(rows: &[ProofRow]) -> Result<RowMajorMatrix<Val>, String> {
   let mut semantic_rows: Vec<ProofRow> = Vec::new();
 
-  let push_byte_add_row = |out: &mut Vec<ProofRow>, a: u32, b: u32, carry_in: u32, sum: u32, carry_out: u32, i: usize| -> Result<(), String> {
+  let push_byte_add_row = |out: &mut Vec<ProofRow>,
+                           a: u32,
+                           b: u32,
+                           carry_in: u32,
+                           sum: u32,
+                           carry_out: u32,
+                           i: usize|
+   -> Result<(), String> {
     if a > 255 || b > 255 || sum > 255 {
       return Err(format!("stage-a byte column out of range at row {i}"));
     }
@@ -1543,8 +2098,13 @@ pub fn generate_stage_a_semantic_trace(rows: &[ProofRow]) -> Result<RowMajorMatr
         }
         semantic_rows.push(row.clone());
       }
-      crate::sementic_proof::OP_U16_ADD_EQ => {
-        if row.scalar0 > 0xFFFF || row.scalar1 > 0xFFFF || row.scalar2 > 1 || row.arg0 > 0xFFFF || row.arg1 > 1 {
+      crate::semantic_proof::OP_U16_ADD_EQ => {
+        if row.scalar0 > 0xFFFF
+          || row.scalar1 > 0xFFFF
+          || row.scalar2 > 1
+          || row.arg0 > 0xFFFF
+          || row.arg1 > 1
+        {
           return Err(format!("stage-a u16 column out of range at row {i}"));
         }
         if row.value != row.arg0 {
@@ -1567,11 +2127,29 @@ pub fn generate_stage_a_semantic_trace(rows: &[ProofRow]) -> Result<RowMajorMatr
           return Err(format!("stage-a u16 carry mismatch at row {i}"));
         }
 
-        push_byte_add_row(&mut semantic_rows, a_lo, b_lo, row.scalar2, sum_lo, carry_mid, i)?;
-        push_byte_add_row(&mut semantic_rows, a_hi, b_hi, carry_mid, sum_hi, row.arg1, i)?;
+        push_byte_add_row(
+          &mut semantic_rows,
+          a_lo,
+          b_lo,
+          row.scalar2,
+          sum_lo,
+          carry_mid,
+          i,
+        )?;
+        push_byte_add_row(
+          &mut semantic_rows,
+          a_hi,
+          b_hi,
+          carry_mid,
+          sum_hi,
+          row.arg1,
+          i,
+        )?;
       }
-      _ => {
+      crate::semantic_proof::OP_U29_ADD_EQ | crate::semantic_proof::OP_U24_ADD_EQ => {
+        semantic_rows.push(row.clone());
       }
+      _ => {}
     }
   }
 
@@ -1586,20 +2164,26 @@ pub fn generate_stage_a_semantic_trace(rows: &[ProofRow]) -> Result<RowMajorMatr
   for (i, row) in semantic_rows.iter().enumerate() {
     let base = i * NUM_PROOF_COLS;
     trace.values[base + COL_OP] = Val::from_u16(row.op as u16);
-    trace.values[base + COL_SCALAR0] = Val::from_u16(row.scalar0 as u16);
-    trace.values[base + COL_SCALAR1] = Val::from_u16(row.scalar1 as u16);
-    trace.values[base + COL_SCALAR2] = Val::from_u16(row.scalar2 as u16);
-    trace.values[base + COL_ARG0] = Val::from_u16(row.arg0 as u16);
-    trace.values[base + COL_ARG1] = Val::from_u16(row.arg1 as u16);
-    trace.values[base + COL_ARG2] = Val::from_u16(row.arg2 as u16);
-    trace.values[base + COL_VALUE] = Val::from_u16(row.value as u16);
+    trace.values[base + COL_SCALAR0] = Val::from_u32(row.scalar0);
+    trace.values[base + COL_SCALAR1] = Val::from_u32(row.scalar1);
+    trace.values[base + COL_SCALAR2] = Val::from_u32(row.scalar2);
+    trace.values[base + COL_ARG0] = Val::from_u32(row.arg0);
+    trace.values[base + COL_ARG1] = Val::from_u32(row.arg1);
+    trace.values[base + COL_ARG2] = Val::from_u32(row.arg2);
+    trace.values[base + COL_VALUE] = Val::from_u32(row.value);
     trace.values[base + COL_RET_TY] = Val::from_u16(row.ret_ty as u16);
   }
 
   if semantic_len < n_rows {
     let mut carry_in = semantic_rows
       .last()
-      .map(|row| row.scalar2 as u16)
+      .map(|row| match row.op {
+        OP_BYTE_ADD_EQ => row.scalar2 as u16,
+        crate::semantic_proof::OP_U16_ADD_EQ
+        | crate::semantic_proof::OP_U29_ADD_EQ
+        | crate::semantic_proof::OP_U24_ADD_EQ => row.arg1 as u16,
+        _ => 0,
+      })
       .unwrap_or(0);
 
     for i in semantic_len..n_rows {
@@ -1751,6 +2335,14 @@ pub fn generate_wff_match_trace_from_wffs(
   let inferred_bytes = serialize_wff_bytes(inferred_wff);
   let expected_bytes = serialize_wff_bytes(public_wff);
 
+  generate_wff_match_trace_from_bytes(&inferred_bytes, &expected_bytes)
+}
+
+fn generate_wff_match_trace_from_bytes(
+  inferred_bytes: &[u8],
+  expected_bytes: &[u8],
+) -> Result<RowMajorMatrix<Val>, String> {
+
   if inferred_bytes.len() != expected_bytes.len() {
     return Err(format!(
       "serialized WFF length mismatch: inferred={} public={}",
@@ -1764,7 +2356,10 @@ pub fn generate_wff_match_trace_from_wffs(
   }
 
   let padded_rows = inferred_bytes.len().next_power_of_two();
-  let mut trace = RowMajorMatrix::new(Val::zero_vec(padded_rows * NUM_WFF_MATCH_COLS), NUM_WFF_MATCH_COLS);
+  let mut trace = RowMajorMatrix::new(
+    Val::zero_vec(padded_rows * NUM_WFF_MATCH_COLS),
+    NUM_WFF_MATCH_COLS,
+  );
   for row in 0..inferred_bytes.len() {
     let base = row * NUM_WFF_MATCH_COLS;
     trace.values[base + MATCH_COL_INFERRED] = Val::from_u16(inferred_bytes[row] as u16);
@@ -1781,24 +2376,22 @@ pub fn generate_wff_match_trace_from_wffs(
 }
 
 /// Prove compiled ProofRows using the Stage-A backend.
-pub fn prove_compiled_rows_stark(
-  rows: &[ProofRow],
-) -> Result<CircleStarkProof, String> {
+pub fn prove_compiled_rows_stark(rows: &[ProofRow]) -> Result<CircleStarkProof, String> {
   prove_inferred_wff_stark(rows)
 }
 
 /// Stage-1 generic ZKP: prove inferred WFF validity from compiled ProofRows.
 pub fn prove_inferred_wff_stark(rows: &[ProofRow]) -> Result<CircleStarkProof, String> {
   for row in rows {
-    let _ = route_stage_a_row_op(row.op)?;
+    route_stage_a_row_op(row.op)?;
   }
 
   if !has_stage_a_semantic_rows(rows)? {
     return Err("stage-a semantic kernel unavailable for this proof-row set".to_string());
   }
 
-  let config = make_circle_config();
   let trace = generate_stage_a_semantic_trace(rows)?;
+  let config = make_circle_config();
   Ok(p3_uni_stark::prove(&config, &StageASemanticAir, trace, &[]))
 }
 
@@ -1815,7 +2408,9 @@ pub fn prove_and_verify_compiled_rows_stark(rows: &[ProofRow]) -> bool {
 
 /// Stage-1 generic convenience helper.
 pub fn prove_and_verify_inferred_wff_stark(rows: &[ProofRow]) -> bool {
-  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| prove_compiled_rows_stark(rows)));
+  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    prove_compiled_rows_stark(rows)
+  }));
   let proof = match proved {
     Ok(Ok(proof)) => proof,
     Ok(Err(_)) => return false,
@@ -1832,7 +2427,11 @@ pub fn prove_wff_match_stark(
   private_pi: &Proof,
   public_wff: &WFF,
 ) -> Result<CircleStarkProof, String> {
-  prove_expected_wff_match_stark(private_pi, public_wff)
+  prove_expected_wff_match_stark_with_public_values(
+    private_pi,
+    public_wff,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_WFF),
+  )
 }
 
 /// Stage-2 generic ZKP: prove inferred WFF equals externally expected WFF.
@@ -1840,18 +2439,40 @@ pub fn prove_expected_wff_match_stark(
   private_pi: &Proof,
   public_wff: &WFF,
 ) -> Result<CircleStarkProof, String> {
+  prove_expected_wff_match_stark_with_public_values(
+    private_pi,
+    public_wff,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_WFF),
+  )
+}
+
+pub fn prove_expected_wff_match_stark_with_public_values(
+  private_pi: &Proof,
+  public_wff: &WFF,
+  public_values: &[Val],
+) -> Result<CircleStarkProof, String> {
   let inferred_wff = infer_proof(private_pi)
     .map_err(|err| format!("failed to infer WFF from private proof: {err}"))?;
 
-  let config = make_circle_config();
   let trace = generate_wff_match_trace_from_wffs(&inferred_wff, public_wff)?;
-  Ok(p3_uni_stark::prove(&config, &WffMatchAir, trace, &[]))
+  let config = make_circle_config();
+  Ok(p3_uni_stark::prove(&config, &WffMatchAir, trace, public_values))
 }
 
 /// Verify stage-2 WFF match proof.
 pub fn verify_wff_match_stark(proof: &CircleStarkProof) -> CircleStarkVerifyResult {
+  verify_wff_match_stark_with_public_values(
+    proof,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_WFF),
+  )
+}
+
+pub fn verify_wff_match_stark_with_public_values(
+  proof: &CircleStarkProof,
+  public_values: &[Val],
+) -> CircleStarkVerifyResult {
   let config = make_circle_config();
-  p3_uni_stark::verify(&config, &WffMatchAir, proof, &[])
+  p3_uni_stark::verify(&config, &WffMatchAir, proof, public_values)
 }
 
 /// Convenience helper for stage-2 prove+verify.
@@ -1922,475 +2543,407 @@ pub fn prove_and_verify_stage_a(public_wff: &WFF, private_pi: &Proof) -> bool {
 }
 
 // ============================================================
-// Tests
+// Batch STARK proving
+//
+// Usage pattern:
+//   let all_steps: Vec<LutStep> = instructions
+//       .iter()
+//       .flat_map(|itp| {
+//           let rows = compile_proof(itp.semantic_proof.as_ref().unwrap());
+//           build_lut_steps_from_rows_add_family(&rows).unwrap_or_default()
+//       })
+//       .collect();
+//   let proof = prove_batch_lut_stark_add_family(&all_steps)?;
 // ============================================================
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::sementic_proof::{compile_proof, infer_proof, prove_add, prove_mul, wff_add, wff_mul, Proof};
+/// Prove N add-family (ADD/SUB) instructions' LUT kernel in one STARK call.
+///
+/// `all_steps` is the concatenation of `build_lut_steps_from_rows_add_family()`
+/// output for each instruction.
+pub fn prove_batch_lut_stark(
+  all_steps: &[LutStep],
+) -> Result<CircleStarkProof, String> {
+  prove_lut_kernel_stark(all_steps)
+}
 
-  fn tamper_first_mul_related_leaf(proof: &mut Proof) -> bool {
-    match proof {
-      Proof::ByteMulLowEq(a, b) => {
-        *proof = Proof::ByteMulLowEq(*a ^ 1, *b);
-        true
-      }
-      Proof::ByteMulHighEq(a, b) => {
-        *proof = Proof::ByteMulHighEq(*a ^ 1, *b);
-        true
-      }
-      Proof::ByteAddEq(a, b, c) => {
-        *proof = Proof::ByteAddEq(*a, *b, !*c);
-        true
-      }
-      Proof::U16AddEq(a, b, cin, c) => {
-        *proof = Proof::U16AddEq(*a, *b, !*cin, *c);
-        true
-      }
-      Proof::AndIntro(p1, p2) => {
-        if tamper_first_mul_related_leaf(p1) {
-          true
-        } else {
-          tamper_first_mul_related_leaf(p2)
-        }
-      }
-      Proof::EqSym(p) => tamper_first_mul_related_leaf(p),
-      Proof::EqTrans(p1, p2) => {
-        if tamper_first_mul_related_leaf(p1) {
-          true
-        } else {
-          tamper_first_mul_related_leaf(p2)
-        }
-      }
-      Proof::ByteAddThirdCongruence(p, _, _) => tamper_first_mul_related_leaf(p),
-      Proof::ByteAddCarryThirdCongruence(p, _, _) => tamper_first_mul_related_leaf(p),
-      _ => false,
-    }
-  }
+/// Verify a batched LUT STARK proof.
+pub fn verify_batch_lut_stark(
+  proof: &CircleStarkProof,
+) -> bool {
+  verify_lut_kernel_stark(proof).is_ok()
+}
 
-  fn u256_bytes(val: u128) -> [u8; 32] {
-    let mut b = [0u8; 32];
-    b[16..32].copy_from_slice(&val.to_be_bytes());
-    b
-  }
+/// Build and immediately prove N add-family instructions' LUT in one shot.
+pub fn prove_batch_stark_add_family(
+  all_rows: &[ProofRow],
+) -> Result<CircleStarkProof, String> {
+  let steps = build_lut_steps_from_rows_add_family(all_rows)?;
+  prove_lut_kernel_stark(&steps)
+}
 
-  fn compute_add(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut result = [0u8; 32];
-    let mut carry = 0u16;
-    for i in (0..32).rev() {
-      let sum = a[i] as u16 + b[i] as u16 + carry;
-      result[i] = (sum & 0xFF) as u8;
-      carry = sum >> 8;
-    }
-    result
-  }
+/// Verify an add-family batch LUT proof.
+pub fn verify_batch_stark_add_family(proof: &CircleStarkProof) -> bool {
+  verify_lut_kernel_stark(proof).is_ok()
+}
 
-  #[test]
-  fn test_stage_a_semantic_trace_generation() {
-    let a = u256_bytes(1000);
-    let b = u256_bytes(2000);
-    let c = compute_add(&a, &b);
-    let semantic = prove_add(&a, &b, &c);
-    let rows = compile_proof(&semantic);
-    let trace = generate_stage_a_semantic_trace(&rows).expect("semantic trace generation should succeed");
-    assert_eq!(trace.width(), NUM_PROOF_COLS);
-    assert_eq!(trace.height(), 32);
-  }
+/// Build and immediately prove N add-family instructions' LUT with custom FRI params.
+pub fn prove_batch_stark_add_family_with_params(
+  all_rows: &[ProofRow],
+  num_queries: usize,
+  query_pow_bits: usize,
+  log_final_poly_len: usize,
+) -> Result<CircleStarkProof, String> {
+  let steps = build_lut_steps_from_rows_add_family(all_rows)?;
+  let trace = build_lut_trace_from_steps(&steps)?;
+  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
+  Ok(p3_uni_stark::prove(
+    &config,
+    &LutKernelAir,
+    trace,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
+  ))
+}
 
-  #[test]
-  fn test_prove_and_verify_stage1_simple_semantic_rows() {
-    let a = u256_bytes(1000);
-    let b = u256_bytes(2000);
-    let c = compute_add(&a, &b);
+/// Verify an add-family batch proof produced with matching custom FRI params.
+pub fn verify_batch_stark_add_family_with_params(
+  proof: &CircleStarkProof,
+  num_queries: usize,
+  query_pow_bits: usize,
+  log_final_poly_len: usize,
+) -> bool {
+  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
+  p3_uni_stark::verify(
+    &config,
+    &LutKernelAir,
+    proof,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
+  )
+  .is_ok()
+}
 
-    let semantic = prove_add(&a, &b, &c);
-    let rows = compile_proof(&semantic);
-    let proof = prove_inferred_wff_stark(&rows).expect("stage-1 proof should succeed");
-    verify_inferred_wff_stark(&proof).expect("stage-1 verification failed");
-  }
+/// Build and immediately prove N mul-family (MUL/DIV/MOD/SDIV/SMOD) instructions' LUT in one shot.
+pub fn prove_batch_stark_mul_family(
+  all_rows: &[ProofRow],
+) -> Result<CircleStarkProof, String> {
+  let steps = build_lut_steps_from_rows_mul_family(all_rows)?;
+  prove_lut_kernel_stark(&steps)
+}
 
-  #[test]
-  fn test_prove_and_verify_stage1_overflow_semantic_rows() {
-    let a = [0xFF; 32];
-    let mut b = [0u8; 32];
-    b[31] = 1;
-    let c = compute_add(&a, &b);
+/// Build and immediately prove N mul-family instructions' LUT with custom FRI params.
+pub fn prove_batch_stark_mul_family_with_params(
+  all_rows: &[ProofRow],
+  num_queries: usize,
+  query_pow_bits: usize,
+  log_final_poly_len: usize,
+) -> Result<CircleStarkProof, String> {
+  let steps = build_lut_steps_from_rows_mul_family(all_rows)?;
+  let trace = build_lut_trace_from_steps(&steps)?;
+  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
+  Ok(p3_uni_stark::prove(
+    &config,
+    &LutKernelAir,
+    trace,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
+  ))
+}
 
-    let semantic = prove_add(&a, &b, &c);
-    let rows = compile_proof(&semantic);
-    let proof = prove_inferred_wff_stark(&rows).expect("stage-1 proof should succeed");
-    verify_inferred_wff_stark(&proof).expect("stage-1 verification failed");
-  }
+/// Verify a mul-family batch LUT proof.
+pub fn verify_batch_stark_mul_family(proof: &CircleStarkProof) -> bool {
+  verify_lut_kernel_stark(proof).is_ok()
+}
 
-  #[test]
-  fn test_prove_and_verify_stage1_large_semantic_rows() {
-    let mut a = [0xABu8; 32];
-    a[0] = 0x7F;
-    let mut b = [0xCDu8; 32];
-    b[0] = 0x3E;
-    let c = compute_add(&a, &b);
+/// Verify a mul-family batch proof produced with matching custom FRI params.
+pub fn verify_batch_stark_mul_family_with_params(
+  proof: &CircleStarkProof,
+  num_queries: usize,
+  query_pow_bits: usize,
+  log_final_poly_len: usize,
+) -> bool {
+  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
+  p3_uni_stark::verify(
+    &config,
+    &LutKernelAir,
+    proof,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
+  )
+  .is_ok()
+}
 
-    let semantic = prove_add(&a, &b, &c);
-    let rows = compile_proof(&semantic);
-    let proof = prove_inferred_wff_stark(&rows).expect("stage-1 proof should succeed");
-    verify_inferred_wff_stark(&proof).expect("stage-1 verification failed");
-  }
+/// Build and immediately prove N bit-family (AND/OR/XOR/NOT) instructions' LUT in one shot.
+pub fn prove_batch_stark_bit_family(
+  all_rows: &[ProofRow],
+) -> Result<CircleStarkProof, String> {
+  let steps = build_lut_steps_from_rows_bit_family(all_rows)?;
+  prove_lut_kernel_stark(&steps)
+}
 
-  #[test]
-  fn test_prove_and_verify_stage1_zero_semantic_rows() {
-    let a = [0u8; 32];
-    let b = [0u8; 32];
-    let c = [0u8; 32];
+/// Build and immediately prove N bit-family instructions' LUT with custom FRI params.
+pub fn prove_batch_stark_bit_family_with_params(
+  all_rows: &[ProofRow],
+  num_queries: usize,
+  query_pow_bits: usize,
+  log_final_poly_len: usize,
+) -> Result<CircleStarkProof, String> {
+  let steps = build_lut_steps_from_rows_bit_family(all_rows)?;
+  let trace = build_lut_trace_from_steps(&steps)?;
+  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
+  Ok(p3_uni_stark::prove(
+    &config,
+    &LutKernelAir,
+    trace,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
+  ))
+}
 
-    let semantic = prove_add(&a, &b, &c);
-    let rows = compile_proof(&semantic);
-    let proof = prove_inferred_wff_stark(&rows).expect("stage-1 proof should succeed");
-    verify_inferred_wff_stark(&proof).expect("stage-1 verification failed");
-  }
+/// Verify a bit-family batch LUT proof.
+pub fn verify_batch_stark_bit_family(proof: &CircleStarkProof) -> bool {
+  verify_lut_kernel_stark(proof).is_ok()
+}
 
-  #[test]
-  fn test_prove_and_verify_stage1_from_compiled_rows() {
-    let a = u256_bytes(1234);
-    let b = u256_bytes(5678);
-    let c = compute_add(&a, &b);
+/// Verify a bit-family batch proof produced with matching custom FRI params.
+pub fn verify_batch_stark_bit_family_with_params(
+  proof: &CircleStarkProof,
+  num_queries: usize,
+  query_pow_bits: usize,
+  log_final_poly_len: usize,
+) -> bool {
+  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
+  p3_uni_stark::verify(
+    &config,
+    &LutKernelAir,
+    proof,
+    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
+  )
+  .is_ok()
+}
 
-    let semantic = prove_add(&a, &b, &c);
-    let rows = compile_proof(&semantic);
-    assert!(prove_and_verify_compiled_rows_stark(&rows));
-  }
+// ============================================================
+// Cross-family batch WFF proving
+//
+// Prove any mix of opcodes (ADD, SUB, MUL, DIV, AND, OR, XOR, LT, SGT, EQ …)
+// in a single LUT STARK call by concatenating ALL their ProofRows, regardless
+// of opcode family.
+//
+// Design:
+//   - The LUT kernel AIR already handles every LUT opcode in one circuit.
+//   - Structural rows (OP_BOOL, OP_EQ_REFL, …) are silently skipped — they
+//     carry no arithmetic content.
+//   - Bit-family ops (AND/OR/XOR) are expanded to bit-level, as required by
+//     the LUT AIR constraints (in0,in1 ∈ {0,1}).
+//
+// Security model:
+//   1. LUT STARK: proves all N instructions' arithmetic is correct (one proof).
+//   2. WFF check (deterministic, no ZK): `infer_proof(pi_i) == wff_i` for each i.
+//      This is pure-function verification (µs range) done by the verifier.
+//
+// Usage:
+//   let itps: Vec<InstructionTransitionProof> = ...;
+//   let proofs: Vec<&Proof> = itps.iter()
+//       .filter_map(|itp| itp.semantic_proof.as_ref())
+//       .collect();
+//   let (lut_proof, wffs) = prove_batch_wff_proofs(&proofs)?;
+//   // verify:
+//   assert!(verify_batch_wff_proofs(&lut_proof, &proofs, &wffs).is_ok());
+// ============================================================
 
-  #[test]
-  fn test_prove_and_verify_stage2_wff_match() {
-    let a = u256_bytes(1111);
-    let b = u256_bytes(2222);
-    let c = compute_add(&a, &b);
-
-    let semantic = prove_add(&a, &b, &c);
-    let public_wff = wff_add(&a, &b, &c);
-    assert!(prove_and_verify_wff_match_stark(&semantic, &public_wff));
-  }
-
-  #[test]
-  fn test_wff_match_fails_on_wrong_output() {
-    let a = u256_bytes(100);
-    let b = u256_bytes(200);
-    let c = compute_add(&a, &b);
-    let mut wrong = c;
-    wrong[31] ^= 1;
-
-    let semantic = prove_add(&a, &b, &c);
-    let wrong_public_wff = wff_add(&a, &b, &wrong);
-    assert!(!prove_and_verify_wff_match_stark(&semantic, &wrong_public_wff));
-  }
-
-  #[test]
-  fn test_stage_a_success() {
-    let a = u256_bytes(777);
-    let b = u256_bytes(888);
-    let c = compute_add(&a, &b);
-
-    let public_wff = wff_add(&a, &b, &c);
-    let private_pi = prove_add(&a, &b, &c);
-    assert!(prove_and_verify_stage_a(&public_wff, &private_pi));
-  }
-
-  #[test]
-  fn test_stage_a_fails_on_wrong_public_wff() {
-    let a = u256_bytes(10);
-    let b = u256_bytes(20);
-    let c = compute_add(&a, &b);
-    let mut wrong = c;
-    wrong[31] ^= 1;
-
-    let private_pi = prove_add(&a, &b, &c);
-    let wrong_public_wff = wff_add(&a, &b, &wrong);
-    assert!(!prove_and_verify_stage_a(&wrong_public_wff, &private_pi));
-  }
-
-  #[test]
-  fn test_stage_a_supports_non_add_infer_path() {
-    let private_pi = Proof::EqRefl(Term::Byte(42));
-    let public_wff = infer_proof(&private_pi).expect("infer_proof should succeed");
-    assert!(!prove_and_verify_stage_a(&public_wff, &private_pi));
-  }
-
-  #[test]
-  fn test_build_lut_steps_from_rows_byte_add_eq_only() {
-    let proof = Proof::ByteAddEq(10, 20, true);
-    let rows = compile_proof(&proof);
-    let steps = build_lut_steps_from_rows(&rows).expect("lut steps should build");
-    assert_eq!(steps.len(), 1);
-    assert_eq!(steps[0].op, LutOpcode::ByteAddEq);
-    assert_eq!(steps[0].in0, 10);
-    assert_eq!(steps[0].in1, 20);
-    assert_eq!(steps[0].in2, 1);
-    assert_eq!(steps[0].out0, 31);
-    assert_eq!(steps[0].out1, 0);
-
-    let trace = build_lut_trace_from_steps(&steps).expect("lut trace should build");
-    assert_eq!(trace.width(), NUM_LUT_COLS);
-    assert!(trace.height() >= 4);
-  }
-
-  #[test]
-  fn test_build_lut_steps_rejects_structural_rows() {
-    let proof = Proof::EqRefl(Term::Byte(7));
-    let rows = compile_proof(&proof);
-    let err = build_lut_steps_from_rows(&rows).expect_err("structural rows must be rejected");
-    assert!(err.contains("not LUT-step encodable"));
-  }
-
-  #[test]
-  fn test_build_lut_trace_rejects_out_of_range_u16_add_step() {
-    let steps = vec![LutStep {
-      op: LutOpcode::U16AddEq,
-      in0: 70_000,
-      in1: 1,
-      in2: 0,
-      out0: 1,
-      out1: 0,
-    }];
-
-    let err = build_lut_trace_from_steps(&steps).expect_err("out-of-range u16-add input must be rejected");
-    assert!(err.contains("out of range"));
-  }
-
-  #[test]
-  fn test_build_lut_trace_rejects_out_of_range_byte_add_step() {
-    let steps = vec![LutStep {
-      op: LutOpcode::ByteAddEq,
-      in0: 300,
-      in1: 1,
-      in2: 0,
-      out0: 45,
-      out1: 0,
-    }];
-
-    let err = build_lut_trace_from_steps(&steps).expect_err("out-of-range byte-add input must be rejected");
-    assert!(err.contains("out of range"));
-  }
-
-  #[test]
-  fn test_stage_a_trace_rejects_out_of_range_row() {
-    let rows = vec![ProofRow {
-      op: OP_BYTE_ADD_EQ,
-      scalar0: 300,
-      scalar1: 1,
-      scalar2: 0,
-      arg0: 0,
-      arg1: 45,
-      arg2: 0,
-      value: 45,
-      ret_ty: RET_WFF_EQ,
-    }];
-
-    let err = generate_stage_a_semantic_trace(&rows).expect_err("out-of-range stage-a row must be rejected");
-    assert!(err.contains("out of range"));
-  }
-
-  #[test]
-  fn test_build_stack_ir_steps_from_rows_eq_refl() {
-    let proof = Proof::EqRefl(Term::Byte(7));
-    let rows = compile_proof(&proof);
-    let steps = build_stack_ir_steps_from_rows(&rows).expect("stack-ir steps should build");
-
-    assert_eq!(steps.len(), rows.len());
-    assert_eq!(steps[0].sp_before, 0);
-    assert_eq!(steps[0].sp_after, 1);
-    assert_eq!(steps[1].sp_before, 1);
-    assert_eq!(steps[1].sp_after, 1);
-
-    let trace = build_stack_ir_trace_from_steps(&steps).expect("stack-ir trace should build");
-    assert_eq!(trace.width(), NUM_STACK_IR_COLS);
-    assert!(trace.height() >= 4);
-  }
-
-  #[test]
-  fn test_build_stack_ir_steps_underflow_rejected() {
-    let rows = vec![ProofRow {
-      op: crate::sementic_proof::OP_EQ_TRANS,
-      ret_ty: RET_WFF_EQ,
-      ..Default::default()
-    }];
-
-    let err = build_stack_ir_steps_from_rows(&rows).expect_err("underflow must be rejected");
-    assert!(err.contains("stack underflow"));
-  }
-
-  #[test]
-  fn test_stack_ir_scaffold_stark_eq_refl_roundtrip() {
-    let proof = Proof::EqRefl(Term::Byte(7));
-    let rows = compile_proof(&proof);
-    assert!(prove_and_verify_stack_ir_scaffold_stark(&rows));
-  }
-
-  #[test]
-  fn test_stack_ir_scaffold_supports_add_rows() {
-    let a = u256_bytes(10);
-    let b = u256_bytes(20);
-    let c = compute_add(&a, &b);
-    let proof = prove_add(&a, &b, &c);
-    let rows = compile_proof(&proof);
-    assert!(prove_and_verify_stack_ir_scaffold_stark(&rows));
-  }
-
-  #[test]
-  fn test_lut_kernel_stark_byte_add_eq_roundtrip() {
-    let proof = Proof::ByteAddEq(100, 200, false);
-    let rows = compile_proof(&proof);
-    let steps = build_lut_steps_from_rows(&rows).expect("lut steps should build");
-    assert!(prove_and_verify_lut_kernel_stark_from_steps(&steps));
-  }
-
-  #[test]
-  fn test_lut_kernel_stark_byte_add_carry_eq_roundtrip() {
-    let proof = Proof::ByteAddCarryEq(200, 100, false);
-    let rows = compile_proof(&proof);
-    let steps = build_lut_steps_from_rows(&rows).expect("lut steps should build");
-    assert!(prove_and_verify_lut_kernel_stark_from_steps(&steps));
-  }
-
-  #[test]
-  fn test_lut_kernel_stark_supports_mul_ops() {
-    let proof = Proof::ByteMulLowEq(3, 7);
-    let rows = compile_proof(&proof);
-    let steps = build_lut_steps_from_rows(&rows).expect("lut steps should build");
-    assert!(prove_and_verify_lut_kernel_stark_from_steps(&steps));
-  }
-
-  #[test]
-  fn test_build_lut_trace_accepts_bit_level_bit_ops_inputs() {
-    let steps = vec![LutStep {
-      op: LutOpcode::ByteAndEq,
-      in0: 1,
-      in1: 0,
-      in2: 0,
-      out0: 0,
-      out1: 0,
-    }];
-
-    let trace = build_lut_trace_from_steps(&steps).expect("bit-level bitwise steps should be trace-encodable");
-    assert_eq!(trace.width(), NUM_LUT_COLS);
-  }
-
-  #[test]
-  fn test_build_lut_trace_rejects_non_bool_bit_ops_inputs() {
-    let steps = vec![LutStep {
-      op: LutOpcode::ByteAndEq,
-      in0: 2,
-      in1: 1,
-      in2: 0,
-      out0: 0,
-      out1: 0,
-    }];
-
-    let err = build_lut_trace_from_steps(&steps)
-      .expect_err("non-bool bitwise step should be rejected");
-    assert!(err.contains("out of range"));
-  }
-
-  #[test]
-  fn test_add_composite_stack_lut_roundtrip() {
-    let a = u256_bytes(1000);
-    let b = u256_bytes(2000);
-    let c = compute_add(&a, &b);
-    let proof = prove_add(&a, &b, &c);
-    let rows = compile_proof(&proof);
-    assert!(prove_and_verify_add_stack_lut_stark(&rows));
-  }
-
-  #[test]
-  fn test_add_composite_stack_lut_rejects_non_add_rowset() {
-    let proof = Proof::EqRefl(Term::Byte(7));
-    let rows = compile_proof(&proof);
-    assert!(!prove_and_verify_add_stack_lut_stark(&rows));
-  }
-
-  #[test]
-  fn test_add_family_lut_builder_rejects_foreign_row() {
-    let rows = vec![
-      ProofRow {
-        op: crate::sementic_proof::OP_BYTE_ADD_EQ,
-        scalar0: 1,
-        scalar1: 2,
-        arg0: 0,
-        value: 3,
-        scalar2: 0,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      },
-      ProofRow {
-        op: crate::sementic_proof::OP_BYTE_MUL_LOW_EQ,
-        scalar0: 2,
-        scalar1: 3,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      },
-    ];
-
-    let err = build_lut_steps_from_rows_add_family(&rows).expect_err("foreign rows must be rejected");
-    assert!(err.contains("non-add-family row"));
-  }
-
-  #[test]
-  fn test_mul_composite_stack_lut_roundtrip() {
-    let mut a = [0u8; 32];
-    let mut b = [0u8; 32];
-    a[31] = 123;
-    b[31] = 45;
-    let c = {
-      let mut out = [0u8; 32];
-      out[31] = 159;
-      out[30] = 21;
-      out
+/// Expand a byte-level bitwise op row into 8 per-bit LitSteps.
+/// Used by `build_lut_steps_from_rows_auto` for AND/OR/XOR.
+fn push_bit_lut_steps_into(out: &mut Vec<LutStep>, op: LutOpcode, byte_a: u32, byte_b: u32) {
+  for bit in 0..8 {
+    let a = (byte_a >> bit) & 1;
+    let b = (byte_b >> bit) & 1;
+    let result = match op {
+      LutOpcode::ByteAndEq => a & b,
+      LutOpcode::ByteOrEq => a | b,
+      LutOpcode::ByteXorEq => a ^ b,
+      _ => 0,
     };
-
-    let proof = crate::sementic_proof::prove_mul(&a, &b, &c);
-    let rows = compile_proof(&proof);
-    assert!(prove_and_verify_mul_stack_lut_stark(&rows));
-  }
-
-  #[test]
-  fn test_mul_family_lut_builder_rejects_foreign_row() {
-    let rows = vec![
-      ProofRow {
-        op: crate::sementic_proof::OP_BYTE_MUL_LOW_EQ,
-        scalar0: 3,
-        scalar1: 7,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      },
-      ProofRow {
-        op: crate::sementic_proof::OP_BYTE_OR_EQ,
-        scalar0: 1,
-        scalar1: 2,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      },
-    ];
-
-    let err = build_lut_steps_from_rows_mul_family(&rows).expect_err("foreign rows must be rejected");
-    assert!(err.contains("non-mul-family row"));
-  }
-
-  #[test]
-  fn test_mul_leaf_tamper_rejected_by_wff_match() {
-    let mut a = [0u8; 32];
-    let mut b = [0u8; 32];
-    a[31] = 123;
-    b[31] = 45;
-    let c = {
-      let mut out = [0u8; 32];
-      out[31] = 159;
-      out[30] = 21;
-      out
-    };
-
-    let mut proof = prove_mul(&a, &b, &c);
-    assert!(tamper_first_mul_related_leaf(&mut proof));
-
-    let public_wff = wff_mul(&a, &b, &c);
-    assert!(!prove_and_verify_expected_wff_match_stark(&proof, &public_wff));
+    out.push(LutStep { op, in0: a, in1: b, in2: 0, out0: result, out1: 0 });
   }
 }
+
+/// Build LUT steps from ProofRows belonging to **any** opcode family.
+///
+/// Structural rows (OP_BOOL, OP_BYTE, OP_EQ_REFL, OP_AND_INTRO, OP_EQ_TRANS,
+/// OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE) are skipped
+/// silently.  Bit-family ops are expanded to per-bit level as required by the
+/// LUT kernel AIR.  All other recognised LUT ops are processed normally.
+pub fn build_lut_steps_from_rows_auto(rows: &[ProofRow]) -> Result<Vec<LutStep>, String> {
+  use crate::semantic_proof::{
+    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+    OP_BYTE_ADD_THIRD_CONGRUENCE, OP_EQ_REFL, OP_EQ_TRANS,
+  };
+
+  let mut out = Vec::with_capacity(rows.len() * 2);
+
+  for row in rows {
+    match row.op {
+      // ── Structural rows: skip silently ────────────────────────────────────
+      op if op == OP_BOOL
+        || op == OP_BYTE
+        || op == OP_EQ_REFL
+        || op == OP_AND_INTRO
+        || op == OP_EQ_TRANS
+        || op == OP_BYTE_ADD_THIRD_CONGRUENCE
+        || op == OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => {}
+
+      // ── Add-family LUT ops ─────────────────────────────────────────────────
+      crate::semantic_proof::OP_BYTE_ADD_EQ => out.push(LutStep {
+        op: LutOpcode::ByteAddEq,
+        in0: row.scalar0,
+        in1: row.scalar1,
+        in2: row.arg0,
+        out0: row.value,
+        out1: row.scalar2,
+      }),
+      crate::semantic_proof::OP_U16_ADD_EQ => {
+        append_u16_row_as_u15_steps(row, &mut out)?;
+      }
+      crate::semantic_proof::OP_U29_ADD_EQ => out.push(LutStep {
+        op: LutOpcode::U29AddEq,
+        in0: row.scalar0,
+        in1: row.scalar1,
+        in2: row.scalar2,
+        out0: row.value,
+        out1: row.arg1,
+      }),
+      crate::semantic_proof::OP_U24_ADD_EQ => out.push(LutStep {
+        op: LutOpcode::U24AddEq,
+        in0: row.scalar0,
+        in1: row.scalar1,
+        in2: row.scalar2,
+        out0: row.value,
+        out1: row.arg1,
+      }),
+      crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ => {
+        let total = row.scalar0 + row.scalar1 + row.arg0;
+        out.push(LutStep {
+          op: LutOpcode::ByteAddCarryEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: row.arg0,
+          out0: if total >= 256 { 1 } else { 0 },
+          out1: total & 0xFF,
+        });
+      }
+
+      // ── Mul-family LUT ops ─────────────────────────────────────────────────
+      crate::semantic_proof::OP_U15_MUL_EQ => {
+        let total = row.scalar0 * row.scalar1;
+        out.push(LutStep {
+          op: LutOpcode::U15MulEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: total & 0x7FFF,
+          out1: total >> 15,
+        });
+      }
+      crate::semantic_proof::OP_BYTE_MUL_LOW_EQ => out.push(LutStep {
+        op: LutOpcode::ByteMulLowEq,
+        in0: row.scalar0,
+        in1: row.scalar1,
+        in2: 0,
+        out0: (row.scalar0 * row.scalar1) & 0xFF,
+        out1: 0,
+      }),
+      crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ => out.push(LutStep {
+        op: LutOpcode::ByteMulHighEq,
+        in0: row.scalar0,
+        in1: row.scalar1,
+        in2: 0,
+        out0: (row.scalar0 * row.scalar1) >> 8,
+        out1: 0,
+      }),
+
+      // ── Bit-family LUT ops (expand byte → bits) ────────────────────────────
+      crate::semantic_proof::OP_BYTE_AND_EQ => {
+        push_bit_lut_steps_into(&mut out, LutOpcode::ByteAndEq, row.scalar0, row.scalar1)
+      }
+      crate::semantic_proof::OP_BYTE_OR_EQ => {
+        push_bit_lut_steps_into(&mut out, LutOpcode::ByteOrEq, row.scalar0, row.scalar1)
+      }
+      crate::semantic_proof::OP_BYTE_XOR_EQ => {
+        push_bit_lut_steps_into(&mut out, LutOpcode::ByteXorEq, row.scalar0, row.scalar1)
+      }
+
+      other => return Err(format!("build_lut_steps_from_rows_auto: unrecognised row op {other}")),
+    }
+  }
+
+  if out.is_empty() {
+    return Err("build_lut_steps_from_rows_auto: no LUT steps found in row set".to_string());
+  }
+
+  Ok(out)
+}
+
+/// Prove N instructions of ANY opcode mix using a single LUT STARK call.
+///
+/// Returns `(lut_proof, individual_wffs)`.
+/// - `lut_proof` covers the arithmetic correctness of ALL instructions.
+/// - `individual_wffs[i]` is the WFF inferred from `proofs[i]`.
+///
+/// Verification: call `verify_batch_wff_proofs`.
+pub fn prove_batch_wff_proofs(
+  proofs: &[&Proof],
+) -> Result<(CircleStarkProof, Vec<WFF>), String> {
+  if proofs.is_empty() {
+    return Err("prove_batch_wff_proofs: empty proof batch".to_string());
+  }
+
+  // Compile all ProofRows and concatenate
+  let all_rows: Vec<ProofRow> = proofs.iter().flat_map(|p| compile_proof(p)).collect();
+
+  // Build cross-family LUT steps
+  let steps = build_lut_steps_from_rows_auto(&all_rows)?;
+
+  // Prove once
+  let lut_proof = prove_lut_kernel_stark(&steps)?;
+
+  // Collect individual WFFs (deterministic, cheap)
+  let wffs = proofs
+    .iter()
+    .map(|p| infer_proof(p).map_err(|e| format!("infer_proof failed: {e}")))
+    .collect::<Result<Vec<_>, _>>()?;
+
+  Ok((lut_proof, wffs))
+}
+
+/// Verify a batch WFF proof.
+///
+/// Checks:
+/// 1. The LUT STARK proof is valid.
+/// 2. For each proof `proofs[i]`, `infer_proof(proofs[i]) == wffs[i]` (cheap).
+pub fn verify_batch_wff_proofs(
+  lut_proof: &CircleStarkProof,
+  proofs: &[&Proof],
+  wffs: &[WFF],
+) -> Result<(), String> {
+  if proofs.len() != wffs.len() {
+    return Err(format!(
+      "verify_batch_wff_proofs: proofs.len()={} != wffs.len()={}",
+      proofs.len(),
+      wffs.len()
+    ));
+  }
+
+  // 1. Verify the shared LUT proof
+  verify_lut_kernel_stark(lut_proof)
+    .map_err(|e| format!("batch LUT STARK verification failed: {e:?}"))?;
+
+  // 2. Verify each WFF matches the deterministic derivation
+  for (i, (proof, expected_wff)) in proofs.iter().zip(wffs.iter()).enumerate() {
+    let inferred = infer_proof(proof)
+      .map_err(|e| format!("infer_proof failed for instruction {i}: {e}"))?;
+    if inferred != *expected_wff {
+      return Err(format!("WFF mismatch at instruction {i}"));
+    }
+  }
+
+  Ok(())
+}
+
+// ============================================================
+// Tests
+// ============================================================

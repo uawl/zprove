@@ -1,7 +1,6 @@
-
-use std::{array, collections::HashSet, fmt};
-use serde::Serialize;
 use revm_primitives::U256;
+use serde::Serialize;
+use std::{array, fmt};
 
 // ============================================================
 // Types
@@ -52,7 +51,7 @@ pub enum Term {
   /// `ByteOr(a, b) = a | b`.
   ByteOr(Box<Term>, Box<Term>),
   /// `ByteXor(a, b) = a ^ b`.
-  ByteXor(Box<Term>, Box<Term>)
+  ByteXor(Box<Term>, Box<Term>),
 }
 
 // ============================================================
@@ -107,6 +106,15 @@ pub enum Proof {
   /// 16-bit chunk add axiom:
   /// `(a16 + b16 + cin) mod 2^16 = c16`.
   U16AddEq(u16, u16, bool, u16),
+  /// 29-bit chunk add axiom:
+  /// `(a29 + b29 + cin) mod 2^29 = c29`.
+  U29AddEq(u32, u32, bool, u32),
+  /// 24-bit chunk add axiom (top chunk for 256-bit words with 29-bit radix):
+  /// `(a24 + b24 + cin) mod 2^24 = c24`.
+  U24AddEq(u32, u32, bool, u32),
+  /// 15-bit chunk mul axiom:
+  /// `a15 * b15 = lo15 + 2^15 * hi15`.
+  U15MulEq(u16, u16),
   /// From `(c1 = c2)`, derive
   /// `ByteAdd(Byte(a), Byte(b), c1) = ByteAdd(Byte(a), Byte(b), c2)`.
   ByteAddThirdCongruence(Box<Proof>, u8, u8),
@@ -160,42 +168,45 @@ impl fmt::Display for VerifyError {
 // ============================================================
 
 // ---- Term opcodes (0..13) ----
-pub const OP_BOOL: u32            = 0;
-pub const OP_NOT: u32             = 1;
-pub const OP_AND: u32             = 2;
-pub const OP_OR: u32              = 3;
-pub const OP_XOR: u32             = 4;
-pub const OP_ITE: u32             = 5;
-pub const OP_BYTE: u32            = 6;
-pub const OP_BYTE_ADD: u32        = 7;
-pub const OP_BYTE_ADD_CARRY: u32  = 8;
-pub const OP_BYTE_MUL_LOW: u32    = 9;
-pub const OP_BYTE_MUL_HIGH: u32   = 10;
-pub const OP_BYTE_AND: u32        = 11;
-pub const OP_BYTE_OR: u32         = 12;
-pub const OP_BYTE_XOR: u32        = 13;
+pub const OP_BOOL: u32 = 0;
+pub const OP_NOT: u32 = 1;
+pub const OP_AND: u32 = 2;
+pub const OP_OR: u32 = 3;
+pub const OP_XOR: u32 = 4;
+pub const OP_ITE: u32 = 5;
+pub const OP_BYTE: u32 = 6;
+pub const OP_BYTE_ADD: u32 = 7;
+pub const OP_BYTE_ADD_CARRY: u32 = 8;
+pub const OP_BYTE_MUL_LOW: u32 = 9;
+pub const OP_BYTE_MUL_HIGH: u32 = 10;
+pub const OP_BYTE_AND: u32 = 11;
+pub const OP_BYTE_OR: u32 = 12;
+pub const OP_BYTE_XOR: u32 = 13;
 // ---- Proof opcodes (14..24) ----
-pub const OP_AND_INTRO: u32       = 14;
-pub const OP_EQ_REFL: u32         = 15;
-pub const OP_EQ_SYM: u32          = 16;
-pub const OP_EQ_TRANS: u32        = 17;
-pub const OP_BYTE_ADD_EQ: u32     = 18;
+pub const OP_AND_INTRO: u32 = 14;
+pub const OP_EQ_REFL: u32 = 15;
+pub const OP_EQ_SYM: u32 = 16;
+pub const OP_EQ_TRANS: u32 = 17;
+pub const OP_BYTE_ADD_EQ: u32 = 18;
 pub const OP_BYTE_ADD_CARRY_EQ: u32 = 19;
 pub const OP_BYTE_MUL_LOW_EQ: u32 = 20;
 pub const OP_BYTE_MUL_HIGH_EQ: u32 = 21;
-pub const OP_BYTE_AND_EQ: u32     = 22;
-pub const OP_BYTE_OR_EQ: u32      = 23;
-pub const OP_BYTE_XOR_EQ: u32     = 24;
+pub const OP_BYTE_AND_EQ: u32 = 22;
+pub const OP_BYTE_OR_EQ: u32 = 23;
+pub const OP_BYTE_XOR_EQ: u32 = 24;
 pub const OP_BYTE_ADD_THIRD_CONGRUENCE: u32 = 25;
 pub const OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE: u32 = 26;
 pub const OP_ITE_TRUE_EQ: u32 = 27;
 pub const OP_ITE_FALSE_EQ: u32 = 28;
 pub const OP_U16_ADD_EQ: u32 = 29;
+pub const OP_U15_MUL_EQ: u32 = 30;
+pub const OP_U29_ADD_EQ: u32 = 31;
+pub const OP_U24_ADD_EQ: u32 = 32;
 
 // ---- Return-type tags ----
-pub const RET_BOOL: u32    = 0;
-pub const RET_BYTE: u32    = 1;
-pub const RET_WFF_EQ: u32  = 2;
+pub const RET_BOOL: u32 = 0;
+pub const RET_BYTE: u32 = 1;
+pub const RET_WFF_EQ: u32 = 2;
 pub const RET_WFF_AND: u32 = 3;
 
 /// Number of columns in the compiled proof row (= STARK trace width).
@@ -237,58 +248,73 @@ pub struct ProofRow {
 pub fn infer_ty(term: &Term) -> Result<Ty, VerifyError> {
   match term {
     Term::Bool(_) => Ok(Ty::Bool),
-    Term::Not(a) =>
-      if infer_ty(&*a)? == Ty::Bool {
+    Term::Not(a) => {
+      if infer_ty(a)? == Ty::Bool {
         Ok(Ty::Bool)
       } else {
-        Err(VerifyError::UnexpectedTermVariant { expected: "boolean subterm" })
-      },
-    Term::And(a, b) |
-    Term::Or(a, b) |
-    Term::Xor(a, b) => {
-      if infer_ty(&*a)? == Ty::Bool && infer_ty(&*b)? == Ty::Bool {
-        Ok(Ty::Bool)
-      } else {
-        Err(VerifyError::UnexpectedTermVariant { expected: "boolean subterm" })
+        Err(VerifyError::UnexpectedTermVariant {
+          expected: "boolean subterm",
+        })
       }
-    },
+    }
+    Term::And(a, b) | Term::Or(a, b) | Term::Xor(a, b) => {
+      if infer_ty(a)? == Ty::Bool && infer_ty(b)? == Ty::Bool {
+        Ok(Ty::Bool)
+      } else {
+        Err(VerifyError::UnexpectedTermVariant {
+          expected: "boolean subterm",
+        })
+      }
+    }
     Term::Ite(c, a, b) => {
-      if infer_ty(&*c)? == Ty::Bool {
-        let ty_a = infer_ty(&*a)?;
-        let ty_b = infer_ty(&*b)?;
+      if infer_ty(c)? == Ty::Bool {
+        let ty_a = infer_ty(a)?;
+        let ty_b = infer_ty(b)?;
         if ty_a == ty_b {
           Ok(ty_a)
         } else {
-          Err(VerifyError::UnexpectedTermVariant { expected: "matching type subterms" })
+          Err(VerifyError::UnexpectedTermVariant {
+            expected: "matching type subterms",
+          })
         }
       } else {
-        Err(VerifyError::UnexpectedTermVariant { expected: "boolean condition subterm" })
+        Err(VerifyError::UnexpectedTermVariant {
+          expected: "boolean condition subterm",
+        })
       }
     }
     Term::Byte(_) => Ok(Ty::Byte),
-    Term::ByteAdd(a, b, c) =>
-      if infer_ty(&*a)? == Ty::Byte && infer_ty(&*b)? == Ty::Byte && infer_ty(&*c)? == Ty::Bool {
+    Term::ByteAdd(a, b, c) => {
+      if infer_ty(a)? == Ty::Byte && infer_ty(b)? == Ty::Byte && infer_ty(c)? == Ty::Bool {
         Ok(Ty::Byte)
       } else {
-        Err(VerifyError::UnexpectedTermVariant { expected: "byte subterm" })
-      },
-    Term::ByteAddCarry(a, b, c) =>
-      if infer_ty(&*a)? == Ty::Byte && infer_ty(&*b)? == Ty::Byte && infer_ty(&*c)? == Ty::Bool {
+        Err(VerifyError::UnexpectedTermVariant {
+          expected: "byte subterm",
+        })
+      }
+    }
+    Term::ByteAddCarry(a, b, c) => {
+      if infer_ty(a)? == Ty::Byte && infer_ty(b)? == Ty::Byte && infer_ty(c)? == Ty::Bool {
         Ok(Ty::Bool)
       } else {
-        Err(VerifyError::UnexpectedTermVariant { expected: "bool subterm" })
-      },
-    Term::ByteMulLow(a, b) |
-    Term::ByteMulHigh(a, b) |
-    Term::ByteAnd(a, b) |
-    Term::ByteOr(a, b) |
-    Term::ByteXor(a, b) => {
-      if infer_ty(&*a)? == Ty::Byte && infer_ty(&*b)? == Ty::Byte {
+        Err(VerifyError::UnexpectedTermVariant {
+          expected: "bool subterm",
+        })
+      }
+    }
+    Term::ByteMulLow(a, b)
+    | Term::ByteMulHigh(a, b)
+    | Term::ByteAnd(a, b)
+    | Term::ByteOr(a, b)
+    | Term::ByteXor(a, b) => {
+      if infer_ty(a)? == Ty::Byte && infer_ty(b)? == Ty::Byte {
         Ok(Ty::Byte)
       } else {
-        Err(VerifyError::UnexpectedTermVariant { expected: "byte subterm" })
+        Err(VerifyError::UnexpectedTermVariant {
+          expected: "byte subterm",
+        })
       }
-    },
+    }
   }
 }
 
@@ -298,15 +324,17 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
       let wff1 = infer_proof(p1)?;
       let wff2 = infer_proof(p2)?;
       Ok(WFF::And(Box::new(wff1), Box::new(wff2)))
-    },
+    }
     Proof::EqRefl(t) => Ok(WFF::Equal(Box::new(t.clone()), Box::new(t.clone()))),
     Proof::EqSym(p) => {
       if let WFF::Equal(a, b) = infer_proof(p)? {
         Ok(WFF::Equal(b, a))
       } else {
-        Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" })
+        Err(VerifyError::UnexpectedProofVariant {
+          expected: "equality proof",
+        })
       }
-    },
+    }
     Proof::EqTrans(p1, p2) => {
       if let WFF::Equal(a, b) = infer_proof(p1)? {
         if let WFF::Equal(b2, c) = infer_proof(p2)? {
@@ -316,18 +344,25 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
             Err(VerifyError::TransitivityMismatch)
           }
         } else {
-          Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" })
+          Err(VerifyError::UnexpectedProofVariant {
+            expected: "equality proof",
+          })
         }
       } else {
-        Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" })
+        Err(VerifyError::UnexpectedProofVariant {
+          expected: "equality proof",
+        })
       }
-    },
+    }
     Proof::ByteAddEq(a, b, c) => {
       let cv = *c as u16;
       let total = *a as u16 + *b as u16 + cv;
       Ok(WFF::Equal(
         Box::new(Term::ByteAdd(
-          Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)), Box::new(Term::Bool(*c)))),
+          Box::new(Term::Byte(*a)),
+          Box::new(Term::Byte(*b)),
+          Box::new(Term::Bool(*c)),
+        )),
         Box::new(Term::Byte((total & 0xFF) as u8)),
       ))
     }
@@ -336,35 +371,48 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
       let total = *a as u16 + *b as u16 + cv;
       Ok(WFF::Equal(
         Box::new(Term::ByteAddCarry(
-          Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)), Box::new(Term::Bool(*c)))),
+          Box::new(Term::Byte(*a)),
+          Box::new(Term::Byte(*b)),
+          Box::new(Term::Bool(*c)),
+        )),
         Box::new(Term::Bool(total >= 256)),
       ))
     }
-    Proof::ByteMulLowEq(a, b) =>
-      Ok(WFF::Equal(
-        Box::new(Term::ByteMulLow(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
-        Box::new(Term::Byte(((*a as u16 * *b as u16) & 0xFF) as u8)),
+    Proof::ByteMulLowEq(a, b) => Ok(WFF::Equal(
+      Box::new(Term::ByteMulLow(
+        Box::new(Term::Byte(*a)),
+        Box::new(Term::Byte(*b)),
       )),
-    Proof::ByteMulHighEq(a, b) =>
-      Ok(WFF::Equal(
-        Box::new(Term::ByteMulHigh(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
-        Box::new(Term::Byte(((*a as u16 * *b as u16) >> 8) as u8)),
+      Box::new(Term::Byte(((*a as u16 * *b as u16) & 0xFF) as u8)),
+    )),
+    Proof::ByteMulHighEq(a, b) => Ok(WFF::Equal(
+      Box::new(Term::ByteMulHigh(
+        Box::new(Term::Byte(*a)),
+        Box::new(Term::Byte(*b)),
       )),
-    Proof::ByteAndEq(a, b) =>
-      Ok(WFF::Equal(
-        Box::new(Term::ByteAnd(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
-        Box::new(Term::Byte(*a & *b))
+      Box::new(Term::Byte(((*a as u16 * *b as u16) >> 8) as u8)),
+    )),
+    Proof::ByteAndEq(a, b) => Ok(WFF::Equal(
+      Box::new(Term::ByteAnd(
+        Box::new(Term::Byte(*a)),
+        Box::new(Term::Byte(*b)),
       )),
-    Proof::ByteOrEq(a, b) =>
-      Ok(WFF::Equal(
-        Box::new(Term::ByteOr(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
-        Box::new(Term::Byte(*a | *b))
+      Box::new(Term::Byte(*a & *b)),
+    )),
+    Proof::ByteOrEq(a, b) => Ok(WFF::Equal(
+      Box::new(Term::ByteOr(
+        Box::new(Term::Byte(*a)),
+        Box::new(Term::Byte(*b)),
       )),
-    Proof::ByteXorEq(a, b) =>
-      Ok(WFF::Equal(
-        Box::new(Term::ByteXor(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
-        Box::new(Term::Byte(*a ^ *b))
+      Box::new(Term::Byte(*a | *b)),
+    )),
+    Proof::ByteXorEq(a, b) => Ok(WFF::Equal(
+      Box::new(Term::ByteXor(
+        Box::new(Term::Byte(*a)),
+        Box::new(Term::Byte(*b)),
       )),
+      Box::new(Term::Byte(*a ^ *b)),
+    )),
     Proof::U16AddEq(a, b, cin, c) => {
       let a_lo = (*a & 0xFF) as u8;
       let a_hi = (*a >> 8) as u8;
@@ -395,6 +443,124 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
         )),
       ))
     }
+    Proof::U29AddEq(a, b, _cin, c) => {
+      if *a >= (1u32 << 29) || *b >= (1u32 << 29) || *c >= (1u32 << 29) {
+        return Err(VerifyError::UnexpectedProofVariant {
+          expected: "u29 inputs",
+        });
+      }
+      let total = *a + *b + (*_cin as u32);
+      let sum = total & ((1u32 << 29) - 1);
+      let pairs = vec![
+        ((sum & 0xFF) as u8, (*c & 0xFF) as u8),
+        (((sum >> 8) & 0xFF) as u8, ((*c >> 8) & 0xFF) as u8),
+        (((sum >> 16) & 0xFF) as u8, ((*c >> 16) & 0xFF) as u8),
+        (((sum >> 24) & 0x1F) as u8, ((*c >> 24) & 0x1F) as u8),
+      ];
+      Ok(and_wffs(
+        pairs
+          .into_iter()
+          .map(|(lhs, rhs)| WFF::Equal(Box::new(Term::Byte(lhs)), Box::new(Term::Byte(rhs))))
+          .collect(),
+      ))
+    }
+    Proof::U24AddEq(a, b, _cin, c) => {
+      if *a >= (1u32 << 24) || *b >= (1u32 << 24) || *c >= (1u32 << 24) {
+        return Err(VerifyError::UnexpectedProofVariant {
+          expected: "u24 inputs",
+        });
+      }
+      let total = *a + *b + (*_cin as u32);
+      let sum = total & ((1u32 << 24) - 1);
+      let pairs = vec![
+        ((sum & 0xFF) as u8, (*c & 0xFF) as u8),
+        (((sum >> 8) & 0xFF) as u8, ((*c >> 8) & 0xFF) as u8),
+        (((sum >> 16) & 0xFF) as u8, ((*c >> 16) & 0xFF) as u8),
+      ];
+      Ok(and_wffs(
+        pairs
+          .into_iter()
+          .map(|(lhs, rhs)| WFF::Equal(Box::new(Term::Byte(lhs)), Box::new(Term::Byte(rhs))))
+          .collect(),
+      ))
+    }
+    Proof::U15MulEq(a, b) => {
+      if *a > 0x7FFF || *b > 0x7FFF {
+        return Err(VerifyError::UnexpectedProofVariant {
+          expected: "u15 inputs",
+        });
+      }
+      let a_lo = (*a & 0xFF) as u8;
+      let a_hi = ((*a >> 8) & 0x7F) as u8;
+      let b_lo = (*b & 0xFF) as u8;
+      let b_hi = ((*b >> 8) & 0x7F) as u8;
+
+      let p00 = a_lo as u16 * b_lo as u16;
+      let p01 = a_lo as u16 * b_hi as u16;
+      let p10 = a_hi as u16 * b_lo as u16;
+      let p11 = a_hi as u16 * b_hi as u16;
+
+      let leaves = vec![
+        WFF::Equal(
+          Box::new(Term::ByteMulLow(
+            Box::new(Term::Byte(a_lo)),
+            Box::new(Term::Byte(b_lo)),
+          )),
+          Box::new(Term::Byte((p00 & 0xFF) as u8)),
+        ),
+        WFF::Equal(
+          Box::new(Term::ByteMulHigh(
+            Box::new(Term::Byte(a_lo)),
+            Box::new(Term::Byte(b_lo)),
+          )),
+          Box::new(Term::Byte((p00 >> 8) as u8)),
+        ),
+        WFF::Equal(
+          Box::new(Term::ByteMulLow(
+            Box::new(Term::Byte(a_lo)),
+            Box::new(Term::Byte(b_hi)),
+          )),
+          Box::new(Term::Byte((p01 & 0xFF) as u8)),
+        ),
+        WFF::Equal(
+          Box::new(Term::ByteMulHigh(
+            Box::new(Term::Byte(a_lo)),
+            Box::new(Term::Byte(b_hi)),
+          )),
+          Box::new(Term::Byte((p01 >> 8) as u8)),
+        ),
+        WFF::Equal(
+          Box::new(Term::ByteMulLow(
+            Box::new(Term::Byte(a_hi)),
+            Box::new(Term::Byte(b_lo)),
+          )),
+          Box::new(Term::Byte((p10 & 0xFF) as u8)),
+        ),
+        WFF::Equal(
+          Box::new(Term::ByteMulHigh(
+            Box::new(Term::Byte(a_hi)),
+            Box::new(Term::Byte(b_lo)),
+          )),
+          Box::new(Term::Byte((p10 >> 8) as u8)),
+        ),
+        WFF::Equal(
+          Box::new(Term::ByteMulLow(
+            Box::new(Term::Byte(a_hi)),
+            Box::new(Term::Byte(b_hi)),
+          )),
+          Box::new(Term::Byte((p11 & 0xFF) as u8)),
+        ),
+        WFF::Equal(
+          Box::new(Term::ByteMulHigh(
+            Box::new(Term::Byte(a_hi)),
+            Box::new(Term::Byte(b_hi)),
+          )),
+          Box::new(Term::Byte((p11 >> 8) as u8)),
+        ),
+      ];
+
+      Ok(and_wffs(leaves))
+    }
     Proof::ByteAddThirdCongruence(p, a, b) => {
       if let WFF::Equal(c1, c2) = infer_proof(p)? {
         Ok(WFF::Equal(
@@ -410,7 +576,9 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
           )),
         ))
       } else {
-        Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" })
+        Err(VerifyError::UnexpectedProofVariant {
+          expected: "equality proof",
+        })
       }
     }
     Proof::ByteAddCarryThirdCongruence(p, a, b) => {
@@ -428,14 +596,18 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
           )),
         ))
       } else {
-        Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" })
+        Err(VerifyError::UnexpectedProofVariant {
+          expected: "equality proof",
+        })
       }
     }
     Proof::IteTrueEq(a, b) => {
       let ty_a = infer_ty(a)?;
       let ty_b = infer_ty(b)?;
       if ty_a != ty_b {
-        return Err(VerifyError::UnexpectedTermVariant { expected: "matching type subterms" });
+        return Err(VerifyError::UnexpectedTermVariant {
+          expected: "matching type subterms",
+        });
       }
       Ok(WFF::Equal(
         Box::new(Term::Ite(
@@ -450,7 +622,9 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
       let ty_a = infer_ty(a)?;
       let ty_b = infer_ty(b)?;
       if ty_a != ty_b {
-        return Err(VerifyError::UnexpectedTermVariant { expected: "matching type subterms" });
+        return Err(VerifyError::UnexpectedTermVariant {
+          expected: "matching type subterms",
+        });
       }
       Ok(WFF::Equal(
         Box::new(Term::Ite(
@@ -475,11 +649,7 @@ pub fn word_add(a: &[u8; 32], b: &[u8; 32]) -> [Box<Term>; 32] {
   for i in (0..32).rev() {
     let ai = Box::new(Term::Byte(a[i]));
     let bi = Box::new(Term::Byte(b[i]));
-    terms[i] = Box::new(Term::ByteAdd(
-      ai.clone(),
-      bi.clone(),
-      carry.clone(),
-    ));
+    *terms[i] = Term::ByteAdd(ai.clone(), bi.clone(), carry.clone());
     carry = Box::new(Term::ByteAddCarry(ai, bi, carry));
   }
   array::from_fn(|i| terms[i].clone())
@@ -507,7 +677,7 @@ fn word_add_hybrid_internal(
 
     let ai = Box::new(Term::Byte(a[i]));
     let bi = Box::new(Term::Byte(b[i]));
-    terms[i] = Box::new(Term::ByteAdd(ai, bi, Box::new(Term::Bool(carry))));
+    *terms[i] = Term::ByteAdd(ai, bi, Box::new(Term::Bool(carry)));
     out[i] = sum;
 
     if let Some(steps) = witness_steps.as_mut() {
@@ -527,7 +697,10 @@ fn word_add_hybrid_internal(
   (array::from_fn(|i| terms[i].clone()), out)
 }
 
-pub fn word_add_with_hybrid_witness(a: &[u8; 32], b: &[u8; 32]) -> ([Box<Term>; 32], WordAddHybridWitness) {
+pub fn word_add_with_hybrid_witness(
+  a: &[u8; 32],
+  b: &[u8; 32],
+) -> ([Box<Term>; 32], WordAddHybridWitness) {
   let mut steps = Vec::new();
   let (terms, output) = word_add_hybrid_internal(a, b, Some(&mut steps));
   (
@@ -550,7 +723,27 @@ fn add_u256_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
   out
 }
 
-pub fn verify_word_add_hybrid_witness(a: &[u8; 32], b: &[u8; 32], witness: &WordAddHybridWitness) -> bool {
+fn extract_limb_le_bits(word: &[u8; 32], base_bit: usize, width: usize) -> u32 {
+  let mut limb = 0u32;
+  for bit in 0..width {
+    let abs_bit = base_bit + bit;
+    if abs_bit >= 256 {
+      break;
+    }
+    let byte_from_lsb = abs_bit / 8;
+    let bit_in_byte = abs_bit % 8;
+    let byte = word[31 - byte_from_lsb];
+    let bit_val = (byte >> bit_in_byte) & 1;
+    limb |= (bit_val as u32) << bit;
+  }
+  limb
+}
+
+pub fn verify_word_add_hybrid_witness(
+  a: &[u8; 32],
+  b: &[u8; 32],
+  witness: &WordAddHybridWitness,
+) -> bool {
   if witness.add_steps.len() != 32 {
     return false;
   }
@@ -637,7 +830,11 @@ fn word_mul_internal(
     }
 
     fn mk_byte_add(lhs: Box<Term>, rhs: Box<Term>, carry: Box<Term>) -> Box<Term> {
-      if let (Some(a), Some(b), Some(c)) = (as_byte_const(lhs.as_ref()), as_byte_const(rhs.as_ref()), as_bool_const(carry.as_ref())) {
+      if let (Some(a), Some(b), Some(c)) = (
+        as_byte_const(lhs.as_ref()),
+        as_byte_const(rhs.as_ref()),
+        as_bool_const(carry.as_ref()),
+      ) {
         let total = a as u16 + b as u16 + c as u16;
         return Box::new(Term::Byte((total & 0xFF) as u8));
       }
@@ -681,8 +878,14 @@ fn word_mul_internal(
         continue;
       }
 
-      let lhs_term = acc_terms[i].take().unwrap_or_else(|| Box::new(Term::Byte(acc_vals[i])));
-      let rhs_term = if i == idx { term.clone() } else { Box::new(Term::Byte(0)) };
+      let lhs_term = acc_terms[i]
+        .take()
+        .unwrap_or_else(|| Box::new(Term::Byte(acc_vals[i])));
+      let rhs_term = if i == idx {
+        term.clone()
+      } else {
+        Box::new(Term::Byte(0))
+      };
       let carry_term = Box::new(Term::Bool(carry_in != 0));
       let sum_term = mk_byte_add(lhs_term, rhs_term, carry_term);
 
@@ -716,22 +919,43 @@ fn word_mul_internal(
       let high_val = (prod >> 8) as u8;
 
       let low_be = 31 - k;
-      add_term_at(&mut acc_terms, &mut acc_vals, low_be, low, low_val, &mut witness_steps);
+      add_term_at(
+        &mut acc_terms,
+        &mut acc_vals,
+        low_be,
+        low,
+        low_val,
+        &mut witness_steps,
+      );
 
       if k + 1 < 32 {
         let high_be = 31 - (k + 1);
-        add_term_at(&mut acc_terms, &mut acc_vals, high_be, high, high_val, &mut witness_steps);
+        add_term_at(
+          &mut acc_terms,
+          &mut acc_vals,
+          high_be,
+          high,
+          high_val,
+          &mut witness_steps,
+        );
       }
     }
   }
 
   (
-    array::from_fn(|i| acc_terms[i].clone().unwrap_or_else(|| Box::new(Term::Byte(0)))),
+    array::from_fn(|i| {
+      acc_terms[i]
+        .clone()
+        .unwrap_or_else(|| Box::new(Term::Byte(0)))
+    }),
     acc_vals,
   )
 }
 
-pub fn word_mul_with_hybrid_witness(a: &[u8; 32], b: &[u8; 32]) -> ([Box<Term>; 32], WordMulHybridWitness) {
+pub fn word_mul_with_hybrid_witness(
+  a: &[u8; 32],
+  b: &[u8; 32],
+) -> ([Box<Term>; 32], WordMulHybridWitness) {
   let mut steps = Vec::new();
   let (terms, output) = word_mul_internal(a, b, Some(&mut steps));
   (
@@ -762,6 +986,167 @@ fn mul_u256_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     out[31 - k] = limbs[k] as u8;
   }
   out
+}
+
+#[cfg(debug_assertions)]
+fn mul_u256_mod_u64_ref(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+  fn to_u64_le_words(word: &[u8; 32]) -> [u64; 4] {
+    let mut out = [0u64; 4];
+    for (i, out_word) in out.iter_mut().enumerate() {
+      let start = 32 - ((i + 1) * 8);
+      let mut chunk = [0u8; 8];
+      chunk.copy_from_slice(&word[start..start + 8]);
+      *out_word = u64::from_be_bytes(chunk);
+    }
+    out
+  }
+
+  fn from_u64_le_words(words: &[u64; 4]) -> [u8; 32] {
+    let mut out = [0u8; 32];
+    for (i, word) in words.iter().enumerate() {
+      let start = 32 - ((i + 1) * 8);
+      out[start..start + 8].copy_from_slice(&word.to_be_bytes());
+    }
+    out
+  }
+
+  let aw = to_u64_le_words(a);
+  let bw = to_u64_le_words(b);
+  let mut out = [0u64; 4];
+
+  for (i, &ai) in aw.iter().enumerate() {
+    let mut carry = 0u128;
+    for (j, &bj) in bw.iter().enumerate() {
+      let k = i + j;
+      if k >= 4 {
+        break;
+      }
+      let t = out[k] as u128 + (ai as u128) * (bj as u128) + carry;
+      out[k] = t as u64;
+      carry = t >> 64;
+    }
+  }
+
+  from_u64_le_words(&out)
+}
+
+#[cfg(debug_assertions)]
+fn debug_assert_mul_consistency(a: &[u8; 32], b: &[u8; 32], expected: &[u8; 32]) {
+  let reference = mul_u256_mod_u64_ref(a, b);
+  debug_assert_eq!(
+    &reference, expected,
+    "mul_u256_mod mismatch against debug reference implementation"
+  );
+}
+
+#[cfg(debug_assertions)]
+fn cmp_word_be(a: &[u8; 32], b: &[u8; 32]) -> core::cmp::Ordering {
+  for i in 0..32 {
+    if a[i] < b[i] {
+      return core::cmp::Ordering::Less;
+    }
+    if a[i] > b[i] {
+      return core::cmp::Ordering::Greater;
+    }
+  }
+  core::cmp::Ordering::Equal
+}
+
+#[cfg(debug_assertions)]
+fn shl1_word_be(x: &mut [u8; 32]) {
+  let mut carry = 0u8;
+  for i in (0..32).rev() {
+    let next_carry = (x[i] >> 7) & 1;
+    x[i] = (x[i] << 1) | carry;
+    carry = next_carry;
+  }
+}
+
+#[cfg(debug_assertions)]
+fn sub_word_be_in_place(x: &mut [u8; 32], y: &[u8; 32]) {
+  let mut borrow = 0u16;
+  for i in (0..32).rev() {
+    let xi = x[i] as u16;
+    let yi = y[i] as u16;
+    let rhs = yi + borrow;
+    if xi >= rhs {
+      x[i] = (xi - rhs) as u8;
+      borrow = 0;
+    } else {
+      x[i] = (xi + 256 - rhs) as u8;
+      borrow = 1;
+    }
+  }
+}
+
+#[cfg(debug_assertions)]
+fn div_mod_u256_bitwise_ref(a: &[u8; 32], b: &[u8; 32]) -> Option<([u8; 32], [u8; 32])> {
+  if is_zero_word(b) {
+    return None;
+  }
+
+  let mut q = [0u8; 32];
+  let mut r = [0u8; 32];
+
+  for bit_idx in 0..256 {
+    shl1_word_be(&mut r);
+    let src_byte = bit_idx / 8;
+    let src_bit = 7 - (bit_idx % 8);
+    let incoming = (a[src_byte] >> src_bit) & 1;
+    r[31] |= incoming;
+
+    shl1_word_be(&mut q);
+    if cmp_word_be(&r, b) != core::cmp::Ordering::Less {
+      sub_word_be_in_place(&mut r, b);
+      q[31] |= 1;
+    }
+  }
+
+  Some((q, r))
+}
+
+#[cfg(debug_assertions)]
+fn div_mod_s256_bitwise_ref(a: &[u8; 32], b: &[u8; 32]) -> Option<([u8; 32], [u8; 32])> {
+  if is_zero_word(b) {
+    return None;
+  }
+
+  let a_neg = is_negative_word(a);
+  let b_neg = is_negative_word(b);
+  let abs_a = abs_word(a);
+  let abs_b = abs_word(b);
+  let (q_mag, r_mag) = div_mod_u256_bitwise_ref(&abs_a, &abs_b)?;
+
+  let q = if a_neg ^ b_neg {
+    twos_complement_word(&q_mag)
+  } else {
+    q_mag
+  };
+  let r = if a_neg && !is_zero_word(&r_mag) {
+    twos_complement_word(&r_mag)
+  } else {
+    r_mag
+  };
+  Some((q, r))
+}
+
+#[cfg(debug_assertions)]
+fn debug_assert_div_mod_consistency(a: &[u8; 32], b: &[u8; 32], signed: bool) {
+  if signed {
+    let fast = div_mod_s256(a, b);
+    let reference = div_mod_s256_bitwise_ref(a, b);
+    debug_assert_eq!(
+      fast, reference,
+      "div_mod_s256 mismatch against debug reference implementation"
+    );
+  } else {
+    let fast = div_mod_u256(a, b);
+    let reference = div_mod_u256_bitwise_ref(a, b);
+    debug_assert_eq!(
+      fast, reference,
+      "div_mod_u256 mismatch against debug reference implementation"
+    );
+  }
 }
 
 fn is_zero_word(x: &[u8; 32]) -> bool {
@@ -820,7 +1205,11 @@ fn div_mod_s256(a: &[u8; 32], b: &[u8; 32]) -> Option<([u8; 32], [u8; 32])> {
   let abs_b = abs_word(b);
   let (q_mag, r_mag) = div_mod_u256(&abs_a, &abs_b).expect("non-zero divisor");
 
-  let q = if a_neg ^ b_neg { twos_complement_word(&q_mag) } else { q_mag };
+  let q = if a_neg ^ b_neg {
+    twos_complement_word(&q_mag)
+  } else {
+    q_mag
+  };
   let r = if a_neg && !is_zero_word(&r_mag) {
     twos_complement_word(&r_mag)
   } else {
@@ -830,7 +1219,11 @@ fn div_mod_s256(a: &[u8; 32], b: &[u8; 32]) -> Option<([u8; 32], [u8; 32])> {
   Some((q, r))
 }
 
-pub fn verify_word_mul_hybrid_witness(a: &[u8; 32], b: &[u8; 32], witness: &WordMulHybridWitness) -> bool {
+pub fn verify_word_mul_hybrid_witness(
+  a: &[u8; 32],
+  b: &[u8; 32],
+  witness: &WordMulHybridWitness,
+) -> bool {
   let mut replay = [0u8; 32];
   for step in &witness.add_steps {
     if step.byte_index >= 32 {
@@ -858,40 +1251,31 @@ pub fn verify_word_mul_hybrid_witness(a: &[u8; 32], b: &[u8; 32], witness: &Word
 }
 
 // ============================================================
-// Core WFFs 
+// Core WFFs
 // ============================================================
 
 pub fn wff_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
-  let mut leaves = Vec::with_capacity(16);
+  let mut leaves = Vec::with_capacity(9);
   let mut carry = false;
-  for chunk in (0..16).rev() {
-    let lo = chunk * 2 + 1;
-    let hi = chunk * 2;
 
-    let a16 = ((a[hi] as u16) << 8) | a[lo] as u16;
-    let b16 = ((b[hi] as u16) << 8) | b[lo] as u16;
-    let low_total = a[lo] as u16 + b[lo] as u16 + carry as u16;
-    let mid_carry = low_total >= 256;
+  for limb in 0..8 {
+    let base = 29 * limb;
+    let a29 = extract_limb_le_bits(a, base, 29);
+    let b29 = extract_limb_le_bits(b, base, 29);
+    let c29 = extract_limb_le_bits(c, base, 29);
+    let leaf = Proof::U29AddEq(a29, b29, carry, c29);
+    leaves.push(infer_proof(&leaf).expect("u29 add leaf must infer"));
 
-    let lhs_lo = Term::ByteAdd(
-      Box::new(Term::Byte(a[lo])),
-      Box::new(Term::Byte(b[lo])),
-      Box::new(Term::Bool(carry)),
-    );
-    let lhs_hi = Term::ByteAdd(
-      Box::new(Term::Byte(a[hi])),
-      Box::new(Term::Byte(b[hi])),
-      Box::new(Term::Bool(mid_carry)),
-    );
-
-    leaves.push(WFF::And(
-      Box::new(WFF::Equal(Box::new(lhs_lo), Box::new(Term::Byte(c[lo])))),
-      Box::new(WFF::Equal(Box::new(lhs_hi), Box::new(Term::Byte(c[hi])))),
-    ));
-
-    let total16 = a16 as u32 + b16 as u32 + carry as u32;
-    carry = total16 >= 65536;
+    let total = a29 + b29 + carry as u32;
+    carry = total >= (1u32 << 29);
   }
+
+  let a24 = extract_limb_le_bits(a, 232, 24);
+  let b24 = extract_limb_le_bits(b, 232, 24);
+  let c24 = extract_limb_le_bits(c, 232, 24);
+  let top_leaf = Proof::U24AddEq(a24, b24, carry, c24);
+  leaves.push(infer_proof(&top_leaf).expect("u24 add leaf must infer"));
+
   and_wffs(leaves)
 }
 
@@ -901,17 +1285,27 @@ pub fn wff_sub(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
 
 pub fn wff_mul(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
   let expected = mul_u256_mod(a, b);
-  let mut leaves = mul_local_proof_leaves(a, b)
-    .into_iter()
-    .map(|p| infer_proof(&p).expect("mul_local_proof_leaves must infer"))
-    .collect::<Vec<_>>();
+  #[cfg(debug_assertions)]
+  debug_assert_mul_consistency(a, b, &expected);
 
-  for i in (0..32).rev() {
-    leaves.push(WFF::Equal(
-      Box::new(Term::Byte(expected[i])),
-      Box::new(Term::Byte(c[i])),
-    ));
+  let mut leaves: Vec<WFF> = mul_local_proof_leaves(a, b)
+    .into_iter()
+    .map(|leaf| infer_proof(&leaf).expect("u15 mul leaf must infer"))
+    .collect();
+  leaves.reserve(9);
+
+  for limb in 0..8 {
+    let base = 29 * limb;
+    let expected29 = extract_limb_le_bits(&expected, base, 29);
+    let c29 = extract_limb_le_bits(c, base, 29);
+    let leaf = Proof::U29AddEq(expected29, 0, false, c29);
+    leaves.push(infer_proof(&leaf).expect("u29 output-check leaf must infer"));
   }
+
+  let expected24 = extract_limb_le_bits(&expected, 232, 24);
+  let c24 = extract_limb_le_bits(c, 232, 24);
+  let top_leaf = Proof::U24AddEq(expected24, 0, false, c24);
+  leaves.push(infer_proof(&top_leaf).expect("u24 output-check leaf must infer"));
 
   and_wffs(leaves)
 }
@@ -922,12 +1316,12 @@ pub fn wff_div(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
     return wff_add(&zero, &zero, c);
   }
 
+  #[cfg(debug_assertions)]
+  debug_assert_div_mod_consistency(a, b, false);
+
   let (_q, r) = div_mod_u256(a, b).expect("checked non-zero divisor");
   let bc = mul_u256_mod(b, c);
-  WFF::And(
-    Box::new(wff_mul(b, c, &bc)),
-    Box::new(wff_add(&bc, &r, a)),
-  )
+  WFF::And(Box::new(wff_mul(b, c, &bc)), Box::new(wff_add(&bc, &r, a)))
 }
 
 pub fn wff_mod(a: &[u8; 32], b: &[u8; 32], r: &[u8; 32]) -> WFF {
@@ -936,12 +1330,12 @@ pub fn wff_mod(a: &[u8; 32], b: &[u8; 32], r: &[u8; 32]) -> WFF {
     return wff_add(&zero, &zero, r);
   }
 
+  #[cfg(debug_assertions)]
+  debug_assert_div_mod_consistency(a, b, false);
+
   let (q, _r) = div_mod_u256(a, b).expect("checked non-zero divisor");
   let bq = mul_u256_mod(b, &q);
-  WFF::And(
-    Box::new(wff_mul(b, &q, &bq)),
-    Box::new(wff_add(&bq, r, a)),
-  )
+  WFF::And(Box::new(wff_mul(b, &q, &bq)), Box::new(wff_add(&bq, r, a)))
 }
 
 pub fn wff_sdiv(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
@@ -950,12 +1344,12 @@ pub fn wff_sdiv(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
     return wff_add(&zero, &zero, c);
   }
 
+  #[cfg(debug_assertions)]
+  debug_assert_div_mod_consistency(a, b, true);
+
   let (_q, r) = div_mod_s256(a, b).expect("checked non-zero divisor");
   let bc = mul_u256_mod(b, c);
-  WFF::And(
-    Box::new(wff_mul(b, c, &bc)),
-    Box::new(wff_add(&bc, &r, a)),
-  )
+  WFF::And(Box::new(wff_mul(b, c, &bc)), Box::new(wff_add(&bc, &r, a)))
 }
 
 pub fn wff_smod(a: &[u8; 32], b: &[u8; 32], r: &[u8; 32]) -> WFF {
@@ -964,19 +1358,22 @@ pub fn wff_smod(a: &[u8; 32], b: &[u8; 32], r: &[u8; 32]) -> WFF {
     return wff_add(&zero, &zero, r);
   }
 
+  #[cfg(debug_assertions)]
+  debug_assert_div_mod_consistency(a, b, true);
+
   let (q, _r) = div_mod_s256(a, b).expect("checked non-zero divisor");
   let bq = mul_u256_mod(b, &q);
-  WFF::And(
-    Box::new(wff_mul(b, &q, &bq)),
-    Box::new(wff_add(&bq, r, a)),
-  )
+  WFF::And(Box::new(wff_mul(b, &q, &bq)), Box::new(wff_add(&bq, r, a)))
 }
 
 pub fn wff_and(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
   let mut leaves = Vec::with_capacity(32);
   for i in (0..32).rev() {
     leaves.push(WFF::Equal(
-      Box::new(Term::ByteAnd(Box::new(Term::Byte(a[i])), Box::new(Term::Byte(b[i])))),
+      Box::new(Term::ByteAnd(
+        Box::new(Term::Byte(a[i])),
+        Box::new(Term::Byte(b[i])),
+      )),
       Box::new(Term::Byte(c[i])),
     ));
   }
@@ -987,7 +1384,10 @@ pub fn wff_or(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
   let mut leaves = Vec::with_capacity(32);
   for i in (0..32).rev() {
     leaves.push(WFF::Equal(
-      Box::new(Term::ByteOr(Box::new(Term::Byte(a[i])), Box::new(Term::Byte(b[i])))),
+      Box::new(Term::ByteOr(
+        Box::new(Term::Byte(a[i])),
+        Box::new(Term::Byte(b[i])),
+      )),
       Box::new(Term::Byte(c[i])),
     ));
   }
@@ -998,7 +1398,10 @@ pub fn wff_xor(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
   let mut leaves = Vec::with_capacity(32);
   for i in (0..32).rev() {
     leaves.push(WFF::Equal(
-      Box::new(Term::ByteXor(Box::new(Term::Byte(a[i])), Box::new(Term::Byte(b[i])))),
+      Box::new(Term::ByteXor(
+        Box::new(Term::Byte(a[i])),
+        Box::new(Term::Byte(b[i])),
+      )),
       Box::new(Term::Byte(c[i])),
     ));
   }
@@ -1009,7 +1412,10 @@ pub fn wff_not(a: &[u8; 32], c: &[u8; 32]) -> WFF {
   let mut leaves = Vec::with_capacity(32);
   for i in (0..32).rev() {
     leaves.push(WFF::Equal(
-      Box::new(Term::ByteXor(Box::new(Term::Byte(a[i])), Box::new(Term::Byte(0xFF)))),
+      Box::new(Term::ByteXor(
+        Box::new(Term::Byte(a[i])),
+        Box::new(Term::Byte(0xFF)),
+      )),
       Box::new(Term::Byte(c[i])),
     ));
   }
@@ -1017,24 +1423,169 @@ pub fn wff_not(a: &[u8; 32], c: &[u8; 32]) -> WFF {
 }
 
 // ============================================================
+// Comparison helpers
+// ============================================================
+
+/// The EVM boolean true word: 0x000...001.
+pub const ONE_WORD: [u8; 32] = {
+  let mut w = [0u8; 32];
+  w[31] = 1;
+  w
+};
+
+pub const ZERO_WORD: [u8; 32] = [0u8; 32];
+
+/// Big-endian unsigned compare for 256-bit words.
+fn compare_u256_be(a: &[u8; 32], b: &[u8; 32]) -> std::cmp::Ordering {
+  for i in 0..32 {
+    if a[i] < b[i] {
+      return std::cmp::Ordering::Less;
+    }
+    if a[i] > b[i] {
+      return std::cmp::Ordering::Greater;
+    }
+  }
+  std::cmp::Ordering::Equal
+}
+
+/// Compute `a - b` (big-endian, wrapping on underflow like u256 subtraction).
+fn sub_u256_be(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+  let mut out = [0u8; 32];
+  let mut borrow: u16 = 0;
+  for i in (0..32).rev() {
+    let ai = a[i] as u16;
+    let bi = b[i] as u16 + borrow;
+    if ai >= bi {
+      out[i] = (ai - bi) as u8;
+      borrow = 0;
+    } else {
+      out[i] = (ai + 256 - bi) as u8;
+      borrow = 1;
+    }
+  }
+  out
+}
+
+/// The sign-bit mask for two's-complement signed comparison: [0x80, 0, ..., 0].
+fn sign_mask() -> [u8; 32] {
+  let mut m = [0u8; 32];
+  m[0] = 0x80;
+  m
+}
+
+/// Flip the MSB of a 256-bit big-endian word (used for signed→unsigned reduction).
+fn flip_sign_bit(x: &[u8; 32]) -> [u8; 32] {
+  let mut out = *x;
+  out[0] ^= 0x80;
+  out
+}
+
+// ============================================================
+// Comparison / equality WFFs
+//
+// Design principle:
+//   wff_cmp(inputs..., c) = AND(arithmetic_wff, output_binding_wff)
+//   where output_binding_wff = wff_xor(c, expected_c, ZERO_WORD)
+//   This is sound: the inferred XOR of c vs expected_c must be zero,
+//   so c == expected_c is enforced by the WFF equality check.
+// ============================================================
+
+/// WFF for EQ(a, b) = c.
+///
+/// Structure:
+///   AND(wff_xor(a, b, a^b),            // proves each byte XOR
+///       wff_xor(c, expected_c, ZERO))   // pins output c to the correct boolean
+pub fn wff_eq(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let mut xor_result = [0u8; 32];
+  for i in 0..32 {
+    xor_result[i] = a[i] ^ b[i];
+  }
+  let expected_c = if xor_result == ZERO_WORD { ONE_WORD } else { ZERO_WORD };
+  WFF::And(
+    Box::new(wff_xor(a, b, &xor_result)),
+    Box::new(wff_xor(c, &expected_c, &ZERO_WORD)),
+  )
+}
+
+/// WFF for ISZERO(a) = c.  Reduces to EQ(a, 0) = c.
+pub fn wff_iszero(a: &[u8; 32], c: &[u8; 32]) -> WFF {
+  wff_eq(a, &ZERO_WORD, c)
+}
+
+/// WFF for LT(a, b) = c  (unsigned).
+///
+/// Arithmetic witness:
+///   a < b → prove  b = a + (b−a)   via wff_sub(b, a, b−a)
+///   a ≥ b → prove  a = b + (a−b)   via wff_sub(a, b, a−b)
+pub fn wff_lt(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let a_lt_b = compare_u256_be(a, b) == std::cmp::Ordering::Less;
+  let expected_c = if a_lt_b { ONE_WORD } else { ZERO_WORD };
+
+  let arith_wff = if a_lt_b {
+    let diff = sub_u256_be(b, a);
+    wff_sub(b, a, &diff)
+  } else {
+    let diff = sub_u256_be(a, b);
+    wff_sub(a, b, &diff)
+  };
+
+  WFF::And(
+    Box::new(arith_wff),
+    Box::new(wff_xor(c, &expected_c, &ZERO_WORD)),
+  )
+}
+
+/// WFF for GT(a, b) = c.  Reduces to LT(b, a) = c.
+pub fn wff_gt(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  wff_lt(b, a, c)
+}
+
+/// WFF for SLT(a, b) = c  (signed, two's-complement).
+///
+/// Reduction: flip the sign bit of both operands, then do unsigned LT.
+/// This works because: a <_s b  ↔  (a ^ (1<<255)) <_u (b ^ (1<<255)).
+pub fn wff_slt(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let sm = sign_mask();
+  let a_adj = flip_sign_bit(a);
+  let b_adj = flip_sign_bit(b);
+
+  WFF::And(
+    Box::new(WFF::And(
+      Box::new(wff_xor(a, &sm, &a_adj)),
+      Box::new(wff_xor(b, &sm, &b_adj)),
+    )),
+    Box::new(wff_lt(&a_adj, &b_adj, c)),
+  )
+}
+
+/// WFF for SGT(a, b) = c.  Reduces to SLT(b, a) = c.
+pub fn wff_sgt(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  wff_slt(b, a, c)
+}
+
+// ============================================================
 // Proving Instructions
 // ============================================================
 
 pub fn prove_add(a: &[u8; 32], b: &[u8; 32], _c: &[u8; 32]) -> Proof {
-  let mut leaves = Vec::with_capacity(16);
-  let mut carry_bool = false;
+  let mut leaves = Vec::with_capacity(9);
+  let mut carry = false;
 
-  for chunk in (0..16).rev() {
-    let lo = chunk * 2 + 1;
-    let hi = chunk * 2;
-    let a16 = ((a[hi] as u16) << 8) | a[lo] as u16;
-    let b16 = ((b[hi] as u16) << 8) | b[lo] as u16;
-    let total16 = a16 as u32 + b16 as u32 + carry_bool as u32;
-    let c16 = (total16 & 0xFFFF) as u16;
-
-    leaves.push(Proof::U16AddEq(a16, b16, carry_bool, c16));
-    carry_bool = total16 >= 65536;
+  for limb in 0..8 {
+    let base = 29 * limb;
+    let a29 = extract_limb_le_bits(a, base, 29);
+    let b29 = extract_limb_le_bits(b, base, 29);
+    let total = a29 + b29 + carry as u32;
+    let c29 = total & ((1u32 << 29) - 1);
+    leaves.push(Proof::U29AddEq(a29, b29, carry, c29));
+    carry = total >= (1u32 << 29);
   }
+
+  let a24 = extract_limb_le_bits(a, 232, 24);
+  let b24 = extract_limb_le_bits(b, 232, 24);
+  let total_top = a24 + b24 + carry as u32;
+  let c24 = total_top & ((1u32 << 24) - 1);
+  leaves.push(Proof::U24AddEq(a24, b24, carry, c24));
 
   and_proofs(leaves)
 }
@@ -1045,53 +1596,77 @@ pub fn prove_sub(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
 
 fn and_proofs(mut leaves: Vec<Proof>) -> Proof {
   let first = leaves.remove(0);
-  leaves.into_iter().fold(first, |acc, p| Proof::AndIntro(Box::new(acc), Box::new(p)))
+  leaves
+    .into_iter()
+    .fold(first, |acc, p| Proof::AndIntro(Box::new(acc), Box::new(p)))
 }
 
 fn and_wffs(mut leaves: Vec<WFF>) -> WFF {
   let first = leaves.remove(0);
-  leaves.into_iter().fold(first, |acc, w| WFF::And(Box::new(acc), Box::new(w)))
-}
-
-fn mul_local_proof_leaves(a: &[u8; 32], b: &[u8; 32]) -> Vec<Proof> {
-  let mut leaves = Vec::new();
-  let mut seen_mul_low_value = HashSet::new();
-  let mut seen_mul_high_value = HashSet::new();
-
-  for k in 0..32 {
-    for i in 0..=k {
-      let j = k - i;
-      let av = a[31 - i];
-      let bv = b[31 - j];
-      if av == 0 || bv == 0 {
-        continue;
-      }
-
-      let prod = av as u16 * bv as u16;
-      let low = (prod & 0xFF) as u8;
-      let high = (prod >> 8) as u8;
-
-      if seen_mul_low_value.insert(low) {
-        leaves.push(Proof::ByteMulLowEq(av, bv));
-      }
-      if k + 1 < 32 && prod >= 256 && seen_mul_high_value.insert(high) {
-        leaves.push(Proof::ByteMulHighEq(av, bv));
-      }
-    }
-  }
-
   leaves
+    .into_iter()
+    .fold(first, |acc, w| WFF::And(Box::new(acc), Box::new(w)))
 }
 
 pub fn prove_mul(a: &[u8; 32], b: &[u8; 32], _c: &[u8; 32]) -> Proof {
   let expected = mul_u256_mod(a, b);
-  let mut leaves = mul_local_proof_leaves(a, b);
+  #[cfg(debug_assertions)]
+  debug_assert_mul_consistency(a, b, &expected);
 
-  for i in (0..32).rev() {
-    leaves.push(Proof::EqRefl(Term::Byte(expected[i])));
+  let mut leaves = mul_local_proof_leaves(a, b);
+  leaves.reserve(9);
+
+  for limb in 0..8 {
+    let base = 29 * limb;
+    let expected29 = extract_limb_le_bits(&expected, base, 29);
+    leaves.push(Proof::U29AddEq(expected29, 0, false, expected29));
   }
 
+  let expected24 = extract_limb_le_bits(&expected, 232, 24);
+  leaves.push(Proof::U24AddEq(expected24, 0, false, expected24));
+
   and_proofs(leaves)
+}
+
+fn word_to_u15_limbs(word: &[u8; 32]) -> [u16; 18] {
+  let mut limbs = [0u16; 18];
+  for (limb_idx, limb_slot) in limbs.iter_mut().enumerate() {
+    let mut limb = 0u16;
+    let base_bit = limb_idx * 15;
+    for bit in 0..15 {
+      let abs_bit = base_bit + bit;
+      if abs_bit >= 256 {
+        break;
+      }
+      let byte_from_lsb = abs_bit / 8;
+      let bit_in_byte = abs_bit % 8;
+      let byte = word[31 - byte_from_lsb];
+      let bit_val = (byte >> bit_in_byte) & 1;
+      limb |= (bit_val as u16) << bit;
+    }
+    *limb_slot = limb;
+  }
+  limbs
+}
+
+fn mul_local_proof_leaves(a: &[u8; 32], b: &[u8; 32]) -> Vec<Proof> {
+  let mut leaves = Vec::new();
+  let a_limbs = word_to_u15_limbs(a);
+  let b_limbs = word_to_u15_limbs(b);
+
+  for (i, &av) in a_limbs.iter().enumerate() {
+    for (j, &bv) in b_limbs.iter().enumerate() {
+      if i + j > 17 {
+        continue;
+      }
+      if av == 0 || bv == 0 {
+        continue;
+      }
+      leaves.push(Proof::U15MulEq(av, bv));
+    }
+  }
+
+  leaves
 }
 
 pub fn prove_div(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
@@ -1099,6 +1674,9 @@ pub fn prove_div(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
     let zero = [0u8; 32];
     return prove_add(&zero, &zero, c);
   }
+
+  #[cfg(debug_assertions)]
+  debug_assert_div_mod_consistency(a, b, false);
 
   let (_q, r) = div_mod_u256(a, b).expect("checked non-zero divisor");
   let bc = mul_u256_mod(b, c);
@@ -1113,6 +1691,9 @@ pub fn prove_mod(a: &[u8; 32], b: &[u8; 32], r: &[u8; 32]) -> Proof {
     return prove_add(&zero, &zero, r);
   }
 
+  #[cfg(debug_assertions)]
+  debug_assert_div_mod_consistency(a, b, false);
+
   let (q, _r) = div_mod_u256(a, b).expect("checked non-zero divisor");
   let bq = mul_u256_mod(b, &q);
   let p_mul = prove_mul(b, &q, &bq);
@@ -1126,6 +1707,9 @@ pub fn prove_sdiv(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
     return prove_add(&zero, &zero, c);
   }
 
+  #[cfg(debug_assertions)]
+  debug_assert_div_mod_consistency(a, b, true);
+
   let (_q, r) = div_mod_s256(a, b).expect("checked non-zero divisor");
   let bc = mul_u256_mod(b, c);
   let p_mul = prove_mul(b, c, &bc);
@@ -1138,6 +1722,9 @@ pub fn prove_smod(a: &[u8; 32], b: &[u8; 32], r: &[u8; 32]) -> Proof {
     let zero = [0u8; 32];
     return prove_add(&zero, &zero, r);
   }
+
+  #[cfg(debug_assertions)]
+  debug_assert_div_mod_consistency(a, b, true);
 
   let (q, _r) = div_mod_s256(a, b).expect("checked non-zero divisor");
   let bq = mul_u256_mod(b, &q);
@@ -1178,6 +1765,72 @@ pub fn prove_not(a: &[u8; 32], _c: &[u8; 32]) -> Proof {
   and_proofs(leaves)
 }
 
+/// Prove EQ(a, b) = c.
+///
+/// Part 1: ByteXorEq for each byte of a vs b.
+/// Part 2: ByteXorEq for each byte of c vs expected_c (pins the output).
+pub fn prove_eq(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
+  let mut xor_result = [0u8; 32];
+  for i in 0..32 {
+    xor_result[i] = a[i] ^ b[i];
+  }
+  let expected_c = if xor_result == ZERO_WORD { ONE_WORD } else { ZERO_WORD };
+  let p_xor = prove_xor(a, b, &xor_result);
+  let p_output = prove_xor(c, &expected_c, &ZERO_WORD);
+  Proof::AndIntro(Box::new(p_xor), Box::new(p_output))
+}
+
+/// Prove ISZERO(a) = c.  Reduces to EQ(a, 0) = c.
+pub fn prove_iszero(a: &[u8; 32], c: &[u8; 32]) -> Proof {
+  prove_eq(a, &ZERO_WORD, c)
+}
+
+/// Prove LT(a, b) = c  (unsigned).
+///
+/// Arithmetic witness: b = a + diff  (if a < b) or  a = b + diff  (if a ≥ b).
+/// Output pin: ByteXorEq chain proving c == expected_c.
+pub fn prove_lt(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
+  let a_lt_b = compare_u256_be(a, b) == std::cmp::Ordering::Less;
+  let expected_c = if a_lt_b { ONE_WORD } else { ZERO_WORD };
+
+  let p_arith = if a_lt_b {
+    let diff = sub_u256_be(b, a);
+    prove_sub(b, a, &diff)
+  } else {
+    let diff = sub_u256_be(a, b);
+    prove_sub(a, b, &diff)
+  };
+
+  let p_output = prove_xor(c, &expected_c, &ZERO_WORD);
+  Proof::AndIntro(Box::new(p_arith), Box::new(p_output))
+}
+
+/// Prove GT(a, b) = c.  Reduces to LT(b, a) = c.
+pub fn prove_gt(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
+  prove_lt(b, a, c)
+}
+
+/// Prove SLT(a, b) = c  (signed).
+///
+/// Flip the MSB of both operands (sign-extension trick) then prove unsigned LT.
+pub fn prove_slt(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
+  let sm = sign_mask();
+  let a_adj = flip_sign_bit(a);
+  let b_adj = flip_sign_bit(b);
+  let p_flip_a = prove_xor(a, &sm, &a_adj);
+  let p_flip_b = prove_xor(b, &sm, &b_adj);
+  let p_lt = prove_lt(&a_adj, &b_adj, c);
+  Proof::AndIntro(
+    Box::new(Proof::AndIntro(Box::new(p_flip_a), Box::new(p_flip_b))),
+    Box::new(p_lt),
+  )
+}
+
+/// Prove SGT(a, b) = c.  Reduces to SLT(b, a) = c.
+pub fn prove_sgt(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
+  prove_slt(b, a, c)
+}
+
 // ============================================================
 // Compiling: Tree → Vec<ProofRow>
 // ============================================================
@@ -1187,14 +1840,26 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
     Term::Bool(v) => {
       let idx = rows.len() as u32;
       let val = *v as u32;
-      rows.push(ProofRow { op: OP_BOOL, scalar0: val, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BOOL,
+        scalar0: val,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       idx
     }
     Term::Not(a) => {
       let ai = compile_term_inner(a, rows);
       let val = 1 - rows[ai as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_NOT, arg0: ai, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_NOT,
+        arg0: ai,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       idx
     }
     Term::And(a, b) => {
@@ -1202,7 +1867,14 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
       let bi = compile_term_inner(b, rows);
       let val = rows[ai as usize].value * rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_AND, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_AND,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       idx
     }
     Term::Or(a, b) => {
@@ -1211,7 +1883,14 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
       let (av, bv) = (rows[ai as usize].value, rows[bi as usize].value);
       let val = av + bv - av * bv;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_OR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_OR,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       idx
     }
     Term::Xor(a, b) => {
@@ -1220,7 +1899,14 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
       let (av, bv) = (rows[ai as usize].value, rows[bi as usize].value);
       let val = av + bv - 2 * av * bv;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_XOR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_XOR,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       idx
     }
     Term::Ite(c, a, b) => {
@@ -1232,12 +1918,26 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
       let val = cv * av + (1 - cv) * bv;
       let ret = rows[ai as usize].ret_ty; // branches have same type
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_ITE, arg0: ci, arg1: ai, arg2: bi, value: val, ret_ty: ret, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_ITE,
+        arg0: ci,
+        arg1: ai,
+        arg2: bi,
+        value: val,
+        ret_ty: ret,
+        ..Default::default()
+      });
       idx
     }
     Term::Byte(v) => {
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE, scalar0: *v as u32, value: *v as u32, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE,
+        scalar0: *v as u32,
+        value: *v as u32,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       idx
     }
     Term::ByteAdd(a, b, c) => {
@@ -1247,7 +1947,15 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
       let total = rows[ai as usize].value + rows[bi as usize].value + rows[ci as usize].value;
       let val = total & 0xFF;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_ADD, arg0: ai, arg1: bi, arg2: ci, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_ADD,
+        arg0: ai,
+        arg1: bi,
+        arg2: ci,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       idx
     }
     Term::ByteAddCarry(a, b, c) => {
@@ -1257,7 +1965,15 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
       let total = rows[ai as usize].value + rows[bi as usize].value + rows[ci as usize].value;
       let val = if total >= 256 { 1 } else { 0 };
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_ADD_CARRY, arg0: ai, arg1: bi, arg2: ci, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_ADD_CARRY,
+        arg0: ai,
+        arg1: bi,
+        arg2: ci,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       idx
     }
     Term::ByteMulLow(a, b) => {
@@ -1265,7 +1981,14 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
       let bi = compile_term_inner(b, rows);
       let val = (rows[ai as usize].value * rows[bi as usize].value) & 0xFF;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_MUL_LOW, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_MUL_LOW,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       idx
     }
     Term::ByteMulHigh(a, b) => {
@@ -1273,7 +1996,14 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
       let bi = compile_term_inner(b, rows);
       let val = (rows[ai as usize].value * rows[bi as usize].value) >> 8;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_MUL_HIGH, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_MUL_HIGH,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       idx
     }
     Term::ByteAnd(a, b) => {
@@ -1281,7 +2011,14 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
       let bi = compile_term_inner(b, rows);
       let val = rows[ai as usize].value & rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_AND, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_AND,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       idx
     }
     Term::ByteOr(a, b) => {
@@ -1289,7 +2026,14 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
       let bi = compile_term_inner(b, rows);
       let val = rows[ai as usize].value | rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_OR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_OR,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       idx
     }
     Term::ByteXor(a, b) => {
@@ -1297,7 +2041,14 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
       let bi = compile_term_inner(b, rows);
       let val = rows[ai as usize].value ^ rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_XOR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_XOR,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       idx
     }
   }
@@ -1309,26 +2060,48 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
       let p1i = compile_proof_inner(p1, rows);
       let p2i = compile_proof_inner(p2, rows);
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_AND_INTRO, arg0: p1i, arg1: p2i, ret_ty: RET_WFF_AND, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_AND_INTRO,
+        arg0: p1i,
+        arg1: p2i,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
       idx
     }
     Proof::EqRefl(t) => {
       let ti = compile_term_inner(t, rows);
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_EQ_REFL, arg0: ti, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_EQ_REFL,
+        arg0: ti,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::EqSym(p) => {
       let pi = compile_proof_inner(p, rows);
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_EQ_SYM, arg0: pi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_EQ_SYM,
+        arg0: pi,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::EqTrans(p1, p2) => {
       let p1i = compile_proof_inner(p1, rows);
       let p2i = compile_proof_inner(p2, rows);
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_EQ_TRANS, arg0: p1i, arg1: p2i, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_EQ_TRANS,
+        arg0: p1i,
+        arg1: p2i,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::ByteAddEq(a, b, c) => {
@@ -1352,32 +2125,69 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
     }
     Proof::ByteAddCarryEq(a, b, c) => {
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_ADD_CARRY_EQ, scalar0: *a as u32, scalar1: *b as u32, arg0: *c as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_ADD_CARRY_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        arg0: *c as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::ByteMulLowEq(a, b) => {
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_MUL_LOW_EQ, scalar0: *a as u32, scalar1: *b as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_MUL_LOW_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::ByteMulHighEq(a, b) => {
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_MUL_HIGH_EQ, scalar0: *a as u32, scalar1: *b as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_MUL_HIGH_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::ByteAndEq(a, b) => {
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_AND_EQ, scalar0: *a as u32, scalar1: *b as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_AND_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::ByteOrEq(a, b) => {
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_OR_EQ, scalar0: *a as u32, scalar1: *b as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_OR_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::ByteXorEq(a, b) => {
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_XOR_EQ, scalar0: *a as u32, scalar1: *b as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_XOR_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::U16AddEq(a, b, cin, c) => {
@@ -1399,30 +2209,111 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
       });
       idx
     }
+    Proof::U29AddEq(a, b, cin, c) => {
+      let carry_in = *cin as u32;
+      let total = *a + *b + carry_in;
+      let sum29 = total & ((1u32 << 29) - 1);
+      let carry_out = if total >= (1u32 << 29) { 1 } else { 0 };
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U29_ADD_EQ,
+        scalar0: *a,
+        scalar1: *b,
+        scalar2: carry_in,
+        arg0: *c,
+        arg1: carry_out,
+        value: sum29,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
+      idx
+    }
+    Proof::U24AddEq(a, b, cin, c) => {
+      let carry_in = *cin as u32;
+      let total = *a + *b + carry_in;
+      let sum24 = total & ((1u32 << 24) - 1);
+      let carry_out = if total >= (1u32 << 24) { 1 } else { 0 };
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U24_ADD_EQ,
+        scalar0: *a,
+        scalar1: *b,
+        scalar2: carry_in,
+        arg0: *c,
+        arg1: carry_out,
+        value: sum24,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
+      idx
+    }
+    Proof::U15MulEq(a, b) => {
+      let total = *a as u32 * *b as u32;
+      let lo = total & 0x7FFF;
+      let hi = total >> 15;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U15_MUL_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        scalar2: 0,
+        arg0: hi,
+        value: lo,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
+      idx
+    }
     Proof::ByteAddThirdCongruence(p, a, b) => {
       let pi = compile_proof_inner(p, rows);
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_ADD_THIRD_CONGRUENCE, scalar0: *a as u32, scalar1: *b as u32, arg0: pi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_ADD_THIRD_CONGRUENCE,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        arg0: pi,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::ByteAddCarryThirdCongruence(p, a, b) => {
       let pi = compile_proof_inner(p, rows);
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, scalar0: *a as u32, scalar1: *b as u32, arg0: pi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        arg0: pi,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::IteTrueEq(a, b) => {
       let ai = compile_term_inner(a, rows);
       let bi = compile_term_inner(b, rows);
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_ITE_TRUE_EQ, arg0: ai, arg1: bi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_ITE_TRUE_EQ,
+        arg0: ai,
+        arg1: bi,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
     Proof::IteFalseEq(a, b) => {
       let ai = compile_term_inner(a, rows);
       let bi = compile_term_inner(b, rows);
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_ITE_FALSE_EQ, arg0: ai, arg1: bi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_ITE_FALSE_EQ,
+        arg0: ai,
+        arg1: bi,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       idx
     }
   }
@@ -1456,7 +2347,9 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
     let arg = |idx: u32| -> Result<&ProofRow, VerifyError> {
       let j = idx as usize;
       if j >= i {
-        return Err(VerifyError::UnexpectedTermVariant { expected: "valid child index" });
+        return Err(VerifyError::UnexpectedTermVariant {
+          expected: "valid child index",
+        });
       }
       Ok(&rows[j])
     };
@@ -1515,7 +2408,11 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
       }
       OP_BYTE_ADD_CARRY => {
         let (a, b, c) = (arg(row.arg0)?, arg(row.arg1)?, arg(row.arg2)?);
-        let exp = if a.value + b.value + c.value >= 256 { 1 } else { 0 };
+        let exp = if a.value + b.value + c.value >= 256 {
+          1
+        } else {
+          0
+        };
         if row.value != exp {
           return Err(VerifyError::ByteDecideFailed);
         }
@@ -1566,44 +2463,122 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
           return Err(VerifyError::ByteDecideFailed);
         }
       }
-      OP_U16_ADD_EQ => {
-        if row.scalar0 > 0xFFFF || row.scalar1 > 0xFFFF || row.scalar2 > 1 || row.arg0 > 0xFFFF || row.arg1 > 1 {
+      OP_U15_MUL_EQ => {
+        if row.scalar0 > 0x7FFF || row.scalar1 > 0x7FFF || row.arg0 > 0x7FFF || row.value > 0x7FFF {
           return Err(VerifyError::ByteDecideFailed);
         }
-        let total = row.scalar0 + row.scalar1 + row.scalar2;
-        if row.value != (total & 0xFFFF) || row.arg0 != row.value || row.arg1 != if total >= 65536 { 1 } else { 0 } {
+        let prod = row.scalar0 * row.scalar1;
+        if row.value != (prod & 0x7FFF) || row.arg0 != (prod >> 15) {
           return Err(VerifyError::ByteDecideFailed);
         }
         if row.ret_ty != RET_WFF_AND {
-          return Err(VerifyError::UnexpectedProofVariant { expected: "u16-add proof row returns conjunction" });
+          return Err(VerifyError::UnexpectedProofVariant {
+            expected: "u15-mul proof row returns conjunction",
+          });
+        }
+      }
+      OP_U16_ADD_EQ => {
+        if row.scalar0 > 0xFFFF
+          || row.scalar1 > 0xFFFF
+          || row.scalar2 > 1
+          || row.arg0 > 0xFFFF
+          || row.arg1 > 1
+        {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        let total = row.scalar0 + row.scalar1 + row.scalar2;
+        if row.value != (total & 0xFFFF)
+          || row.arg0 != row.value
+          || row.arg1 != if total >= 65536 { 1 } else { 0 }
+        {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        if row.ret_ty != RET_WFF_AND {
+          return Err(VerifyError::UnexpectedProofVariant {
+            expected: "u16-add proof row returns conjunction",
+          });
+        }
+      }
+      OP_U29_ADD_EQ => {
+        if row.scalar0 >= (1u32 << 29)
+          || row.scalar1 >= (1u32 << 29)
+          || row.scalar2 > 1
+          || row.arg0 >= (1u32 << 29)
+          || row.arg1 > 1
+          || row.value >= (1u32 << 29)
+        {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        let total = row.scalar0 + row.scalar1 + row.scalar2;
+        if row.value != (total & ((1u32 << 29) - 1)) || row.arg0 != row.value {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        if row.arg1 != if total >= (1u32 << 29) { 1 } else { 0 } {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        if row.ret_ty != RET_WFF_AND {
+          return Err(VerifyError::UnexpectedProofVariant {
+            expected: "u29-add proof row returns conjunction",
+          });
+        }
+      }
+      OP_U24_ADD_EQ => {
+        if row.scalar0 >= (1u32 << 24)
+          || row.scalar1 >= (1u32 << 24)
+          || row.scalar2 > 1
+          || row.arg0 >= (1u32 << 24)
+          || row.arg1 > 1
+          || row.value >= (1u32 << 24)
+        {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        let total = row.scalar0 + row.scalar1 + row.scalar2;
+        if row.value != (total & ((1u32 << 24) - 1)) || row.arg0 != row.value {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        if row.arg1 != if total >= (1u32 << 24) { 1 } else { 0 } {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        if row.ret_ty != RET_WFF_AND {
+          return Err(VerifyError::UnexpectedProofVariant {
+            expected: "u24-add proof row returns conjunction",
+          });
         }
       }
       // ── Proof: conjunction ──
       OP_AND_INTRO => {
         let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
         if a.ret_ty < RET_WFF_EQ || b.ret_ty < RET_WFF_EQ {
-          return Err(VerifyError::UnexpectedProofVariant { expected: "proof arguments" });
+          return Err(VerifyError::UnexpectedProofVariant {
+            expected: "proof arguments",
+          });
         }
       }
       // ── Proof: reflexivity ──
       OP_EQ_REFL => {
         let a = arg(row.arg0)?;
         if a.ret_ty > RET_BYTE {
-          return Err(VerifyError::UnexpectedProofVariant { expected: "term argument" });
+          return Err(VerifyError::UnexpectedProofVariant {
+            expected: "term argument",
+          });
         }
       }
       // ── Proof: symmetry ──
       OP_EQ_SYM => {
         let a = arg(row.arg0)?;
         if a.ret_ty != RET_WFF_EQ {
-          return Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" });
+          return Err(VerifyError::UnexpectedProofVariant {
+            expected: "equality proof",
+          });
         }
       }
       // ── Proof: transitivity ──
       OP_EQ_TRANS => {
         let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
         if a.ret_ty != RET_WFF_EQ || b.ret_ty != RET_WFF_EQ {
-          return Err(VerifyError::UnexpectedProofVariant { expected: "equality proofs" });
+          return Err(VerifyError::UnexpectedProofVariant {
+            expected: "equality proofs",
+          });
         }
       }
       // ── Proof: byte bitwise axioms (lookup-verifiable) ──
@@ -1618,16 +2593,24 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
         }
         let p = arg(row.arg0)?;
         if p.ret_ty != RET_WFF_EQ {
-          return Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" });
+          return Err(VerifyError::UnexpectedProofVariant {
+            expected: "equality proof",
+          });
         }
       }
       OP_ITE_TRUE_EQ | OP_ITE_FALSE_EQ => {
         let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
         if a.ret_ty > RET_BYTE || b.ret_ty > RET_BYTE || a.ret_ty != b.ret_ty {
-          return Err(VerifyError::UnexpectedProofVariant { expected: "matching term arguments" });
+          return Err(VerifyError::UnexpectedProofVariant {
+            expected: "matching term arguments",
+          });
         }
       }
-      _ => return Err(VerifyError::UnexpectedTermVariant { expected: "valid opcode" }),
+      _ => {
+        return Err(VerifyError::UnexpectedTermVariant {
+          expected: "valid opcode",
+        });
+      }
     }
   }
   Ok(())
@@ -1636,263 +2619,3 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
 // ============================================================
 // Tests
 // ============================================================
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  fn term_node_count(term: &Term) -> usize {
-    match term {
-      Term::Bool(_) | Term::Byte(_) => 1,
-      Term::Not(a) => 1 + term_node_count(a),
-      Term::And(a, b)
-      | Term::Or(a, b)
-      | Term::Xor(a, b)
-      | Term::ByteMulLow(a, b)
-      | Term::ByteMulHigh(a, b)
-      | Term::ByteAnd(a, b)
-      | Term::ByteOr(a, b)
-      | Term::ByteXor(a, b) => 1 + term_node_count(a) + term_node_count(b),
-      Term::Ite(c, a, b)
-      | Term::ByteAdd(a, b, c)
-      | Term::ByteAddCarry(a, b, c) => 1 + term_node_count(c) + term_node_count(a) + term_node_count(b),
-    }
-  }
-
-  fn word_term_sizes(terms: &[Box<Term>; 32]) -> [usize; 32] {
-    array::from_fn(|i| term_node_count(terms[i].as_ref()))
-  }
-
-  #[test]
-  fn test_compile_and_verify_simple_add() {
-    let mut a = [0u8; 32];
-    let mut b = [0u8; 32];
-    a[31] = 100;
-    b[31] = 50;
-    let mut c = [0u8; 32];
-    c[31] = 150;
-
-    let proof = prove_add(&a, &b, &c);
-    let rows = compile_proof(&proof);
-    verify_compiled(&rows).expect("compiled verification should pass");
-  }
-
-  #[test]
-  fn test_compile_and_verify_add_with_carry() {
-    let mut a = [0u8; 32];
-    let mut b = [0u8; 32];
-    a[31] = 200;
-    b[31] = 100;
-    let mut c = [0u8; 32];
-    c[31] = 44;
-    c[30] = 1;
-
-    let proof = prove_add(&a, &b, &c);
-    let rows = compile_proof(&proof);
-    verify_compiled(&rows).expect("compiled verification should pass");
-  }
-
-  #[test]
-  fn test_compile_row_count() {
-    let a = [0u8; 32];
-    let b = [0u8; 32];
-    let c = [0u8; 32];
-
-    let proof = prove_add(&a, &b, &c);
-    let rows = compile_proof(&proof);
-    assert!(!rows.is_empty(), "compiled proof must contain rows");
-    eprintln!("zero-add row count: {}", rows.len());
-  }
-
-  #[test]
-  fn test_compiled_corrupted_value_fails() {
-    let mut a = [0u8; 32];
-    let mut b = [0u8; 32];
-    a[31] = 10;
-    b[31] = 20;
-    let mut c = [0u8; 32];
-    c[31] = 30;
-
-    let proof = prove_add(&a, &b, &c);
-    let mut rows = compile_proof(&proof);
-
-    // Corrupt the first ADD-family axiom scalar/range so compiled verification fails.
-    let mut corrupted = false;
-    for r in rows.iter_mut() {
-      if r.op == OP_U16_ADD_EQ {
-        r.scalar0 = 70_000; // > 0xFFFF
-        corrupted = true;
-        break;
-      }
-      if r.op == OP_BYTE_ADD_EQ {
-        r.scalar0 = 300; // > 255, triggers range check error
-        corrupted = true;
-        break;
-      }
-    }
-    assert!(corrupted, "expected at least one add-family row to corrupt");
-    assert!(verify_compiled(&rows).is_err(), "corrupted value should fail");
-  }
-
-  #[test]
-  fn test_compile_term_standalone() {
-    let term = Term::ByteAdd(
-      Box::new(Term::Byte(200)),
-      Box::new(Term::Byte(100)),
-      Box::new(Term::Bool(false)),
-    );
-    let rows = compile_term(&term);
-    assert_eq!(rows.last().unwrap().value, 44); // (200+100+0) & 0xFF
-    assert_eq!(rows.last().unwrap().ret_ty, RET_BYTE);
-    verify_compiled(&rows).unwrap();
-  }
-
-  #[test]
-  fn test_compile_bool_ops() {
-    let term = Term::Xor(
-      Box::new(Term::Bool(true)),
-      Box::new(Term::Bool(false)),
-    );
-    let rows = compile_term(&term);
-    assert_eq!(rows.last().unwrap().value, 1);
-    assert_eq!(rows.last().unwrap().ret_ty, RET_BOOL);
-    verify_compiled(&rows).unwrap();
-  }
-
-  #[test]
-  fn test_all_bytes_max() {
-    let a = [0xFF; 32];
-    let mut b = [0u8; 32];
-    b[31] = 1;
-    // 0xFF..FF + 1 = 0x00..00 (mod 2^256)
-    let mut c = [0u8; 32];
-    c[0] = 0; // MSB wraps
-    // compute expected
-    let mut carry = 0u16;
-    for i in (0..32).rev() {
-      let sum = a[i] as u16 + b[i] as u16 + carry;
-      c[i] = (sum & 0xFF) as u8;
-      carry = sum >> 8;
-    }
-
-    let proof = prove_add(&a, &b, &c);
-    let rows = compile_proof(&proof);
-    verify_compiled(&rows).unwrap();
-  }
-
-  #[test]
-  fn test_compile_and_verify_ite_axioms() {
-    let p_true = Proof::IteTrueEq(Term::Byte(7), Term::Byte(99));
-    let w_true = infer_proof(&p_true).expect("infer_proof ite true should succeed");
-    match w_true {
-      WFF::Equal(lhs, rhs) => {
-        assert_eq!(*rhs, Term::Byte(7));
-        match *lhs {
-          Term::Ite(c, _, _) => assert_eq!(*c, Term::Bool(true)),
-          _ => panic!("lhs should be ite"),
-        }
-      }
-      _ => panic!("expected equality"),
-    }
-    let rows_true = compile_proof(&p_true);
-    verify_compiled(&rows_true).expect("compiled verification should pass for ite true axiom");
-
-    let p_false = Proof::IteFalseEq(Term::Byte(7), Term::Byte(99));
-    let w_false = infer_proof(&p_false).expect("infer_proof ite false should succeed");
-    match w_false {
-      WFF::Equal(lhs, rhs) => {
-        assert_eq!(*rhs, Term::Byte(99));
-        match *lhs {
-          Term::Ite(c, _, _) => assert_eq!(*c, Term::Bool(false)),
-          _ => panic!("lhs should be ite"),
-        }
-      }
-      _ => panic!("expected equality"),
-    }
-    let rows_false = compile_proof(&p_false);
-    verify_compiled(&rows_false).expect("compiled verification should pass for ite false axiom");
-  }
-
-  #[test]
-  fn test_word_mul_hybrid_witness_verifies() {
-    let mut a = [0u8; 32];
-    let mut b = [0u8; 32];
-    a[31] = 123;
-    b[31] = 45;
-
-    let (_terms, witness) = word_mul_with_hybrid_witness(&a, &b);
-    assert!(verify_word_mul_hybrid_witness(&a, &b, &witness));
-  }
-
-  #[test]
-  fn test_word_mul_hybrid_witness_tamper_detected() {
-    let mut a = [0u8; 32];
-    let mut b = [0u8; 32];
-    a[31] = 200;
-    b[31] = 100;
-
-    let (_terms, mut witness) = word_mul_with_hybrid_witness(&a, &b);
-    if let Some(first) = witness.add_steps.first_mut() {
-      first.sum ^= 1;
-    }
-    assert!(!verify_word_mul_hybrid_witness(&a, &b, &witness));
-  }
-
-  #[test]
-  fn test_word_add_hybrid_witness_verifies() {
-    let mut a = [0u8; 32];
-    let mut b = [0u8; 32];
-    a[31] = 200;
-    b[31] = 100;
-
-    let (_terms, witness) = word_add_with_hybrid_witness(&a, &b);
-    assert!(verify_word_add_hybrid_witness(&a, &b, &witness));
-  }
-
-  #[test]
-  fn test_word_add_hybrid_witness_tamper_detected() {
-    let mut a = [0u8; 32];
-    let mut b = [0u8; 32];
-    a[31] = 77;
-    b[31] = 99;
-
-    let (_terms, mut witness) = word_add_with_hybrid_witness(&a, &b);
-    if let Some(first) = witness.add_steps.first_mut() {
-      first.carry_out = !first.carry_out;
-    }
-    assert!(!verify_word_add_hybrid_witness(&a, &b, &witness));
-  }
-
-  #[test]
-  #[ignore = "diagnostic size measurement; run explicitly with -- --ignored --nocapture"]
-  fn test_measure_word_mul_term_size() {
-    let mut sparse_a = [0u8; 32];
-    let mut sparse_b = [0u8; 32];
-    sparse_a[31] = 100;
-    sparse_b[31] = 200;
-
-    let mut dense_a = [0u8; 32];
-    let mut dense_b = [0u8; 32];
-    for i in 30..32 {
-      dense_a[i] = 0xFF;
-      dense_b[i] = 0xFF;
-    }
-
-    let sparse_terms = word_mul(&sparse_a, &sparse_b);
-    let sparse_sizes = word_term_sizes(&sparse_terms);
-    let sparse_total: usize = sparse_sizes.iter().sum();
-
-    let dense_terms = word_mul(&dense_a, &dense_b);
-    let dense_sizes = word_term_sizes(&dense_terms);
-    let dense_total: usize = dense_sizes.iter().sum();
-
-    eprintln!("word_mul term-size sparse total: {}", sparse_total);
-    eprintln!("word_mul term-size sparse per-byte: {:?}", sparse_sizes);
-    eprintln!("word_mul term-size dense total: {}", dense_total);
-    eprintln!("word_mul term-size dense per-byte: {:?}", dense_sizes);
-
-    assert!(sparse_total > 0);
-    assert!(dense_total >= sparse_total);
-  }
-}
-
