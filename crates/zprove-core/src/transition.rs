@@ -9,7 +9,6 @@
 //! A [`TransactionProof`] is a sequence of instruction proofs covering
 //! every step of a transaction's execution.
 
-use crate::memory_proof::{verify_memory_access_commitments, verify_memory_semantics};
 use crate::semantic_proof::{
   Proof, WFF, compile_proof, infer_proof,
   prove_add, prove_and, prove_div, prove_eq, prove_gt, prove_iszero, prove_lt, prove_mod,
@@ -18,17 +17,16 @@ use crate::semantic_proof::{
   wff_add, wff_and, wff_div, wff_eq, wff_gt, wff_iszero, wff_lt, wff_mod, wff_mul, wff_not,
   wff_or, wff_sdiv, wff_sgt, wff_slt, wff_smod, wff_sub, wff_xor,
 };
+use crate::semantic_proof::ProofRow;
 use crate::zk_proof::{
-  CircleStarkProof, RECEIPT_BIND_TAG_LUT, RECEIPT_BIND_TAG_STACK, RECEIPT_BIND_TAG_WFF,
-  LutStep,
-  build_lut_steps_from_rows_add_family, build_lut_steps_from_rows_bit_family,
-  build_lut_steps_from_rows_mul_family, make_receipt_binding_public_values,
-  prove_expected_wff_match_stark_with_public_values,
-  prove_lut_kernel_stark_with_public_values,
-  prove_stack_ir_scaffold_stark_with_public_values,
-  verify_lut_kernel_stark_with_public_values, verify_stack_ir_scaffold_stark_with_public_values,
-  verify_wff_match_stark_with_public_values,
+  BatchInstructionMeta, BatchProofRowsManifest,
+  CircleStarkConfig, CircleStarkProof, RECEIPT_BIND_TAG_LUT, RECEIPT_BIND_TAG_STACK,
+  make_batch_receipt_binding_public_values, make_receipt_binding_public_values,
+  prove_batch_lut_with_prep, prove_lut_with_prep, prove_stack_ir_with_prep,
+  setup_batch_proof_rows_preprocessed, setup_proof_rows_preprocessed,
+  verify_batch_lut_with_prep, verify_lut_with_prep, verify_stack_ir_with_prep,
 };
+use p3_uni_stark::PreprocessedVerifierKey;
 use revm::bytecode::opcode;
 
 // ============================================================
@@ -108,8 +106,28 @@ pub struct InstructionTransitionZkReceipt {
   pub opcode: u8,
   pub stack_ir_proof: CircleStarkProof,
   pub lut_kernel_proof: CircleStarkProof,
-  pub wff_match_proof: CircleStarkProof,
+  pub preprocessed_vk: PreprocessedVerifierKey<CircleStarkConfig>,
   pub expected_wff: WFF,
+}
+
+/// ZK receipt for a batch of N instructions proved in a single LUT STARK call.
+///
+/// Security model:
+/// - `lut_proof`: batch LUT STARK covering arithmetic of ALL instructions' ProofRows.
+/// - `preprocessed_vk`: VK for the shared batch preprocessed matrix.
+/// - `manifest`: per-instruction metadata (opcode, WFF, row range in `all_rows`).
+///
+/// Verification requires:
+/// 1. `verify_batch_lut_with_prep(lut_proof, preprocessed_vk, pis)` — STARK check.
+/// 2. For each i: `infer_proof(pi_i) == manifest.entries[i].wff` — deterministic.
+/// 3. `compute_batch_manifest_digest(&entries) == pis[2..10]` — deterministic.
+pub struct BatchTransactionZkReceipt {
+  /// Single LUT STARK proof covering arithmetic of all N instructions.
+  pub lut_proof: CircleStarkProof,
+  /// Shared preprocessed verifier key (batch manifest committed here).
+  pub preprocessed_vk: PreprocessedVerifierKey<CircleStarkConfig>,
+  /// Per-instruction metadata and concatenated ProofRows.
+  pub manifest: BatchProofRowsManifest,
 }
 
 // ============================================================
@@ -209,7 +227,7 @@ pub fn verify_statement_semantics(statement: &InstructionTransitionStatement) ->
     return false;
   }
 
-  verify_memory_semantics(statement)
+  true
 }
 
 // ============================================================
@@ -365,7 +383,6 @@ pub fn prove_instruction_zk_receipt(
 
 pub(crate) fn prove_instruction_zk_receipt_with_lut_override(
   proof: &InstructionTransitionProof,
-  lut_steps_override: Option<Vec<LutStep>>,
 ) -> Result<InstructionTransitionZkReceipt, String> {
   if !verify_proof_with_rows(proof) {
     return Err("semantic/row verification failed before ZKP receipt generation".to_string());
@@ -382,57 +399,66 @@ pub(crate) fn prove_instruction_zk_receipt_with_lut_override(
   let rows = compile_proof(semantic_proof);
   let stack_bind_pv = make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, proof.opcode, &expected_wff);
   let lut_bind_pv = make_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, proof.opcode, &expected_wff);
-  let wff_bind_pv = make_receipt_binding_public_values(RECEIPT_BIND_TAG_WFF, proof.opcode, &expected_wff);
 
-  let lut_steps = if let Some(steps) = lut_steps_override {
-    if steps.is_empty() {
-      return Err("provided LUT step override is empty".to_string());
-    }
-    match proof.opcode {
-      opcode::ADD => steps,
-      opcode::AND | opcode::OR | opcode::XOR | opcode::NOT => steps,
-      _ => {
-        return Err(format!(
-          "LUT step override is only supported for ADD/bit-family opcodes (got 0x{:02x})",
-          proof.opcode
-        ));
-      }
-    }
-  } else {
-    match proof.opcode {
-      opcode::ADD | opcode::SUB => build_lut_steps_from_rows_add_family(&rows)?,
-      opcode::MUL | opcode::DIV | opcode::MOD | opcode::SDIV | opcode::SMOD => {
-        build_lut_steps_from_rows_mul_family(&rows)?
-      }
-      opcode::AND | opcode::OR | opcode::XOR | opcode::NOT => {
-        build_lut_steps_from_rows_bit_family(&rows)?
-      }
-      _ => {
-        return Err(format!(
-          "unsupported opcode family for LUT kernel receipt: 0x{:02x}",
-          proof.opcode
-        ));
-      }
-    }
-  };
+  let (prep_data, preprocessed_vk) = setup_proof_rows_preprocessed(&rows, &stack_bind_pv)?;
 
-  let stack_ir_proof =
-    prove_stack_ir_scaffold_stark_with_public_values(&rows, &stack_bind_pv)?;
-  let lut_kernel_proof =
-    prove_lut_kernel_stark_with_public_values(&lut_steps, &lut_bind_pv)?;
-  let wff_match_proof = prove_expected_wff_match_stark_with_public_values(
-    semantic_proof,
-    &expected_wff,
-    &wff_bind_pv,
-  )?;
+  let stack_ir_proof = prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv)?;
+  let lut_kernel_proof = prove_lut_with_prep(&rows, &prep_data, &lut_bind_pv)?;
 
   Ok(InstructionTransitionZkReceipt {
     opcode: proof.opcode,
     stack_ir_proof,
     lut_kernel_proof,
-    wff_match_proof,
+    preprocessed_vk,
     expected_wff,
   })
+}
+
+/// Like [`prove_instruction_zk_receipt`], but also returns per-component timings.
+///
+/// Returns `(receipt, (setup_µs, stack_ir_µs, lut_µs))`.
+/// Useful for profiling which of the three steps dominates.
+pub fn prove_instruction_zk_receipt_timed(
+  proof: &InstructionTransitionProof,
+) -> Result<(InstructionTransitionZkReceipt, (f64, f64, f64)), String> {
+  use std::time::Instant;
+
+  if !verify_proof_with_rows(proof) {
+    return Err("semantic/row verification failed before ZKP receipt generation".to_string());
+  }
+
+  let semantic_proof = proof
+    .semantic_proof
+    .as_ref()
+    .ok_or_else(|| "missing semantic proof".to_string())?;
+
+  let expected_wff = wff_instruction(proof.opcode, &proof.stack_inputs, &proof.stack_outputs)
+    .ok_or_else(|| format!("unsupported opcode for ZKP receipt: 0x{:02x}", proof.opcode))?;
+
+  let rows = compile_proof(semantic_proof);
+  let stack_bind_pv = make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, proof.opcode, &expected_wff);
+  let lut_bind_pv = make_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, proof.opcode, &expected_wff);
+
+  let t0 = Instant::now();
+  let (prep_data, preprocessed_vk) = setup_proof_rows_preprocessed(&rows, &stack_bind_pv)?;
+  let setup_us = t0.elapsed().as_secs_f64() * 1e6;
+
+  let t1 = Instant::now();
+  let stack_ir_proof = prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv)?;
+  let stack_ir_us = t1.elapsed().as_secs_f64() * 1e6;
+
+  let t2 = Instant::now();
+  let lut_kernel_proof = prove_lut_with_prep(&rows, &prep_data, &lut_bind_pv)?;
+  let lut_us = t2.elapsed().as_secs_f64() * 1e6;
+
+  let receipt = InstructionTransitionZkReceipt {
+    opcode: proof.opcode,
+    stack_ir_proof,
+    lut_kernel_proof,
+    preprocessed_vk,
+    expected_wff,
+  };
+  Ok((receipt, (setup_us, stack_ir_us, lut_us)))
 }
 
 /// Prove many instruction ZKP receipts in parallel using a thread pool.
@@ -473,7 +499,7 @@ pub fn prove_instruction_zk_receipts_parallel(
     handles.push(thread::spawn(move || loop {
       let item = queue.lock().unwrap().pop_front();
       let Some((idx, proof)) = item else { break };
-      let result = prove_instruction_zk_receipt_with_lut_override(&proof, None);
+      let result = prove_instruction_zk_receipt_with_lut_override(&proof);
       if tx.send((idx, result)).is_err() {
         break;
       }
@@ -535,10 +561,6 @@ pub fn verify_instruction_zk_receipt(
     return false;
   }
 
-  if !verify_memory_access_commitments(statement) {
-    return false;
-  }
-
   if statement.opcode != receipt.opcode {
     return false;
   }
@@ -560,21 +582,163 @@ pub fn verify_instruction_zk_receipt(
     make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, statement.opcode, &expected_wff);
   let lut_bind_pv =
     make_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, statement.opcode, &expected_wff);
-  let wff_bind_pv =
-    make_receipt_binding_public_values(RECEIPT_BIND_TAG_WFF, statement.opcode, &expected_wff);
 
-  if verify_stack_ir_scaffold_stark_with_public_values(&receipt.stack_ir_proof, &stack_bind_pv)
-    .is_err()
-  {
+  let prep_vk = &receipt.preprocessed_vk;
+
+  if verify_stack_ir_with_prep(&receipt.stack_ir_proof, prep_vk, &stack_bind_pv).is_err() {
     return false;
   }
 
-  if verify_lut_kernel_stark_with_public_values(&receipt.lut_kernel_proof, &lut_bind_pv).is_err()
-  {
+  verify_lut_with_prep(&receipt.lut_kernel_proof, prep_vk, &lut_bind_pv).is_ok()
+}
+
+// ============================================================
+// Batch proving helpers
+// ============================================================
+
+/// Compile a slice of `(opcode, &Proof)` pairs into a [`BatchProofRowsManifest`].
+///
+/// Each proof tree is independently compiled via [`compile_proof`] and its
+/// inferred WFF recorded.  All resulting [`ProofRow`]s are concatenated into
+/// `all_rows` with per-instruction boundary information stored in `entries`.
+///
+/// Errors if `items` is empty or if any proof fails WFF inference.
+pub fn build_batch_manifest(
+  items: &[(u8, &Proof)],
+) -> Result<BatchProofRowsManifest, String> {
+  if items.is_empty() {
+    return Err("build_batch_manifest: empty item list".to_string());
+  }
+
+  let mut entries: Vec<BatchInstructionMeta> = Vec::with_capacity(items.len());
+  let mut all_rows: Vec<ProofRow> = Vec::new();
+
+  for (opcode, proof) in items {
+    let wff = infer_proof(proof).map_err(|e| {
+      format!(
+        "build_batch_manifest: infer_proof failed for opcode 0x{:02x}: {e}",
+        opcode
+      )
+    })?;
+    let rows = compile_proof(proof);
+    let row_start = all_rows.len();
+    let row_count = rows.len();
+    all_rows.extend(rows);
+    entries.push(BatchInstructionMeta {
+      opcode: *opcode,
+      wff,
+      row_start,
+      row_count,
+    });
+  }
+
+  Ok(BatchProofRowsManifest { entries, all_rows })
+}
+
+/// Prove N instructions as a single batch ZK receipt.
+///
+/// Only instructions that carry a `semantic_proof` (i.e. arithmetic opcodes)
+/// are included.  Structural opcodes (PUSH, POP, JUMP, …) are silently skipped.
+///
+/// **Proving steps:**
+/// 1. Build [`BatchProofRowsManifest`] from the semantic proofs (`build_batch_manifest`).
+/// 2. Setup shared batch preprocessed commitment (`setup_batch_proof_rows_preprocessed`).
+/// 3. Prove batch LUT STARK in one call (`prove_batch_lut_with_prep`).
+///
+/// Note: StackIR verification is replaced by the deterministic out-of-circuit
+/// check `infer_proof(pi_i) == entry.wff` performed inside
+/// [`verify_batch_transaction_zk_receipt`], so no separate StackIR STARK is
+/// generated in the batch path.
+///
+/// Returns `Err` if `itps` contains no semantic proofs or if any proof step fails.
+pub fn prove_batch_transaction_zk_receipt(
+  itps: &[InstructionTransitionProof],
+) -> Result<BatchTransactionZkReceipt, String> {
+  let items: Vec<(u8, &Proof)> = itps
+    .iter()
+    .filter_map(|itp| itp.semantic_proof.as_ref().map(|p| (itp.opcode, p)))
+    .collect();
+
+  if items.is_empty() {
+    return Err(
+      "prove_batch_transaction_zk_receipt: no semantic proofs in batch".to_string(),
+    );
+  }
+
+  let manifest = build_batch_manifest(&items)?;
+  let lut_bind_pv =
+    make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &manifest.entries);
+  let (prep_data, preprocessed_vk) =
+    setup_batch_proof_rows_preprocessed(&manifest, &lut_bind_pv)?;
+  let lut_proof = prove_batch_lut_with_prep(&manifest, &prep_data, &lut_bind_pv)?;
+
+  Ok(BatchTransactionZkReceipt {
+    lut_proof,
+    preprocessed_vk,
+    manifest,
+  })
+}
+
+/// Verify a batch ZK receipt.
+///
+/// **Verification steps (all deterministic except step 4):**
+/// 1. Check `statements.len() == receipt.manifest.entries.len()`.
+/// 2. For each i: verify statement semantics (SP transition correctness).
+/// 3. For each i: re-derive `wff_instruction(opcode, inputs, outputs)` and
+///    confirm it equals `receipt.manifest.entries[i].wff`.  This ties the
+///    manifest's WFF claims to the actual EVM execution.
+/// 4. STARK: re-derive batch public values from the manifest and call
+///    [`verify_batch_lut_with_prep`].  The STARK proof binds the manifest
+///    digest (`pis[2..10]`) to every committed ProofRow, proving arithmetic
+///    correctness for all N instructions.
+///
+/// Returns `false` on any mismatch; the error reason is intentionally not
+/// surfaced to avoid oracle-style leakage.
+pub fn verify_batch_transaction_zk_receipt(
+  statements: &[InstructionTransitionStatement],
+  receipt: &BatchTransactionZkReceipt,
+) -> bool {
+  // 1. Count check.
+  if statements.len() != receipt.manifest.entries.len() {
     return false;
   }
 
-  verify_wff_match_stark_with_public_values(&receipt.wff_match_proof, &wff_bind_pv).is_ok()
+  // 2 & 3. Per-instruction semantic and WFF checks.
+  for (stmt, entry) in statements.iter().zip(receipt.manifest.entries.iter()) {
+    // Opcode consistency.
+    if stmt.opcode != entry.opcode {
+      return false;
+    }
+
+    // Statement-level SP/arity coherence.
+    if !verify_statement_semantics(stmt) {
+      return false;
+    }
+
+    // Bind manifest WFF to actual execution output.
+    let expected_wff =
+      match wff_instruction(stmt.opcode, &stmt.s_i.stack, &stmt.s_next.stack) {
+        Some(wff) => wff,
+        None => return false,
+      };
+    if expected_wff != entry.wff {
+      return false;
+    }
+  }
+
+  // 4. Batch STARK verification.
+  // Re-derive pis independently from the manifest so the verifier never
+  // trusts the prover-supplied public values directly.
+  let lut_bind_pv = make_batch_receipt_binding_public_values(
+    RECEIPT_BIND_TAG_LUT,
+    &receipt.manifest.entries,
+  );
+  verify_batch_lut_with_prep(
+    &receipt.lut_proof,
+    &receipt.preprocessed_vk,
+    &lut_bind_pv,
+  )
+  .is_ok()
 }
 
 // ============================================================

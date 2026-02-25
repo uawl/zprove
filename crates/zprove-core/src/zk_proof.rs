@@ -7,13 +7,12 @@
 //! The current Stage-1 semantic AIR kernel enforces the byte-add equality rows
 //! (`OP_BYTE_ADD_EQ`) embedded in `ProofRow` encoding.
 
-use crate::memory_proof::{CqMemoryEvent, CqRw};
 use crate::semantic_proof::{
   NUM_PROOF_COLS, OP_BYTE_ADD_EQ, Proof, ProofRow, RET_BYTE, RET_WFF_AND, RET_WFF_EQ, Term, WFF,
   compile_proof, infer_proof, verify_compiled,
 };
 
-use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir};
+use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, PairBuilder};
 use p3_challenger::{DuplexChallenger, HashChallenger, SerializingChallenger32};
 use p3_circle::CirclePcs;
 use p3_commit::ExtensionMmcs;
@@ -29,7 +28,9 @@ use p3_symmetric::{
   CompressionFunctionFromHasher, CryptographicHasher, PaddingFreeSponge, SerializingHasher,
   TruncatedPermutation,
 };
-use p3_uni_stark::StarkConfig;
+use p3_uni_stark::{
+  PreprocessedProverData, PreprocessedVerifierKey, StarkConfig, setup_preprocessed,
+};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
@@ -80,13 +81,25 @@ fn default_receipt_bind_public_values_for_tag(tag: u32) -> Vec<Val> {
   values
 }
 
-pub fn make_receipt_binding_public_values(tag: u32, opcode: u8, expected_wff: &WFF) -> Vec<Val> {
+/// Public values for the scaffold StackIR STARK: tag = `RECEIPT_BIND_TAG_STACK`,
+/// remaining positions are zero.  Use this whenever calling
+/// [`prove_stack_ir_with_prep`] / [`prove_stack_ir_scaffold_stark`] outside of
+/// the full prove pipeline which supplies a real Poseidon hash.
+pub fn stack_ir_scaffold_public_values() -> Vec<Val> {
+  default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_STACK)
+}
+
+/// Compute the **tag-independent** Poseidon digest of `(opcode, len, wff_bytes)`.
+///
+/// Intentionally omits the STARK tag so the same 8-element digest can be stored
+/// once in the shared preprocessed matrix and bound by both the StackIR and LUT
+/// AIRs (which differ only in `pis[0]`, the tag).
+pub fn compute_wff_opcode_digest(opcode: u8, expected_wff: &WFF) -> [Val; 8] {
   let mut rng = SmallRng::seed_from_u64(0xC0DEC0DE_u64);
   let poseidon = Poseidon2Mersenne31::<16>::new_from_rng_128(&mut rng);
   let sponge = PaddingFreeSponge::<_, 16, 8, 8>::new(poseidon);
 
   let mut input = Vec::new();
-  input.push(Val::from_u32(tag));
   input.push(Val::from_u32(opcode as u32));
   input.push(Val::from_u32(serialize_wff_bytes(expected_wff).len() as u32));
   input.extend(
@@ -95,12 +108,107 @@ pub fn make_receipt_binding_public_values(tag: u32, opcode: u8, expected_wff: &W
       .map(Val::from_u8),
   );
 
-  let digest = sponge.hash_iter(input);
+  sponge.hash_iter(input)
+}
+
+/// Build the public-values vector for a receipt-binding STARK.
+///
+/// Layout: `[tag, opcode, digest[0..7]]` where `digest = compute_wff_opcode_digest(opcode, wff)`.
+///
+/// The digest is **tag-independent** so both the StackIR and LUT STARKs can share
+/// the same preprocessed matrix commitment (which stores the digest once) while
+/// each independently enforces `pis[0]` against their own tag.
+pub fn make_receipt_binding_public_values(tag: u32, opcode: u8, expected_wff: &WFF) -> Vec<Val> {
+  let digest = compute_wff_opcode_digest(opcode, expected_wff);
   let mut public_values = Vec::with_capacity(RECEIPT_BIND_PUBLIC_VALUES_LEN);
   public_values.push(Val::from_u32(tag));
   public_values.push(Val::from_u32(opcode as u32));
   public_values.extend_from_slice(&digest);
   public_values
+}
+
+// ============================================================
+// Phase 1: Batch instruction types
+// ============================================================
+
+/// Per-instruction metadata within a [`BatchProofRowsManifest`].
+///
+/// Stores the EVM opcode, inferred WFF, and the half-open row range
+/// `[row_start, row_start + row_count)` inside
+/// [`BatchProofRowsManifest::all_rows`].
+#[derive(Debug, Clone)]
+pub struct BatchInstructionMeta {
+  /// EVM opcode (e.g. `0x01` = ADD).
+  pub opcode: u8,
+  /// Well-formed formula inferred from the instruction's semantic proof.
+  pub wff: WFF,
+  /// Index of the first `ProofRow` in `BatchProofRowsManifest::all_rows`.
+  pub row_start: usize,
+  /// Number of ProofRows contributed by this instruction.
+  pub row_count: usize,
+}
+
+/// Concatenated [`ProofRow`]s for N instructions with per-instruction
+/// boundary metadata.
+///
+/// Produced by `transition::build_batch_manifest`; consumed by the batch
+/// STARK proving functions in this module.
+#[derive(Debug, Clone)]
+pub struct BatchProofRowsManifest {
+  /// Per-instruction metadata in execution order.
+  pub entries: Vec<BatchInstructionMeta>,
+  /// All ProofRows from all instructions, in order.
+  pub all_rows: Vec<ProofRow>,
+}
+
+// ============================================================
+// Phase 2: Batch public values and manifest digest
+// ============================================================
+
+/// Compute the **batch manifest digest**: a Poseidon hash of all N instructions'
+/// `(opcode, wff_digest)` pairs plus the instruction count.
+///
+/// Input layout fed to the sponge:
+/// `[N, opcode₀, digest₀[0..7], opcode₁, digest₁[0..7], …]`
+///
+/// The resulting 8-element M31 digest is tag-independent and stored in
+/// `pis[2..10]` for both the batch StackIR and batch LUT STARKs.
+/// Both STARKs use the same preprocessed matrix so only one digest is needed.
+pub fn compute_batch_manifest_digest(entries: &[BatchInstructionMeta]) -> [Val; 8] {
+  let mut rng = rand::rngs::SmallRng::seed_from_u64(0xC0DEC0DE_u64);
+  let poseidon = Poseidon2Mersenne31::<16>::new_from_rng_128(&mut rng);
+  let sponge = PaddingFreeSponge::<_, 16, 8, 8>::new(poseidon);
+
+  let mut input: Vec<Val> = Vec::new();
+  input.push(Val::from_u32(entries.len() as u32));
+  for entry in entries {
+    let per_inst_digest = compute_wff_opcode_digest(entry.opcode, &entry.wff);
+    input.push(Val::from_u32(entry.opcode as u32));
+    input.extend_from_slice(&per_inst_digest);
+  }
+
+  sponge.hash_iter(input)
+}
+
+/// Build the public-values vector for a batch receipt-binding STARK.
+///
+/// Layout (length = `RECEIPT_BIND_PUBLIC_VALUES_LEN = 10`):
+/// `[tag, N, batch_digest[0..8]]`
+///
+/// - `pis[0]` = tag (`RECEIPT_BIND_TAG_STACK` or `RECEIPT_BIND_TAG_LUT`)
+/// - `pis[1]` = N (number of instructions in the batch)
+/// - `pis[2..10]` = `compute_batch_manifest_digest(entries)` — tag-independent
+///   so both the StackIR and LUT AIRs can reference it via the same prep column.
+pub fn make_batch_receipt_binding_public_values(
+  tag: u32,
+  entries: &[BatchInstructionMeta],
+) -> Vec<Val> {
+  let digest = compute_batch_manifest_digest(entries);
+  let mut pv = Vec::with_capacity(RECEIPT_BIND_PUBLIC_VALUES_LEN);
+  pv.push(Val::from_u32(tag));
+  pv.push(Val::from_u32(entries.len() as u32));
+  pv.extend_from_slice(&digest);
+  pv
 }
 
 // ============================================================
@@ -312,8 +420,22 @@ impl<F> BaseAir<F> for StackIrAir {
   }
 }
 
+// StackIrAir: original AIR used by the plain scaffold prove/verify path.
+// No PairBuilder requirement — works with every AirBuilderWithPublicValues
+// including DebugConstraintBuilder (debug-assertion checker in p3-uni-stark).
+//
+// Phase 2 introduces StackIrAirWithPrep (below) which additionally binds
+// main-trace columns to the shared preprocessed ProofRow commitment.
+
 impl<AB: AirBuilderWithPublicValues> Air<AB> for StackIrAir {
   fn eval(&self, builder: &mut AB) {
+    eval_stack_ir_inner(builder);
+  }
+}
+
+/// Core StackIR constraints — shared between `StackIrAir` and
+/// `StackIrAirWithPrep` to avoid code duplication.
+fn eval_stack_ir_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
     let pis = builder.public_values();
     builder.assert_eq(pis[0], AB::Expr::from_u32(RECEIPT_BIND_TAG_STACK));
 
@@ -351,6 +473,11 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for StackIrAir {
     let t_and_eq = crate::semantic_proof::OP_BYTE_AND_EQ as u16;
     let t_or_eq = crate::semantic_proof::OP_BYTE_OR_EQ as u16;
     let t_xor_eq = crate::semantic_proof::OP_BYTE_XOR_EQ as u16;
+    // Soundness fix: OP_NOT and OP_EQ_SYM appear in row_pop_count (and thus in
+    // StackIR traces) but were missing from allowed_tags, causing allowed_poly
+    // to reject valid proofs that use these opcodes.
+    let t_not = crate::semantic_proof::OP_NOT as u16;
+    let t_eq_sym = crate::semantic_proof::OP_EQ_SYM as u16;
 
     let c_bool = AB::Expr::from_u16(t_bool);
     let c_byte = AB::Expr::from_u16(t_byte);
@@ -370,6 +497,8 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for StackIrAir {
     let c_and_eq = AB::Expr::from_u16(t_and_eq);
     let c_or_eq = AB::Expr::from_u16(t_or_eq);
     let c_xor_eq = AB::Expr::from_u16(t_xor_eq);
+    let c_not = AB::Expr::from_u16(t_not);
+    let c_eq_sym = AB::Expr::from_u16(t_eq_sym);
     let c_zero = AB::Expr::from_u16(0);
     let c_one = AB::Expr::from_u16(1);
     let c_two = AB::Expr::from_u16(2);
@@ -393,6 +522,8 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for StackIrAir {
       t_and_eq,
       t_or_eq,
       t_xor_eq,
+      t_not,
+      t_eq_sym,
     ];
 
     let gate = |target: u16| {
@@ -422,7 +553,9 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for StackIrAir {
       * (op.clone().into() - c_mul_high_eq.clone())
       * (op.clone().into() - c_and_eq.clone())
       * (op.clone().into() - c_or_eq.clone())
-      * (op.clone().into() - c_xor_eq.clone());
+      * (op.clone().into() - c_xor_eq.clone())
+      * (op.clone().into() - c_not.clone())
+      * (op.clone().into() - c_eq_sym.clone());
     builder.assert_zero(allowed_poly);
 
     builder.assert_zero(
@@ -433,6 +566,10 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for StackIrAir {
     builder
       .when_transition()
       .assert_eq(next[STACK_COL_SP_BEFORE].clone(), sp_after.clone());
+    // Soundness fix: enforce the last trace row ends with exactly 1 item on the
+    // proof stack (a single WFF result).  Padding rows carry steady_sp = 1, so
+    // this constraint passes for correctly-padded traces.
+    builder.when_last_row().assert_eq(sp_after.clone(), AB::Expr::from_u16(1));
 
     let bool_gate = gate(t_bool);
     let byte_gate = gate(t_byte);
@@ -452,6 +589,8 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for StackIrAir {
     let and_eq_gate = gate(t_and_eq);
     let or_eq_gate = gate(t_or_eq);
     let xor_eq_gate = gate(t_xor_eq);
+    let not_gate = gate(t_not);
+    let eq_sym_gate = gate(t_eq_sym);
 
     builder.assert_zero(bool_gate.clone() * (pop.clone().into() - c_zero.clone()));
     builder.assert_zero(bool_gate.clone() * (push.clone().into() - c_one.clone()));
@@ -559,6 +698,151 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for StackIrAir {
     builder.assert_zero(xor_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
     builder
       .assert_zero(xor_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+
+    // Soundness fix: OP_NOT — unary boolean term constructor (pop=1, push=1, ret_ty=RET_BOOL)
+    builder.assert_zero(not_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(1)));
+    builder.assert_zero(not_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
+    builder.assert_zero(
+      not_gate
+        * (ret_ty.clone().into()
+          - AB::Expr::from_u16(crate::semantic_proof::RET_BOOL as u16)),
+    );
+
+    // Soundness fix: OP_EQ_SYM — proof rule (pop=1, push=1, ret_ty=RET_WFF_EQ)
+    builder.assert_zero(eq_sym_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(1)));
+    builder.assert_zero(eq_sym_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
+    builder.assert_zero(
+      eq_sym_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
+    );
+}
+
+// ============================================================
+// Phase 2: StackIrAirWithPrep — binds main-trace scalar columns to the shared
+// preprocessed ProofRow commitment produced by setup_proof_rows_preprocessed.
+// ============================================================
+
+/// StackIR AIR variant that additionally enforces, via PairBuilder, that every
+/// scalar field in the main trace matches the corresponding column of the
+/// committed preprocessed ProofRow matrix.
+///
+/// Used exclusively by [`prove_stack_ir_with_prep`] and
+/// [`verify_stack_ir_with_prep`]; the plain scaffold API keeps using
+/// [`StackIrAir`] so debug-assertion checking (DebugConstraintBuilder) does not
+/// require a preprocessed trace to be wired up.
+///
+/// Storing `prep_matrix` here is necessary for p3-uni-stark's debug-constraint
+/// checker (`check_constraints`), which calls `BaseAir::preprocessed_trace()`
+/// rather than reading from `PreprocessedProverData`.  The same matrix is
+/// committed by `setup_proof_rows_preprocessed` via `ProofRowsPreprocessedHolder`,
+/// so the two values are always consistent.
+pub struct StackIrAirWithPrep {
+  /// Present when used in the prover path so the debug-constraint checker
+  /// (`check_constraints`) can access the preprocessed rows.
+  /// `None` in the verifier path; the verifier obtains preprocessed data
+  /// from the `PreprocessedVerifierKey` / proof and does not use this field.
+  prep_matrix: Option<RowMajorMatrix<Val>>,
+}
+
+impl StackIrAirWithPrep {
+  /// Build a `StackIrAirWithPrep` for use in the **prover** path.
+  ///
+  /// Stores the preprocessed matrix so p3-uni-stark's debug constraint checker
+  /// (`check_constraints`) can wire up the preprocessed columns during
+  /// `prove_with_preprocessed`.
+  pub fn new(rows: &[ProofRow], pv: &[Val]) -> Self {
+    Self {
+      prep_matrix: Some(build_proof_rows_preprocessed_matrix(rows, pv)),
+    }
+  }
+
+  /// Build a `StackIrAirWithPrep` for use in the **verifier** path.
+  ///
+  /// The verifier obtains preprocessed data from the `PreprocessedVerifierKey`
+  /// embedded in the proof, so no local matrix is needed here.
+  pub fn for_verify() -> Self {
+    Self { prep_matrix: None }
+  }
+}
+
+impl BaseAir<Val> for StackIrAirWithPrep {
+  fn width(&self) -> usize {
+    NUM_STACK_IR_COLS
+  }
+
+  /// Return the preprocessed matrix so the debug-constraint builder can wire
+  /// up the preprocessed columns during `prove_with_preprocessed`.
+  fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Val>> {
+    self.prep_matrix.clone()
+  }
+}
+
+impl<AB> Air<AB> for StackIrAirWithPrep
+where
+  AB: AirBuilderWithPublicValues + PairBuilder + AirBuilder<F = Val>,
+{
+  fn eval(&self, builder: &mut AB) {
+    // Step 1 — preprocessed binding.
+    // Equate each scalar column of the main trace to the corresponding column
+    // of the committed preprocessed ProofRow matrix.  Because both the StackIR
+    // STARK and the LUT STARK use the same PreprocessedVerifierKey the verifier
+    // can confirm, outside of proof checking, that the two proofs share the
+    // same row set.
+    {
+      let prep = builder.preprocessed();
+      let prep_row = prep.row_slice(0).expect("StackIrAirWithPrep: empty preprocessed trace");
+      let prep_row = &*prep_row;
+      let main = builder.main();
+      let local = main.row_slice(0).expect("StackIrAirWithPrep: empty main trace");
+      let local = &*local;
+
+      builder.assert_eq(local[STACK_COL_OP].clone(),      prep_row[PREP_COL_OP].clone());
+      builder.assert_eq(local[STACK_COL_SCALAR0].clone(), prep_row[PREP_COL_SCALAR0].clone());
+      builder.assert_eq(local[STACK_COL_SCALAR1].clone(), prep_row[PREP_COL_SCALAR1].clone());
+      builder.assert_eq(local[STACK_COL_SCALAR2].clone(), prep_row[PREP_COL_SCALAR2].clone());
+      builder.assert_eq(local[STACK_COL_VALUE].clone(),   prep_row[PREP_COL_VALUE].clone());
+      builder.assert_eq(local[STACK_COL_RET_TY].clone(),  prep_row[PREP_COL_RET_TY].clone());
+    }
+
+    // Step 1b — bind pis[1] (EVM opcode) and pis[2..10] (tag-independent WFF digest)
+    // to the corresponding preprocessed columns (PREP_COL_EVM_OPCODE / PREP_COL_WFF_DIGEST_*).
+    //
+    // `when_first_row()` applies each check only at row 0, where the verifier's
+    // externally-derived pv must equal the prep-committed claims.  Because the
+    // prep matrix stores the same opcode/digest in every row (including padding),
+    // row-0 suffices to bind the entire committed object to the expected WFF.
+    {
+      // Collect owned AB::Expr values from public inputs (ends the immutable borrow
+      // on `builder` before the mutable `when_first_row()` calls below).
+      let pi_opcode: AB::Expr = {
+        let pis = builder.public_values();
+        pis[1].clone().into()
+      };
+      let pi_digest: [AB::Expr; 8] = {
+        let pis = builder.public_values();
+        std::array::from_fn(|k| pis[2 + k].clone().into())
+      };
+      // Collect owned AB::Expr values from the preprocessed row 0.
+      let prep_opcode: AB::Expr = {
+        let prep = builder.preprocessed();
+        let row = prep.row_slice(0).expect("StackIrAirWithPrep: empty prep (pv-bind)");
+        row[PREP_COL_EVM_OPCODE].clone().into()
+      };
+      let prep_digest: [AB::Expr; 8] = {
+        let prep = builder.preprocessed();
+        let row = prep.row_slice(0).expect("StackIrAirWithPrep: empty prep (pv-bind)");
+        std::array::from_fn(|k| row[PREP_COL_WFF_DIGEST_START + k].clone().into())
+      };
+      // All borrows released — safe to call when_first_row() now.
+      builder.when_first_row().assert_eq(prep_opcode, pi_opcode);
+      for k in 0..8_usize {
+        builder
+          .when_first_row()
+          .assert_eq(prep_digest[k].clone(), pi_digest[k].clone());
+      }
+    }
+
+    // Step 2 — all existing StackIR semantic constraints (shared).
+    eval_stack_ir_inner(builder);
   }
 }
 
@@ -606,6 +890,335 @@ pub fn prove_and_verify_stack_ir_scaffold_stark(rows: &[ProofRow]) -> bool {
 }
 
 // ============================================================
+// Phase 1: Shared preprocessed rows infrastructure
+//
+// `rows = compile_proof(semantic_proof)` is committed as a preprocessed trace
+// shared by the StackIR and LUT STARKs.  Both proofs include this commitment
+// in their Fiat-Shamir transcript, binding them to the same ProofRow set.
+//
+// Column layout in the preprocessed matrix (NUM_PREP_COLS = 18):
+//   0 op  1 scalar0  2 scalar1  3 scalar2  4 arg0  5 arg1  6 arg2  7 value  8 ret_ty
+//   9 evm_opcode  10..17 wff_digest[0..7]
+//
+// Columns 9-17 are identical across all rows of a given proof.  They store the
+// EVM opcode (`pis[1]`) and the tag-independent WFF Poseidon digest (`pis[2..10]`).
+// Both StackIrAirWithPrep and LutKernelAirWithPrep bind these to the corresponding
+// public-input slots on the first row, closing the gap that previously let a forger
+// prove valid-arithmetic rows for a different WFF claim.
+// ============================================================
+
+pub const PREP_COL_OP: usize = 0;
+pub const PREP_COL_SCALAR0: usize = 1;
+pub const PREP_COL_SCALAR1: usize = 2;
+pub const PREP_COL_SCALAR2: usize = 3;
+pub const PREP_COL_ARG0: usize = 4;
+pub const PREP_COL_ARG1: usize = 5;
+pub const PREP_COL_ARG2: usize = 6;
+pub const PREP_COL_VALUE: usize = 7;
+pub const PREP_COL_RET_TY: usize = 8;
+/// EVM opcode column — must equal `pis[1]` (checked by both AIR evals via `when_first_row`).
+pub const PREP_COL_EVM_OPCODE: usize = 9;
+/// First of 8 columns holding the tag-independent WFF Poseidon digest.
+/// `PREP_COL_WFF_DIGEST_START + k` (k = 0..7) must equal `pis[2 + k]`.
+pub const PREP_COL_WFF_DIGEST_START: usize = 10;
+pub const NUM_PREP_COLS: usize = 18;
+
+// ============================================================
+// Phase 3: Batch preprocessed matrix — constants and builder
+//
+// Extends the single-instruction layout (NUM_PREP_COLS = 18) with two
+// batch-level columns that are identical across all rows:
+//
+//   Col 18  PREP_COL_BATCH_N            — number of instructions in the batch
+//   Col 19  PREP_COL_BATCH_DIGEST_START — first of 8 M31 manifest-digest values
+//   ...     (cols 19..26)
+//
+// pis layout for batch STARKs (same RECEIPT_BIND_PUBLIC_VALUES_LEN = 10):
+//   pis[0] = tag
+//   pis[1] = N            ← bound to PREP_COL_BATCH_N   at row 0
+//   pis[2..10] = digest   ← bound to PREP_COL_BATCH_DIGEST_START+k at row 0
+//
+// Per-instruction PREP_COL_EVM_OPCODE and PREP_COL_WFF_DIGEST_* are still
+// stored in the batch matrix (cols 9-17) and change per instruction segment,
+// but are NOT directly bound to pis — the verifier checks them out-of-circuit
+// via `compute_batch_manifest_digest`.
+// ============================================================
+
+/// Column holding the batch instruction count N; same value in every row.
+pub const PREP_COL_BATCH_N: usize = 18;
+/// First of 8 columns holding the batch manifest Poseidon digest.
+/// `PREP_COL_BATCH_DIGEST_START + k` (k = 0..7) bound to `pis[2 + k]`.
+pub const PREP_COL_BATCH_DIGEST_START: usize = 19;
+/// Total columns in the **batch** preprocessed matrix.
+pub const NUM_BATCH_PREP_COLS: usize = 27;
+
+/// Build the batch preprocessed matrix from a [`BatchProofRowsManifest`] and
+/// its corresponding batch public-values vector.
+///
+/// **Layout per row (NUM_BATCH_PREP_COLS = 27 columns):**
+/// - Cols 0..8 : ProofRow fields (`op`, `scalar0`–`scalar2`, `arg0`–`arg2`,
+///              `value`, `ret_ty`) — identical to the single-instruction matrix.
+/// - Col 9    : `PREP_COL_EVM_OPCODE` — the EVM opcode for the owning
+///              instruction segment; changes at instruction boundaries.
+/// - Cols 10..17 : `PREP_COL_WFF_DIGEST_START + k` — per-instruction WFF
+///              digest; changes at instruction boundaries.
+/// - Col 18   : `PREP_COL_BATCH_N` — N, replicated in every row.
+/// - Cols 19..26 : `PREP_COL_BATCH_DIGEST_START + k` — batch manifest digest,
+///              replicated in every row.
+///
+/// Height = `all_rows.len().max(4).next_power_of_two()` (power-of-2 FRI requirement).
+/// Padding rows beyond `all_rows.len()` use `op = OP_EQ_REFL`, `ret_ty =
+/// RET_WFF_EQ`, and replicate the batch metadata columns.
+pub fn build_batch_proof_rows_preprocessed_matrix(
+  manifest: &BatchProofRowsManifest,
+  pv: &[Val],
+) -> RowMajorMatrix<Val> {
+  let rows = &manifest.all_rows;
+  let n_rows = rows.len().max(4).next_power_of_two();
+  let mut matrix = RowMajorMatrix::new(
+    Val::zero_vec(n_rows * NUM_BATCH_PREP_COLS),
+    NUM_BATCH_PREP_COLS,
+  );
+
+  // Batch-level values from pv: pv[1] = N, pv[2..10] = batch_digest.
+  let batch_n = if pv.len() > 1 { pv[1] } else { Val::ZERO };
+  let batch_digest: &[Val] = if pv.len() >= 10 { &pv[2..10] } else { &[] };
+
+  // Build a lookup: row_index → (evm_opcode, per-instruction wff_digest)
+  // We pre-compute per-instruction WFF digests once.
+  let mut row_meta: Vec<(Val, [Val; 8])> = vec![
+    (Val::ZERO, [Val::ZERO; 8]);
+    rows.len()
+  ];
+  for entry in &manifest.entries {
+    let per_digest = compute_wff_opcode_digest(entry.opcode, &entry.wff);
+    let opcode_val = Val::from_u32(entry.opcode as u32);
+    for r in entry.row_start..(entry.row_start + entry.row_count).min(rows.len()) {
+      row_meta[r] = (opcode_val, per_digest);
+    }
+  }
+
+  for (i, row) in rows.iter().enumerate() {
+    let base = i * NUM_BATCH_PREP_COLS;
+    matrix.values[base + PREP_COL_OP]      = Val::from_u32(row.op);
+    matrix.values[base + PREP_COL_SCALAR0] = Val::from_u32(row.scalar0);
+    matrix.values[base + PREP_COL_SCALAR1] = Val::from_u32(row.scalar1);
+    matrix.values[base + PREP_COL_SCALAR2] = Val::from_u32(row.scalar2);
+    matrix.values[base + PREP_COL_ARG0]    = Val::from_u32(row.arg0);
+    matrix.values[base + PREP_COL_ARG1]    = Val::from_u32(row.arg1);
+    matrix.values[base + PREP_COL_ARG2]    = Val::from_u32(row.arg2);
+    matrix.values[base + PREP_COL_VALUE]   = Val::from_u32(row.value);
+    matrix.values[base + PREP_COL_RET_TY]  = Val::from_u32(row.ret_ty);
+    let (opcode_val, per_digest) = row_meta[i];
+    matrix.values[base + PREP_COL_EVM_OPCODE] = opcode_val;
+    for k in 0..8 {
+      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] = per_digest[k];
+    }
+    // Batch-level metadata (same for every row).
+    matrix.values[base + PREP_COL_BATCH_N] = batch_n;
+    for k in 0..8 {
+      matrix.values[base + PREP_COL_BATCH_DIGEST_START + k] =
+        if k < batch_digest.len() { batch_digest[k] } else { Val::ZERO };
+    }
+  }
+
+  // Padding rows: op = OP_EQ_REFL, ret_ty = RET_WFF_EQ; batch metadata replicated.
+  // Pick a representative per-instruction opcode/digest from the last live row.
+  let (last_opcode, last_per_digest) = row_meta.last().copied().unwrap_or((Val::ZERO, [Val::ZERO; 8]));
+  for i in rows.len()..n_rows {
+    let base = i * NUM_BATCH_PREP_COLS;
+    matrix.values[base + PREP_COL_OP] =
+      Val::from_u32(crate::semantic_proof::OP_EQ_REFL);
+    matrix.values[base + PREP_COL_RET_TY] =
+      Val::from_u32(crate::semantic_proof::RET_WFF_EQ);
+    matrix.values[base + PREP_COL_EVM_OPCODE] = last_opcode;
+    for k in 0..8 {
+      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] = last_per_digest[k];
+    }
+    matrix.values[base + PREP_COL_BATCH_N] = batch_n;
+    for k in 0..8 {
+      matrix.values[base + PREP_COL_BATCH_DIGEST_START + k] =
+        if k < batch_digest.len() { batch_digest[k] } else { Val::ZERO };
+    }
+  }
+
+  matrix
+}
+
+/// Commit the batch manifest as a preprocessed trace shared by the batch
+/// StackIR and batch LUT STARKs.
+///
+/// Returns `(ProverData, VerifierKey)`.  Both proving functions
+/// (`prove_batch_stack_ir_with_prep` and `prove_batch_lut_with_prep`) must
+/// receive the same pair to share an identical Fiat-Shamir transcript.
+pub fn setup_batch_proof_rows_preprocessed(
+  manifest: &BatchProofRowsManifest,
+  pv: &[Val],
+) -> Result<
+  (
+    PreprocessedProverData<CircleStarkConfig>,
+    PreprocessedVerifierKey<CircleStarkConfig>,
+  ),
+  String,
+> {
+  let matrix = build_batch_proof_rows_preprocessed_matrix(manifest, pv);
+  let n_rows = matrix.height();
+  let degree_bits = n_rows.trailing_zeros() as usize;
+  let config = make_circle_config();
+  let holder = ProofRowsPreprocessedHolder { matrix };
+  setup_preprocessed(&config, &holder, degree_bits)
+    .ok_or_else(|| "batch preprocessed matrix was empty (zero width)".to_string())
+}
+
+/// Build the preprocessed matrix from compiled proof rows and public values.
+///
+/// `pv` must follow the layout of [`make_receipt_binding_public_values`]:
+/// `[tag, opcode, digest[0..7]]`.  The EVM opcode (`pv[1]`) and WFF digest
+/// (`pv[2..9]`) are replicated into columns 9-17 of every row, enabling both
+/// the StackIR and LUT AIRs to bind `pis[1]` and `pis[2..10]` at row 0.
+///
+/// Height = `rows.len().max(4).next_power_of_two()` — identical to the height
+/// used by [`build_stack_ir_trace_from_rows`], ensuring dimension compatibility
+/// with `p3_uni_stark::prove_with_preprocessed`.
+///
+/// Padding rows (beyond `rows.len()`) replicate the StackIR padding convention:
+/// `op = OP_EQ_REFL`, all other ProofRow columns zero; opcode/digest columns
+/// carry the same values as live rows.
+pub fn build_proof_rows_preprocessed_matrix(rows: &[ProofRow], pv: &[Val]) -> RowMajorMatrix<Val> {
+  let n_rows = rows.len().max(4).next_power_of_two();
+  let mut matrix = RowMajorMatrix::new(Val::zero_vec(n_rows * NUM_PREP_COLS), NUM_PREP_COLS);
+
+  let evm_opcode = if pv.len() > 1 { pv[1] } else { Val::ZERO };
+  let digest_slice: &[Val] = if pv.len() >= 10 { &pv[2..10] } else { &[] };
+
+  for (i, row) in rows.iter().enumerate() {
+    let base = i * NUM_PREP_COLS;
+    matrix.values[base + PREP_COL_OP] = Val::from_u32(row.op);
+    matrix.values[base + PREP_COL_SCALAR0] = Val::from_u32(row.scalar0);
+    matrix.values[base + PREP_COL_SCALAR1] = Val::from_u32(row.scalar1);
+    matrix.values[base + PREP_COL_SCALAR2] = Val::from_u32(row.scalar2);
+    matrix.values[base + PREP_COL_ARG0] = Val::from_u32(row.arg0);
+    matrix.values[base + PREP_COL_ARG1] = Val::from_u32(row.arg1);
+    matrix.values[base + PREP_COL_ARG2] = Val::from_u32(row.arg2);
+    matrix.values[base + PREP_COL_VALUE] = Val::from_u32(row.value);
+    matrix.values[base + PREP_COL_RET_TY] = Val::from_u32(row.ret_ty);
+    matrix.values[base + PREP_COL_EVM_OPCODE] = evm_opcode;
+    for k in 0..8 {
+      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] =
+        if k < digest_slice.len() { digest_slice[k] } else { Val::ZERO };
+    }
+  }
+
+  // Padding: op = OP_EQ_REFL, ret_ty = RET_WFF_EQ; opcode/digest same as live rows.
+  for i in rows.len()..n_rows {
+    let base = i * NUM_PREP_COLS;
+    matrix.values[base + PREP_COL_OP] =
+      Val::from_u32(crate::semantic_proof::OP_EQ_REFL);
+    matrix.values[base + PREP_COL_RET_TY] =
+      Val::from_u32(crate::semantic_proof::RET_WFF_EQ);
+    matrix.values[base + PREP_COL_EVM_OPCODE] = evm_opcode;
+    for k in 0..8 {
+      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] =
+        if k < digest_slice.len() { digest_slice[k] } else { Val::ZERO };
+    }
+  }
+
+  matrix
+}
+
+/// Dummy AIR used exclusively to drive `p3_uni_stark::setup_preprocessed`.
+///
+/// It carries no main-trace columns and no constraints; its only purpose is to
+/// return the dynamic preprocessed matrix via `BaseAir::preprocessed_trace`.
+struct ProofRowsPreprocessedHolder {
+  matrix: RowMajorMatrix<Val>,
+}
+
+impl BaseAir<Val> for ProofRowsPreprocessedHolder {
+  /// No main-trace columns — this AIR exists only as a preprocessed-trace holder.
+  fn width(&self) -> usize {
+    0
+  }
+
+  fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Val>> {
+    Some(self.matrix.clone())
+  }
+}
+
+/// Blanket Air impl: no constraints, any base-field builder.
+impl<AB: AirBuilder<F = Val>> Air<AB> for ProofRowsPreprocessedHolder {
+  fn eval(&self, _builder: &mut AB) {}
+}
+
+/// Commit the compiled proof rows as a preprocessed trace.
+///
+/// Returns `(ProverData, VerifierKey)` bound to the specific `rows` content.
+/// Both are tied to `degree_bits = log2(rows.len().max(4).next_power_of_two())`.
+///
+/// **Both** [`prove_stack_ir_with_prep`] and the analogous LUT prove function
+/// must receive the *same* `ProverData` / `VerifierKey` pair so that their
+/// Fiat-Shamir transcripts commit to an identical preprocessed matrix.
+pub fn setup_proof_rows_preprocessed(
+  rows: &[ProofRow],
+  pv: &[Val],
+) -> Result<
+  (
+    PreprocessedProverData<CircleStarkConfig>,
+    PreprocessedVerifierKey<CircleStarkConfig>,
+  ),
+  String,
+> {
+  let matrix = build_proof_rows_preprocessed_matrix(rows, pv);
+  let n_rows = matrix.height();
+  // n_rows is already a power of two (guaranteed by build_proof_rows_preprocessed_matrix).
+  let degree_bits = n_rows.trailing_zeros() as usize;
+
+  let config = make_circle_config();
+  let holder = ProofRowsPreprocessedHolder { matrix };
+
+  setup_preprocessed(&config, &holder, degree_bits)
+    .ok_or_else(|| "preprocessed matrix was empty (zero width)".to_string())
+}
+
+/// Prove the StackIR STARK for `rows` and bind the proof to the shared
+/// preprocessed commitment (`prep_data`).
+///
+/// The resulting proof includes `prep_data`'s commitment in its transcript,
+/// so the verifier can confirm (via [`verify_stack_ir_with_prep`]) that this
+/// proof was generated with the correct preprocessed rows.
+pub fn prove_stack_ir_with_prep(
+  rows: &[ProofRow],
+  prep_data: &PreprocessedProverData<CircleStarkConfig>,
+  public_values: &[Val],
+) -> Result<CircleStarkProof, String> {
+  let trace = build_stack_ir_trace_from_rows(rows)?;
+  let config = make_circle_config();
+  let air = StackIrAirWithPrep::new(rows, public_values);
+  let proof = p3_uni_stark::prove_with_preprocessed(
+    &config,
+    &air,
+    trace,
+    public_values,
+    Some(prep_data),
+  );
+  Ok(proof)
+}
+
+/// Verify a StackIR proof that was generated with [`prove_stack_ir_with_prep`].
+///
+/// `prep_vk` must be the verifier key produced by the same
+/// [`setup_proof_rows_preprocessed`] call that produced the prover data;
+/// if the two witnesses share a VK the proof links them to identical rows.
+pub fn verify_stack_ir_with_prep(
+  proof: &CircleStarkProof,
+  prep_vk: &PreprocessedVerifierKey<CircleStarkConfig>,
+  public_values: &[Val],
+) -> CircleStarkVerifyResult {
+  let config = make_circle_config();
+  p3_uni_stark::verify_with_preprocessed(&config, &StackIrAirWithPrep::for_verify(), proof, public_values, Some(prep_vk))
+}
+
+// ============================================================
 // LUT framework (v2 scaffold)
 // ============================================================
 
@@ -642,7 +1255,7 @@ const LUT_COL_IN1: usize = 2;
 const LUT_COL_IN2: usize = 3;
 const LUT_COL_OUT0: usize = 4;
 const LUT_COL_OUT1: usize = 5;
-const NUM_LUT_COLS: usize = 6;
+pub const NUM_LUT_COLS: usize = 6;
 
 fn lut_opcode_tag(op: LutOpcode) -> u16 {
   match op {
@@ -767,22 +1380,32 @@ pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, Stri
           out1: total & 0xFF,
         }
       }
-      crate::semantic_proof::OP_BYTE_MUL_LOW_EQ => LutStep {
-        op: LutOpcode::ByteMulLowEq,
-        in0: row.scalar0,
-        in1: row.scalar1,
-        in2: 0,
-        out0: (row.scalar0 * row.scalar1) & 0xFF,
-        out1: 0,
-      },
-      crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ => LutStep {
-        op: LutOpcode::ByteMulHighEq,
-        in0: row.scalar0,
-        in1: row.scalar1,
-        in2: 0,
-        out0: (row.scalar0 * row.scalar1) >> 8,
-        out1: 0,
-      },
+      crate::semantic_proof::OP_BYTE_MUL_LOW_EQ => {
+        let product = row.scalar0 * row.scalar1;
+        // Soundness fix: MulLow AIR constraint is  in0*in1 = out0 + 256*out1
+        // so out1 must carry the high byte, not 0.
+        LutStep {
+          op: LutOpcode::ByteMulLowEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: product & 0xFF,
+          out1: product >> 8,
+        }
+      }
+      crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ => {
+        let product = row.scalar0 * row.scalar1;
+        // Soundness fix: MulHigh AIR constraint is  in0*in1 = 256*out0 + out1
+        // so out1 must carry the low byte, not 0.
+        LutStep {
+          op: LutOpcode::ByteMulHighEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: product >> 8,
+          out1: product & 0xFF,
+        }
+      }
       crate::semantic_proof::OP_BYTE_AND_EQ => LutStep {
         op: LutOpcode::ByteAndEq,
         in0: row.scalar0,
@@ -954,6 +1577,13 @@ impl<F> BaseAir<F> for LutKernelAir {
 
 impl<AB: AirBuilderWithPublicValues> Air<AB> for LutKernelAir {
   fn eval(&self, builder: &mut AB) {
+    eval_lut_kernel_inner(builder);
+  }
+}
+
+/// Core LUT kernel constraints — shared between `LutKernelAir` and
+/// `LutKernelAirWithPrep` to avoid code duplication.
+fn eval_lut_kernel_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
     let pis = builder.public_values();
     builder.assert_eq(pis[0], AB::Expr::from_u32(RECEIPT_BIND_TAG_LUT));
 
@@ -981,7 +1611,6 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for LutKernelAir {
     let c_and = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAndEq));
     let c_or = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteOrEq));
     let c_xor = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteXorEq));
-    let c_zero = AB::Expr::from_u16(0);
     let c256 = AB::Expr::from_u16(256);
 
     let allowed_poly = (op.clone().into() - c_add.clone())
@@ -1199,9 +1828,692 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for LutKernelAir {
     builder.assert_zero(g_xor.clone() * in2.clone());
     builder.assert_zero(g_xor.clone() * out1.clone());
 
-    builder.assert_zero(g_add_carry * c_zero.clone());
+    // (dead constraint `g_add_carry * c_zero` removed — was always trivially 0)
     builder.assert_bool(in2.clone());
+}
+
+// ============================================================
+// Phase 3: LutKernelAirWithPrep — binds LUT main-trace columns
+// to the shared preprocessed ProofRow commitment.
+// ============================================================
+
+/// LUT STARK variant that, in addition to the arithmetic validity constraints
+/// from [`LutKernelAir`], enforces (via [`PairBuilder`]) that each LUT step in
+/// the main trace was derived from the corresponding committed [`ProofRow`].
+///
+/// Only used by [`prove_lut_with_prep`] / [`verify_lut_with_prep`].
+pub struct LutKernelAirWithPrep {
+  prep_matrix: Option<RowMajorMatrix<Val>>,
+}
+
+impl LutKernelAirWithPrep {
+  /// Prover path: store the preprocessed matrix so the p3-uni-stark
+  /// debug-constraint checker can wire up the preprocessed columns.
+  pub fn new(rows: &[ProofRow], pv: &[Val]) -> Self {
+    Self {
+      prep_matrix: Some(build_proof_rows_preprocessed_matrix(rows, pv)),
+    }
   }
+
+  /// Verifier path: preprocessed data comes from the `PreprocessedVerifierKey`
+  /// embedded in the proof; no local matrix is needed.
+  pub fn for_verify() -> Self {
+    Self { prep_matrix: None }
+  }
+}
+
+impl BaseAir<Val> for LutKernelAirWithPrep {
+  fn width(&self) -> usize {
+    NUM_LUT_COLS
+  }
+
+  fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Val>> {
+    self.prep_matrix.clone()
+  }
+}
+
+impl<AB> Air<AB> for LutKernelAirWithPrep
+where
+  AB: AirBuilderWithPublicValues + PairBuilder + AirBuilder<F = Val>,
+{
+  fn eval(&self, builder: &mut AB) {
+    // ── Phase 3: preprocessed-row binding ──────────────────────────────────
+    //
+    // For every LUT-eligible ProofRow op `X`, a gate polynomial is zero unless
+    // `prep[PREP_COL_OP] == X`.  When it fires it constrains the LUT main-
+    // trace columns to reflect the committed ProofRow fields.
+    //
+    // For structural (non-LUT) ProofRow ops the gate is always zero and the
+    // LUT step's ByteAddEq(0,0,0,0,0) padding is unconstrained.
+    {
+      use crate::semantic_proof::{
+        OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_ADD_EQ,
+        OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, OP_BYTE_ADD_THIRD_CONGRUENCE,
+        OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ, OP_BYTE_MUL_LOW_EQ, OP_BYTE_OR_EQ,
+        OP_BYTE_XOR_EQ, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT, OP_U15_MUL_EQ,
+        OP_U16_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
+      };
+
+      let prep = builder.preprocessed();
+      let prep_row = prep
+        .row_slice(0)
+        .expect("LutKernelAirWithPrep: empty preprocessed trace");
+      let prep_row = &*prep_row;
+
+      let main = builder.main();
+      let local = main
+        .row_slice(0)
+        .expect("LutKernelAirWithPrep: empty main trace");
+      let local = &*local;
+
+      // Gate polynomial that is zero unless `prep[op] == target`.
+      //
+      // IMPORTANT: must include ALL ProofRow ops — both LUT-eligible AND
+      // structural (OP_EQ_REFL, OP_BOOL, etc.) — so that the gate evaluates
+      // to zero for preprocessed padding rows (op = OP_EQ_REFL), preventing
+      // spurious constraint fires on non-LUT rows.  Degree = 17.
+      let all_prep_ops: &[u32] = &[
+        // LUT-eligible ops
+        OP_BYTE_ADD_EQ, OP_U16_ADD_EQ, OP_U29_ADD_EQ, OP_U24_ADD_EQ,
+        OP_U15_MUL_EQ, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_MUL_LOW_EQ,
+        OP_BYTE_MUL_HIGH_EQ, OP_BYTE_AND_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ,
+        // Structural (non-LUT) ops that appear in preprocessed padding rows
+        OP_BOOL, OP_BYTE, OP_AND_INTRO, OP_EQ_REFL, OP_EQ_TRANS,
+        OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+        // Soundness fix: OP_NOT and OP_EQ_SYM can appear in proof traces;
+        // they must be in all_prep_ops so the pg() gate polynomial evaluates
+        // to zero when the preprocessed op is NOT or EQ_SYM.
+        OP_NOT, OP_EQ_SYM,
+      ];
+      let pg = |target: u32| -> AB::Expr {
+        all_prep_ops
+          .iter()
+          .filter(|&&t| t != target)
+          .fold(AB::Expr::from_u32(1), |acc, &t| {
+            acc * (prep_row[PREP_COL_OP].clone().into() - AB::Expr::from_u32(t))
+          })
+      };
+
+      // OP_BYTE_ADD_EQ → ByteAddEq
+      // in0=scalar0, in1=scalar1, in2=arg0, out0=value, out1=scalar2
+      let tag_add = lut_opcode_tag(LutOpcode::ByteAddEq) as u32;
+      let g = pg(OP_BYTE_ADD_EQ);
+      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_add)));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_ARG0].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
+      builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_SCALAR2].clone().into()));
+
+      // OP_U16_ADD_EQ → U16AddEq
+      // in0=scalar0, in1=scalar1, in2=scalar2, out0=value, out1=arg1
+      let tag_u16 = lut_opcode_tag(LutOpcode::U16AddEq) as u32;
+      let g = pg(OP_U16_ADD_EQ);
+      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u16)));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
+      builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
+
+      // OP_U29_ADD_EQ → U29AddEq
+      // in0=scalar0, in1=scalar1, in2=scalar2, out0=value, out1=arg1
+      let tag_u29 = lut_opcode_tag(LutOpcode::U29AddEq) as u32;
+      let g = pg(OP_U29_ADD_EQ);
+      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u29)));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
+      builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
+
+      // OP_U24_ADD_EQ → U24AddEq (same field layout as U29)
+      let tag_u24 = lut_opcode_tag(LutOpcode::U24AddEq) as u32;
+      let g = pg(OP_U24_ADD_EQ);
+      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u24)));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
+      builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
+
+      // OP_U15_MUL_EQ → U15MulEq
+      // in0=scalar0, in1=scalar1, in2=0, out0=value(lo), out1=arg0(hi)
+      let tag_mul = lut_opcode_tag(LutOpcode::U15MulEq) as u32;
+      let g = pg(OP_U15_MUL_EQ);
+      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_mul)));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
+      builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
+
+      // OP_BYTE_ADD_CARRY_EQ → ByteAddCarryEq
+      // in0=scalar0, in1=scalar1, in2=arg0 (outputs arithmetically derived)
+      let tag_carry = lut_opcode_tag(LutOpcode::ByteAddCarryEq) as u32;
+      let g = pg(OP_BYTE_ADD_CARRY_EQ);
+      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_carry)));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
+      builder.assert_zero(g         * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
+
+      // OP_BYTE_MUL_LOW_EQ → ByteMulLowEq
+      // in0=scalar0, in1=scalar1 (out arithmetically derived)
+      let tag_ml = lut_opcode_tag(LutOpcode::ByteMulLowEq) as u32;
+      let g = pg(OP_BYTE_MUL_LOW_EQ);
+      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_ml)));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
+      builder.assert_zero(g         * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
+
+      // OP_BYTE_MUL_HIGH_EQ → ByteMulHighEq
+      let tag_mh = lut_opcode_tag(LutOpcode::ByteMulHighEq) as u32;
+      let g = pg(OP_BYTE_MUL_HIGH_EQ);
+      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_mh)));
+      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
+      builder.assert_zero(g         * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
+
+      // OP_BYTE_AND_EQ / OP_BYTE_OR_EQ / OP_BYTE_XOR_EQ:
+      // These bit-family ops use byte-level values (0..255) in ProofRows but
+      // the inner LUT arithmetic constraints enforce bit-level (0 or 1) inputs.
+      // Binding them to a `ByteAndEq`/`ByteOrEq`/`ByteXorEq` LUT row would
+      // fail the arithmetic check.  The correctness guarantee for these rows
+      // comes from the StackIR binding (scalar0/scalar1/value are all committed
+      // to the shared preprocessed VK), so no additional LUT arithmetic
+      // binding is needed here.
+    }
+
+    // ── pv binding: EVM opcode + WFF digest (first row only) ─────────────
+    //
+    // Mirrors the StackIrAirWithPrep Step 1b binding.  Both AIRs share the
+    // same preprocessed matrix, so asserting row-0 EVM opcode/digest against
+    // pis[1] and pis[2..10] here closes the same gap on the LUT side.
+    {
+      // Extract owned AB::Expr values before mutable when_first_row() calls.
+      let pi_opcode: AB::Expr = {
+        let pis = builder.public_values();
+        pis[1].clone().into()
+      };
+      let pi_digest: [AB::Expr; 8] = {
+        let pis = builder.public_values();
+        std::array::from_fn(|k| pis[2 + k].clone().into())
+      };
+      let prep_opcode: AB::Expr = {
+        let prep = builder.preprocessed();
+        let row = prep.row_slice(0).expect("LutKernelAirWithPrep: empty prep (pv-bind)");
+        row[PREP_COL_EVM_OPCODE].clone().into()
+      };
+      let prep_digest: [AB::Expr; 8] = {
+        let prep = builder.preprocessed();
+        let row = prep.row_slice(0).expect("LutKernelAirWithPrep: empty prep (pv-bind)");
+        std::array::from_fn(|k| row[PREP_COL_WFF_DIGEST_START + k].clone().into())
+      };
+      builder.when_first_row().assert_eq(prep_opcode, pi_opcode);
+      for k in 0..8_usize {
+        builder
+          .when_first_row()
+          .assert_eq(prep_digest[k].clone(), pi_digest[k].clone());
+      }
+    }
+
+    // ── All existing LUT arithmetic constraints ──────────────────────────
+    eval_lut_kernel_inner(builder);
+  }
+}
+
+/// Build a LUT main trace with exactly **one row per [`ProofRow`]** — the same
+/// height as [`build_proof_rows_preprocessed_matrix`] and
+/// [`build_stack_ir_trace_from_rows`].  This 1:1 alignment is required to share
+/// the same `PreprocessedProverData` between the StackIR and LUT STARKs.
+///
+/// Non-LUT structural ops (`OP_EQ_REFL`, etc.) are encoded as `ByteAddEq(0,0,0)`
+/// padding rows, which satisfy the LUT AIR's arithmetic constraints trivially.
+/// `OP_U16_ADD_EQ` is encoded as a single `U16AddEq` step (not the 2-step
+/// U15-decomposition used by the legacy path) to maintain the 1:1 invariant.
+pub fn build_lut_trace_from_proof_rows(
+  rows: &[ProofRow],
+) -> Result<RowMajorMatrix<Val>, String> {
+  use crate::semantic_proof::{
+    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_ADD_EQ,
+    OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, OP_BYTE_ADD_THIRD_CONGRUENCE,
+    OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ, OP_BYTE_MUL_LOW_EQ, OP_BYTE_OR_EQ,
+    OP_BYTE_XOR_EQ, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT, OP_U15_MUL_EQ,
+    OP_U16_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
+  };
+
+  if rows.is_empty() {
+    return Err("build_lut_trace_from_proof_rows: cannot build from empty row set".to_string());
+  }
+
+  let n_rows = rows.len().max(4).next_power_of_two();
+  let mut trace =
+    RowMajorMatrix::new(Val::zero_vec(n_rows * NUM_LUT_COLS), NUM_LUT_COLS);
+  let pad_tag = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
+
+  for (i, row) in rows.iter().enumerate() {
+    let b = i * NUM_LUT_COLS;
+    match row.op {
+      // ── Structural (non-LUT) rows: pad as ByteAddEq(0,0,0,0,0) ──────────
+      op if op == OP_BOOL
+        || op == OP_BYTE
+        || op == OP_EQ_REFL
+        || op == OP_AND_INTRO
+        || op == OP_EQ_TRANS
+        || op == OP_BYTE_ADD_THIRD_CONGRUENCE
+        || op == OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE
+        || op == OP_NOT
+        || op == OP_EQ_SYM =>
+      {
+        trace.values[b + LUT_COL_OP] = pad_tag;
+        // in0..out1 remain zero — ByteAddEq(0+0+0=0) is arithmetically valid.
+      }
+      OP_BYTE_ADD_EQ => {
+        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
+        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_IN2]  = Val::from_u32(row.arg0);
+        trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
+        trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.scalar2);
+      }
+      OP_U16_ADD_EQ => {
+        // Single U16AddEq step — keeps 1:1 row alignment with ProofRows.
+        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::U16AddEq));
+        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_IN2]  = Val::from_u32(row.scalar2);
+        trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
+        trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.arg1);
+      }
+      OP_U29_ADD_EQ => {
+        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::U29AddEq));
+        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_IN2]  = Val::from_u32(row.scalar2);
+        trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
+        trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.arg1);
+      }
+      OP_U24_ADD_EQ => {
+        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::U24AddEq));
+        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_IN2]  = Val::from_u32(row.scalar2);
+        trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
+        trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.arg1);
+      }
+      OP_U15_MUL_EQ => {
+        // lo = value, hi = arg0  (as stored by compile_proof)
+        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::U15MulEq));
+        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
+        // in2 = 0 (already zero)
+        trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
+        trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.arg0);
+      }
+      OP_BYTE_ADD_CARRY_EQ => {
+        let total = row.scalar0 + row.scalar1 + row.arg0;
+        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddCarryEq));
+        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_IN2]  = Val::from_u32(row.arg0);
+        trace.values[b + LUT_COL_OUT0] = Val::from_u32(if total >= 256 { 1 } else { 0 });
+        trace.values[b + LUT_COL_OUT1] = Val::from_u32(total & 0xFF);
+      }
+      OP_BYTE_MUL_LOW_EQ => {
+        let result = row.scalar0 * row.scalar1;
+        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::ByteMulLowEq));
+        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_OUT0] = Val::from_u32(result & 0xFF);
+        // Soundness fix: AIR constraint is  in0*in1 = out0 + 256*out1
+        // so out1 must carry the high byte.
+        trace.values[b + LUT_COL_OUT1] = Val::from_u32(result >> 8);
+      }
+      OP_BYTE_MUL_HIGH_EQ => {
+        let result = row.scalar0 * row.scalar1;
+        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::ByteMulHighEq));
+        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_OUT0] = Val::from_u32(result >> 8);
+        // Soundness fix: AIR constraint is  in0*in1 = 256*out0 + out1
+        // so out1 must carry the low byte.
+        trace.values[b + LUT_COL_OUT1] = Val::from_u32(result & 0xFF);
+      }
+      OP_BYTE_AND_EQ | OP_BYTE_OR_EQ | OP_BYTE_XOR_EQ => {
+        // Bit-family ops: byte inputs (0..255) are incompatible with the
+        // bit-level LUT inner constraints (in0*(in0-1)==0).  Encode as a
+        // ByteAddEq(0,0,0,0,0) pad so the arithmetic checks trivially pass.
+        // The scalar0/scalar1/value columns are still committed to the shared
+        // preprocessed VK via the StackIR binding, which is sufficient for
+        // these operations.
+        trace.values[b + LUT_COL_OP] = pad_tag;
+        // in0..out1 remain zero.
+      }
+      other => {
+        return Err(format!(
+          "build_lut_trace_from_proof_rows: unsupported op {other} at row {i}"
+        ));
+      }
+    }
+  }
+
+  // Padding rows beyond `rows.len()`: ByteAddEq(0,0,0,0,0).
+  for i in rows.len()..n_rows {
+    trace.values[i * NUM_LUT_COLS + LUT_COL_OP] = pad_tag;
+  }
+
+  Ok(trace)
+}
+
+/// Scaffold public-values helper for the LUT prep path (tag + zeros).
+pub fn lut_scaffold_public_values() -> Vec<Val> {
+  default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT)
+}
+
+/// Prove the LUT kernel STARK with shared preprocessed ProofRow commitment.
+///
+/// Uses [`build_lut_trace_from_proof_rows`] to build a 1:1 trace (one row per
+/// ProofRow) so the main trace and the preprocessed matrix have equal height,
+/// allowing both to be committed under the same `PreprocessedProverData`.
+pub fn prove_lut_with_prep(
+  rows: &[ProofRow],
+  prep_data: &PreprocessedProverData<CircleStarkConfig>,
+  public_values: &[Val],
+) -> Result<CircleStarkProof, String> {
+  let trace = build_lut_trace_from_proof_rows(rows)?;
+  let config = make_circle_config();
+  let air = LutKernelAirWithPrep::new(rows, public_values);
+  let proof = p3_uni_stark::prove_with_preprocessed(
+    &config,
+    &air,
+    trace,
+    public_values,
+    Some(prep_data),
+  );
+  Ok(proof)
+}
+
+/// Verify a LUT proof generated by [`prove_lut_with_prep`].
+pub fn verify_lut_with_prep(
+  proof: &CircleStarkProof,
+  prep_vk: &PreprocessedVerifierKey<CircleStarkConfig>,
+  public_values: &[Val],
+) -> CircleStarkVerifyResult {
+  let config = make_circle_config();
+  p3_uni_stark::verify_with_preprocessed(
+    &config,
+    &LutKernelAirWithPrep::for_verify(),
+    proof,
+    public_values,
+    Some(prep_vk),
+  )
+}
+
+// ============================================================
+// Phase 4: BatchLutKernelAirWithPrep
+//
+// LUT STARK variant for batch proving.  Uses the extended batch preprocessed
+// matrix (NUM_BATCH_PREP_COLS = 27) and binds pis[1] / pis[2..10] to
+// PREP_COL_BATCH_N / PREP_COL_BATCH_DIGEST_* instead of the per-instruction
+// EVM opcode / WFF digest used by the single-instruction LutKernelAirWithPrep.
+//
+// Per-instruction EVM opcode / WFF digest columns (PREP_COL_EVM_OPCODE,
+// PREP_COL_WFF_DIGEST_*) are stored in the matrix and verified out-of-circuit
+// by the verifier via `compute_batch_manifest_digest`.
+// ============================================================
+
+/// Per-row prep scalar binding helper shared between [`LutKernelAirWithPrep`]
+/// and [`BatchLutKernelAirWithPrep`].
+///
+/// Binds every LUT main-trace column to the corresponding committed
+/// preprocessed ProofRow field using a gate polynomial over `prep[PREP_COL_OP]`.
+/// Structural (non-LUT) rows are silently skipped via the all-ops gate.
+fn eval_lut_prep_row_binding_inner<AB>(
+  builder: &mut AB,
+  prep_row: &[AB::Var],
+  local: &[AB::Var],
+)
+where
+  AB: AirBuilderWithPublicValues + PairBuilder + AirBuilder<F = Val>,
+{
+  use crate::semantic_proof::{
+    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_ADD_EQ,
+    OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, OP_BYTE_ADD_THIRD_CONGRUENCE,
+    OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ, OP_BYTE_MUL_LOW_EQ, OP_BYTE_OR_EQ,
+    OP_BYTE_XOR_EQ, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT, OP_U15_MUL_EQ,
+    OP_U16_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
+  };
+
+  let all_prep_ops: &[u32] = &[
+    OP_BYTE_ADD_EQ, OP_U16_ADD_EQ, OP_U29_ADD_EQ, OP_U24_ADD_EQ,
+    OP_U15_MUL_EQ, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_MUL_LOW_EQ,
+    OP_BYTE_MUL_HIGH_EQ, OP_BYTE_AND_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ,
+    OP_BOOL, OP_BYTE, OP_AND_INTRO, OP_EQ_REFL, OP_EQ_TRANS,
+    OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+    OP_NOT, OP_EQ_SYM,
+  ];
+  let pg = |target: u32| -> AB::Expr {
+    all_prep_ops
+      .iter()
+      .filter(|&&t| t != target)
+      .fold(AB::Expr::from_u32(1), |acc, &t| {
+        acc * (prep_row[PREP_COL_OP].clone().into() - AB::Expr::from_u32(t))
+      })
+  };
+
+  // OP_BYTE_ADD_EQ → ByteAddEq: in0=s0, in1=s1, in2=arg0, out0=value, out1=s2
+  let tag_add = lut_opcode_tag(LutOpcode::ByteAddEq) as u32;
+  let g = pg(OP_BYTE_ADD_EQ);
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_add)));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_ARG0].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
+  builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_SCALAR2].clone().into()));
+
+  // OP_U16_ADD_EQ → U16AddEq: in0=s0, in1=s1, in2=s2, out0=value, out1=arg1
+  let tag_u16 = lut_opcode_tag(LutOpcode::U16AddEq) as u32;
+  let g = pg(OP_U16_ADD_EQ);
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u16)));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
+  builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
+
+  // OP_U29_ADD_EQ → U29AddEq: in0=s0, in1=s1, in2=s2, out0=value, out1=arg1
+  let tag_u29 = lut_opcode_tag(LutOpcode::U29AddEq) as u32;
+  let g = pg(OP_U29_ADD_EQ);
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u29)));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
+  builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
+
+  // OP_U24_ADD_EQ → U24AddEq (same field layout as U29)
+  let tag_u24 = lut_opcode_tag(LutOpcode::U24AddEq) as u32;
+  let g = pg(OP_U24_ADD_EQ);
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u24)));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
+  builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
+
+  // OP_U15_MUL_EQ → U15MulEq: in0=s0, in1=s1, out0=value(lo), out1=arg0(hi)
+  let tag_mul = lut_opcode_tag(LutOpcode::U15MulEq) as u32;
+  let g = pg(OP_U15_MUL_EQ);
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_mul)));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
+  builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
+
+  // OP_BYTE_ADD_CARRY_EQ → ByteAddCarryEq: in0=s0, in1=s1, in2=arg0
+  let tag_carry = lut_opcode_tag(LutOpcode::ByteAddCarryEq) as u32;
+  let g = pg(OP_BYTE_ADD_CARRY_EQ);
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_carry)));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
+  builder.assert_zero(g         * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
+
+  // OP_BYTE_MUL_LOW_EQ → ByteMulLowEq: in0=s0, in1=s1
+  let tag_ml = lut_opcode_tag(LutOpcode::ByteMulLowEq) as u32;
+  let g = pg(OP_BYTE_MUL_LOW_EQ);
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_ml)));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
+  builder.assert_zero(g         * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
+
+  // OP_BYTE_MUL_HIGH_EQ → ByteMulHighEq: in0=s0, in1=s1
+  let tag_mh = lut_opcode_tag(LutOpcode::ByteMulHighEq) as u32;
+  let g = pg(OP_BYTE_MUL_HIGH_EQ);
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_mh)));
+  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
+  builder.assert_zero(g         * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
+  // OP_BYTE_AND_EQ / OP_BYTE_OR_EQ / OP_BYTE_XOR_EQ: bit-family ops use byte-level
+  // scalars; correctness comes from StackIR binding so no LUT binding needed here.
+}
+
+/// Batch LUT STARK variant that uses the extended batch preprocessed matrix
+/// ([`NUM_BATCH_PREP_COLS`] = 27 columns) to cover N instructions in one proof.
+///
+/// **AIR constraints:**
+/// 1. `pis[0] == RECEIPT_BIND_TAG_LUT`
+/// 2. Row 0: `prep[PREP_COL_BATCH_N] == pis[1]` and
+///    `prep[PREP_COL_BATCH_DIGEST_START + k] == pis[2 + k]` for k in 0..8.
+/// 3. Per-row prep scalar binding (same gates as [`LutKernelAirWithPrep`]).
+/// 4. All LUT arithmetic constraints via [`eval_lut_kernel_inner`].
+///
+/// Per-instruction `PREP_COL_EVM_OPCODE` / `PREP_COL_WFF_DIGEST_*` are
+/// committed in the matrix but verified **out-of-circuit** by the verifier.
+pub struct BatchLutKernelAirWithPrep {
+  prep_matrix: Option<RowMajorMatrix<Val>>,
+}
+
+impl BatchLutKernelAirWithPrep {
+  /// Prover path: store the batch preprocessed matrix.
+  pub fn new(manifest: &BatchProofRowsManifest, pv: &[Val]) -> Self {
+    Self {
+      prep_matrix: Some(build_batch_proof_rows_preprocessed_matrix(manifest, pv)),
+    }
+  }
+
+  /// Verifier path: preprocessed data comes from the `PreprocessedVerifierKey`.
+  pub fn for_verify() -> Self {
+    Self { prep_matrix: None }
+  }
+}
+
+impl BaseAir<Val> for BatchLutKernelAirWithPrep {
+  fn width(&self) -> usize {
+    NUM_LUT_COLS
+  }
+
+  fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Val>> {
+    self.prep_matrix.clone()
+  }
+}
+
+impl<AB> Air<AB> for BatchLutKernelAirWithPrep
+where
+  AB: AirBuilderWithPublicValues + PairBuilder + AirBuilder<F = Val>,
+{
+  fn eval(&self, builder: &mut AB) {
+    // ── 1. Tag check ──────────────────────────────────────────────────────
+    {
+      let pis = builder.public_values();
+      builder.assert_eq(pis[0].clone(), AB::Expr::from_u32(RECEIPT_BIND_TAG_LUT));
+    }
+
+    // ── 2. Batch pv binding at row 0 ──────────────────────────────────────
+    // pis[1] = N, pis[2..10] = batch_manifest_digest
+    {
+      let pi_n: AB::Expr = {
+        let pis = builder.public_values();
+        pis[1].clone().into()
+      };
+      let pi_digest: [AB::Expr; 8] = {
+        let pis = builder.public_values();
+        std::array::from_fn(|k| pis[2 + k].clone().into())
+      };
+      let prep_n: AB::Expr = {
+        let prep = builder.preprocessed();
+        let row = prep
+          .row_slice(0)
+          .expect("BatchLutKernelAirWithPrep: empty prep (batch-n bind)");
+        row[PREP_COL_BATCH_N].clone().into()
+      };
+      let prep_digest: [AB::Expr; 8] = {
+        let prep = builder.preprocessed();
+        let row = prep
+          .row_slice(0)
+          .expect("BatchLutKernelAirWithPrep: empty prep (batch-digest bind)");
+        std::array::from_fn(|k| row[PREP_COL_BATCH_DIGEST_START + k].clone().into())
+      };
+      builder.when_first_row().assert_eq(prep_n, pi_n);
+      for k in 0..8_usize {
+        builder
+          .when_first_row()
+          .assert_eq(prep_digest[k].clone(), pi_digest[k].clone());
+      }
+    }
+
+    // ── 3. Per-row prep scalar binding ────────────────────────────────────
+    {
+      let prep = builder.preprocessed();
+      let prep_row = prep
+        .row_slice(0)
+        .expect("BatchLutKernelAirWithPrep: empty preprocessed trace");
+      let prep_row = &*prep_row;
+      let main = builder.main();
+      let local = main
+        .row_slice(0)
+        .expect("BatchLutKernelAirWithPrep: empty main trace");
+      let local = &*local;
+      eval_lut_prep_row_binding_inner(builder, prep_row, local);
+    }
+
+    // ── 4. LUT arithmetic constraints ─────────────────────────────────────
+    eval_lut_kernel_inner(builder);
+  }
+}
+
+/// Prove the batch LUT STARK for `manifest` and bind the proof to the shared
+/// batch preprocessed commitment (`prep_data`).
+///
+/// Returns a [`CircleStarkProof`] that covers the arithmetic of all N
+/// instructions' ProofRows in one call.  Pair with
+/// [`verify_batch_lut_with_prep`] and out-of-circuit manifest digest checks.
+pub fn prove_batch_lut_with_prep(
+  manifest: &BatchProofRowsManifest,
+  prep_data: &PreprocessedProverData<CircleStarkConfig>,
+  public_values: &[Val],
+) -> Result<CircleStarkProof, String> {
+  let trace = build_lut_trace_from_proof_rows(&manifest.all_rows)?;
+  let config = make_circle_config();
+  let air = BatchLutKernelAirWithPrep::new(manifest, public_values);
+  let proof = p3_uni_stark::prove_with_preprocessed(
+    &config,
+    &air,
+    trace,
+    public_values,
+    Some(prep_data),
+  );
+  Ok(proof)
+}
+
+/// Verify a batch LUT proof generated by [`prove_batch_lut_with_prep`].
+pub fn verify_batch_lut_with_prep(
+  proof: &CircleStarkProof,
+  prep_vk: &PreprocessedVerifierKey<CircleStarkConfig>,
+  public_values: &[Val],
+) -> CircleStarkVerifyResult {
+  let config = make_circle_config();
+  p3_uni_stark::verify_with_preprocessed(
+    &config,
+    &BatchLutKernelAirWithPrep::for_verify(),
+    proof,
+    public_values,
+    Some(prep_vk),
+  )
 }
 
 pub fn prove_lut_kernel_stark(steps: &[LutStep]) -> Result<CircleStarkProof, String> {
@@ -1255,221 +2567,6 @@ pub fn prove_and_verify_lut_kernel_stark_from_rows(rows: &[ProofRow]) -> bool {
   prove_and_verify_lut_kernel_stark_from_steps(&steps)
 }
 
-// ============================================================
-// Memory CQ bus scaffold
-// ============================================================
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MemoryBusStep {
-  pub addr: u32,
-  pub step: u32,
-  pub width: u32,
-  pub rw: u32,
-  pub value_lo: u32,
-  pub value_hi: u32,
-  pub same_cell_next: u32,
-}
-
-const MEM_BUS_COL_ADDR: usize = 0;
-const MEM_BUS_COL_STEP: usize = 1;
-const MEM_BUS_COL_WIDTH: usize = 2;
-const MEM_BUS_COL_RW: usize = 3;
-const MEM_BUS_COL_VALUE_LO: usize = 4;
-const MEM_BUS_COL_VALUE_HI: usize = 5;
-const MEM_BUS_COL_SAME_CELL_NEXT: usize = 6;
-const NUM_MEM_BUS_COLS: usize = 7;
-
-fn cq_rw_to_u32(rw: CqRw) -> u32 {
-  match rw {
-    CqRw::Read => 0,
-    CqRw::Write => 1,
-  }
-}
-
-fn encode_value_u32_pair(value: &[u8; 32]) -> (u32, u32) {
-  let mut lo = [0u8; 4];
-  let mut hi = [0u8; 4];
-  lo.copy_from_slice(&value[24..28]);
-  hi.copy_from_slice(&value[28..32]);
-  (u32::from_be_bytes(lo), u32::from_be_bytes(hi))
-}
-
-pub fn build_memory_bus_steps_from_events(
-  events: &[CqMemoryEvent],
-) -> Result<Vec<MemoryBusStep>, String> {
-  if events.is_empty() {
-    return Err("cannot build memory bus steps from empty events".to_string());
-  }
-
-  let mut sorted = events.to_vec();
-  sorted.sort_by_key(|e| (e.addr, e.width, e.step, cq_rw_to_u32(e.rw)));
-
-  let mut out = Vec::with_capacity(sorted.len());
-  for (i, event) in sorted.iter().enumerate() {
-    let addr = u32::try_from(event.addr)
-      .map_err(|_| format!("memory bus addr out of u32 range: {}", event.addr))?;
-    let step = u32::try_from(event.step)
-      .map_err(|_| format!("memory bus step out of u32 range: {}", event.step))?;
-
-    let (value_lo, value_hi) = encode_value_u32_pair(&event.value);
-
-    let same_cell_next = if let Some(next) = sorted.get(i + 1) {
-      u32::from(next.addr == event.addr && next.width == event.width)
-    } else {
-      0
-    };
-
-    out.push(MemoryBusStep {
-      addr,
-      step,
-      width: event.width,
-      rw: cq_rw_to_u32(event.rw),
-      value_lo,
-      value_hi,
-      same_cell_next,
-    });
-  }
-
-  Ok(out)
-}
-
-pub fn build_memory_bus_trace_from_steps(
-  steps: &[MemoryBusStep],
-) -> Result<RowMajorMatrix<Val>, String> {
-  if steps.is_empty() {
-    return Err("cannot build memory bus trace from empty steps".to_string());
-  }
-
-  let n_rows = steps.len().max(4).next_power_of_two();
-  let mut trace = RowMajorMatrix::new(Val::zero_vec(n_rows * NUM_MEM_BUS_COLS), NUM_MEM_BUS_COLS);
-
-  for (i, step) in steps.iter().enumerate() {
-    if step.rw > 1 {
-      return Err(format!("memory bus rw must be boolean at row {i}"));
-    }
-    if step.same_cell_next > 1 {
-      return Err(format!(
-        "memory bus same_cell_next must be boolean at row {i}"
-      ));
-    }
-
-    let base = i * NUM_MEM_BUS_COLS;
-    trace.values[base + MEM_BUS_COL_ADDR] = Val::from_u32(step.addr);
-    trace.values[base + MEM_BUS_COL_STEP] = Val::from_u32(step.step);
-    trace.values[base + MEM_BUS_COL_WIDTH] = Val::from_u32(step.width);
-    trace.values[base + MEM_BUS_COL_RW] = Val::from_u32(step.rw);
-    trace.values[base + MEM_BUS_COL_VALUE_LO] = Val::from_u32(step.value_lo);
-    trace.values[base + MEM_BUS_COL_VALUE_HI] = Val::from_u32(step.value_hi);
-    trace.values[base + MEM_BUS_COL_SAME_CELL_NEXT] = Val::from_u32(step.same_cell_next);
-  }
-
-  if steps.len() < n_rows {
-    let last = *steps.last().expect("non-empty checked");
-    for i in steps.len()..n_rows {
-      let base = i * NUM_MEM_BUS_COLS;
-      trace.values[base + MEM_BUS_COL_ADDR] = Val::from_u32(last.addr);
-      trace.values[base + MEM_BUS_COL_STEP] = Val::from_u32(last.step);
-      trace.values[base + MEM_BUS_COL_WIDTH] = Val::from_u32(last.width);
-      trace.values[base + MEM_BUS_COL_RW] = Val::from_u32(last.rw);
-      trace.values[base + MEM_BUS_COL_VALUE_LO] = Val::from_u32(last.value_lo);
-      trace.values[base + MEM_BUS_COL_VALUE_HI] = Val::from_u32(last.value_hi);
-      trace.values[base + MEM_BUS_COL_SAME_CELL_NEXT] = Val::from_u32(0);
-    }
-  }
-
-  Ok(trace)
-}
-
-pub struct MemoryBusAir;
-
-impl<F> BaseAir<F> for MemoryBusAir {
-  fn width(&self) -> usize {
-    NUM_MEM_BUS_COLS
-  }
-}
-
-impl<AB: AirBuilder> Air<AB> for MemoryBusAir {
-  fn eval(&self, builder: &mut AB) {
-    let main = builder.main();
-    let local = main.row_slice(0).expect("empty trace");
-    let next = main.row_slice(1).expect("single-row trace");
-    let local = &*local;
-    let next = &*next;
-
-    let rw = local[MEM_BUS_COL_RW].clone();
-    let same = local[MEM_BUS_COL_SAME_CELL_NEXT].clone();
-
-    builder.assert_bool(rw.clone());
-    builder.assert_bool(same.clone());
-
-    builder.when_transition().assert_zero(
-      same.clone()
-        * (next[MEM_BUS_COL_ADDR].clone().into() - local[MEM_BUS_COL_ADDR].clone().into()),
-    );
-    builder.when_transition().assert_zero(
-      same.clone()
-        * (next[MEM_BUS_COL_WIDTH].clone().into() - local[MEM_BUS_COL_WIDTH].clone().into()),
-    );
-
-    builder.when_transition().assert_zero(
-      same.clone()
-        * (next[MEM_BUS_COL_STEP].clone().into() - local[MEM_BUS_COL_STEP].clone().into()),
-    );
-    builder
-      .when_transition()
-      .assert_zero(same.clone() * (local[MEM_BUS_COL_RW].clone().into() - AB::Expr::from_u16(0)));
-    builder
-      .when_transition()
-      .assert_zero(same.clone() * (next[MEM_BUS_COL_RW].clone().into() - AB::Expr::from_u16(1)));
-
-    builder.when_transition().assert_zero(
-      same.clone()
-        * (next[MEM_BUS_COL_VALUE_LO].clone().into() - local[MEM_BUS_COL_VALUE_LO].clone().into()),
-    );
-    builder.when_transition().assert_zero(
-      same
-        * (next[MEM_BUS_COL_VALUE_HI].clone().into() - local[MEM_BUS_COL_VALUE_HI].clone().into()),
-    );
-  }
-}
-
-pub fn prove_memory_bus_stark(steps: &[MemoryBusStep]) -> Result<CircleStarkProof, String> {
-  let trace = build_memory_bus_trace_from_steps(steps)?;
-  let config = make_circle_config();
-  Ok(p3_uni_stark::prove(&config, &MemoryBusAir, trace, &[]))
-}
-
-pub fn prove_memory_bus_stark_from_events(
-  events: &[CqMemoryEvent],
-) -> Result<CircleStarkProof, String> {
-  let steps = build_memory_bus_steps_from_events(events)?;
-  prove_memory_bus_stark(&steps)
-}
-
-pub fn verify_memory_bus_stark(proof: &CircleStarkProof) -> CircleStarkVerifyResult {
-  let config = make_circle_config();
-  p3_uni_stark::verify(&config, &MemoryBusAir, proof, &[])
-}
-
-pub fn prove_and_verify_memory_bus_stark(steps: &[MemoryBusStep]) -> bool {
-  let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-    prove_memory_bus_stark(steps)
-  }));
-  let proof = match proved {
-    Ok(Ok(proof)) => proof,
-    Ok(Err(_)) => return false,
-    Err(_) => return false,
-  };
-  verify_memory_bus_stark(&proof).is_ok()
-}
-
-pub fn prove_and_verify_memory_bus_stark_from_events(events: &[CqMemoryEvent]) -> bool {
-  let steps = match build_memory_bus_steps_from_events(events) {
-    Ok(steps) => steps,
-    Err(_) => return false,
-  };
-  prove_and_verify_memory_bus_stark(&steps)
-}
 
 pub fn build_lut_steps_from_rows_add_family(rows: &[ProofRow]) -> Result<Vec<LutStep>, String> {
   let mut out = Vec::new();
@@ -1477,13 +2574,17 @@ pub fn build_lut_steps_from_rows_add_family(rows: &[ProofRow]) -> Result<Vec<Lut
 
   for row in rows {
     match row.op {
+      // Soundness fix: OP_NOT and OP_EQ_SYM can appear in compiled proof rows
+      // but carry no LUT arithmetic content; treat them as structural skips.
       crate::semantic_proof::OP_BOOL
       | crate::semantic_proof::OP_BYTE
       | crate::semantic_proof::OP_EQ_REFL
       | crate::semantic_proof::OP_AND_INTRO
       | crate::semantic_proof::OP_EQ_TRANS
       | crate::semantic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE
-      | crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => {
+      | crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE
+      | crate::semantic_proof::OP_NOT
+      | crate::semantic_proof::OP_EQ_SYM => {
         seen_add_family = true;
       }
       crate::semantic_proof::OP_BYTE_ADD_EQ => out.push(LutStep {
@@ -1558,13 +2659,17 @@ pub fn build_lut_steps_from_rows_mul_family(rows: &[ProofRow]) -> Result<Vec<Lut
 
   for row in rows {
     match row.op {
+      // Soundness fix: OP_NOT and OP_EQ_SYM can appear in compiled proof rows
+      // but carry no LUT arithmetic content; treat them as structural skips.
       crate::semantic_proof::OP_BOOL
       | crate::semantic_proof::OP_BYTE
       | crate::semantic_proof::OP_EQ_REFL
       | crate::semantic_proof::OP_AND_INTRO
       | crate::semantic_proof::OP_EQ_TRANS
       | crate::semantic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE
-      | crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => {
+      | crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE
+      | crate::semantic_proof::OP_NOT
+      | crate::semantic_proof::OP_EQ_SYM => {
         seen_mul_family = true;
       }
       crate::semantic_proof::OP_BYTE_ADD_EQ => out.push(LutStep {
@@ -1722,9 +2827,13 @@ const COL_ARG2: usize = 6;
 const COL_VALUE: usize = 7;
 const COL_RET_TY: usize = 8;
 
-const MATCH_COL_INFERRED: usize = 0;
-const MATCH_COL_EXPECTED: usize = 1;
-const NUM_WFF_MATCH_COLS: usize = 2;
+/// Number of (inferred, expected) column-pairs per trace row.
+/// Bytes per row = MATCH_PACK_COLS × MATCH_PACK_BYTES = 4 × 3 = 12.
+const MATCH_PACK_COLS: usize = 4;
+/// Bytes packed into each M31 field element (max 3 since 0xFFFFFF < M31 = 2^31-1).
+const MATCH_PACK_BYTES: usize = 3;
+/// Total columns: first MATCH_PACK_COLS are inferred, next MATCH_PACK_COLS are expected.
+const NUM_WFF_MATCH_COLS: usize = MATCH_PACK_COLS * 2;
 
 pub struct StageAProof {
   pub inferred_wff_proof: CircleStarkProof,
@@ -1802,10 +2911,15 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for WffMatchAir {
     let local = main.row_slice(0).expect("empty trace");
     let local = &*local;
 
-    builder.assert_eq(
-      local[MATCH_COL_INFERRED].clone(),
-      local[MATCH_COL_EXPECTED].clone(),
-    );
+    // Check equality for each (inferred, expected) column pair.
+    // Columns 0..MATCH_PACK_COLS hold packed inferred bytes;
+    // columns MATCH_PACK_COLS..NUM_WFF_MATCH_COLS hold packed expected bytes.
+    for col in 0..MATCH_PACK_COLS {
+      builder.assert_eq(
+        local[col].clone(),
+        local[MATCH_PACK_COLS + col].clone(),
+      );
+    }
   }
 }
 
@@ -2355,22 +3469,37 @@ fn generate_wff_match_trace_from_bytes(
     return Err("serialized WFF cannot be empty".to_string());
   }
 
-  let padded_rows = inferred_bytes.len().next_power_of_two();
+  // Pack MATCH_PACK_BYTES (3) bytes per M31 field element:
+  //   packed = b0 | (b1 << 8) | (b2 << 16)
+  //   max = 0xFFFFFF = 16,777,215 < M31 (2^31-1) — no field overflow.
+  // Each row holds MATCH_PACK_COLS (4) inferred chunks + MATCH_PACK_COLS expected chunks,
+  // encoding MATCH_PACK_COLS * MATCH_PACK_BYTES = 12 bytes per row.
+  // Soundness: equality of packed chunks is equivalent to equality of the underlying bytes
+  //   since packing is injective for equal-length sequences.
+  let bytes_per_row = MATCH_PACK_COLS * MATCH_PACK_BYTES;
+  let n_rows = (inferred_bytes.len() + bytes_per_row - 1) / bytes_per_row;
+  let padded_rows = n_rows.next_power_of_two();
+
+  let pack_chunk = |bytes: &[u8], byte_start: usize| -> u32 {
+    let b0 = bytes.get(byte_start).copied().unwrap_or(0) as u32;
+    let b1 = bytes.get(byte_start + 1).copied().unwrap_or(0) as u32;
+    let b2 = bytes.get(byte_start + 2).copied().unwrap_or(0) as u32;
+    b0 | (b1 << 8) | (b2 << 16)
+  };
+
   let mut trace = RowMajorMatrix::new(
     Val::zero_vec(padded_rows * NUM_WFF_MATCH_COLS),
     NUM_WFF_MATCH_COLS,
   );
-  for row in 0..inferred_bytes.len() {
+  for row in 0..n_rows {
     let base = row * NUM_WFF_MATCH_COLS;
-    trace.values[base + MATCH_COL_INFERRED] = Val::from_u16(inferred_bytes[row] as u16);
-    trace.values[base + MATCH_COL_EXPECTED] = Val::from_u16(expected_bytes[row] as u16);
+    for col in 0..MATCH_PACK_COLS {
+      let byte_start = row * bytes_per_row + col * MATCH_PACK_BYTES;
+      trace.values[base + col] = Val::from_u32(pack_chunk(inferred_bytes, byte_start));
+      trace.values[base + MATCH_PACK_COLS + col] = Val::from_u32(pack_chunk(expected_bytes, byte_start));
+    }
   }
-
-  for row in inferred_bytes.len()..padded_rows {
-    let base = row * NUM_WFF_MATCH_COLS;
-    trace.values[base + MATCH_COL_INFERRED] = Val::from_u16(0);
-    trace.values[base + MATCH_COL_EXPECTED] = Val::from_u16(0);
-  }
+  // Rows [n_rows..padded_rows] are already Val::zero (set by zero_vec).
 
   Ok(trace)
 }
@@ -2765,13 +3894,14 @@ fn push_bit_lut_steps_into(out: &mut Vec<LutStep>, op: LutOpcode, byte_a: u32, b
 /// Build LUT steps from ProofRows belonging to **any** opcode family.
 ///
 /// Structural rows (OP_BOOL, OP_BYTE, OP_EQ_REFL, OP_AND_INTRO, OP_EQ_TRANS,
-/// OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE) are skipped
-/// silently.  Bit-family ops are expanded to per-bit level as required by the
-/// LUT kernel AIR.  All other recognised LUT ops are processed normally.
+/// OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+/// OP_NOT, OP_EQ_SYM) are skipped silently.  Bit-family ops are expanded to
+/// per-bit level as required by the LUT kernel AIR.  All other recognised LUT
+/// ops are processed normally.
 pub fn build_lut_steps_from_rows_auto(rows: &[ProofRow]) -> Result<Vec<LutStep>, String> {
   use crate::semantic_proof::{
     OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
-    OP_BYTE_ADD_THIRD_CONGRUENCE, OP_EQ_REFL, OP_EQ_TRANS,
+    OP_BYTE_ADD_THIRD_CONGRUENCE, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT,
   };
 
   let mut out = Vec::with_capacity(rows.len() * 2);
@@ -2779,13 +3909,17 @@ pub fn build_lut_steps_from_rows_auto(rows: &[ProofRow]) -> Result<Vec<LutStep>,
   for row in rows {
     match row.op {
       // ── Structural rows: skip silently ────────────────────────────────────
+      // Soundness fix: OP_NOT and OP_EQ_SYM can appear in compiled proof rows
+      // but carry no LUT arithmetic content; they must be skipped here.
       op if op == OP_BOOL
         || op == OP_BYTE
         || op == OP_EQ_REFL
         || op == OP_AND_INTRO
         || op == OP_EQ_TRANS
         || op == OP_BYTE_ADD_THIRD_CONGRUENCE
-        || op == OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => {}
+        || op == OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE
+        || op == OP_NOT
+        || op == OP_EQ_SYM => {}
 
       // ── Add-family LUT ops ─────────────────────────────────────────────────
       crate::semantic_proof::OP_BYTE_ADD_EQ => out.push(LutStep {
@@ -2839,22 +3973,32 @@ pub fn build_lut_steps_from_rows_auto(rows: &[ProofRow]) -> Result<Vec<LutStep>,
           out1: total >> 15,
         });
       }
-      crate::semantic_proof::OP_BYTE_MUL_LOW_EQ => out.push(LutStep {
-        op: LutOpcode::ByteMulLowEq,
-        in0: row.scalar0,
-        in1: row.scalar1,
-        in2: 0,
-        out0: (row.scalar0 * row.scalar1) & 0xFF,
-        out1: 0,
-      }),
-      crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ => out.push(LutStep {
-        op: LutOpcode::ByteMulHighEq,
-        in0: row.scalar0,
-        in1: row.scalar1,
-        in2: 0,
-        out0: (row.scalar0 * row.scalar1) >> 8,
-        out1: 0,
-      }),
+      crate::semantic_proof::OP_BYTE_MUL_LOW_EQ => {
+        let product = row.scalar0 * row.scalar1;
+        // Soundness fix: AIR constraint is  in0*in1 = out0 + 256*out1
+        // so out1 must carry the high byte, not 0.
+        out.push(LutStep {
+          op: LutOpcode::ByteMulLowEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: product & 0xFF,
+          out1: product >> 8,
+        });
+      }
+      crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ => {
+        let product = row.scalar0 * row.scalar1;
+        // Soundness fix: AIR constraint is  in0*in1 = 256*out0 + out1
+        // so out1 must carry the low byte, not 0.
+        out.push(LutStep {
+          op: LutOpcode::ByteMulHighEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: product >> 8,
+          out1: product & 0xFF,
+        });
+      }
 
       // ── Bit-family LUT ops (expand byte → bits) ────────────────────────────
       crate::semantic_proof::OP_BYTE_AND_EQ => {

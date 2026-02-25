@@ -5,23 +5,22 @@ use std::time::Instant;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use revm::bytecode::opcode;
-use zprove_core::semantic_proof::compile_proof;
+use zprove_core::semantic_proof::{Proof, compile_proof};
 use zprove_core::transition::{
-  InstructionTransitionProof, InstructionTransitionStatement, InstructionTransitionZkReceipt,
-  VmState, prove_instruction, prove_instruction_zk_receipt,
-  prove_instruction_zk_receipts_parallel, verify_instruction_zk_receipt, verify_proof,
+  BatchTransactionZkReceipt, InstructionTransitionProof, InstructionTransitionStatement,
+  InstructionTransitionZkReceipt, VmState, prove_batch_transaction_zk_receipt,
+  prove_instruction, prove_instruction_zk_receipt, prove_instruction_zk_receipt_timed,
+  prove_instruction_zk_receipts_parallel, verify_batch_transaction_zk_receipt,
+  verify_instruction_zk_receipt, verify_proof,
 };
 use zprove_core::zk_proof::{
-  build_lut_steps_from_rows_add_family, build_lut_steps_from_rows_bit_family,
-  build_lut_steps_from_rows_mul_family, prove_batch_stark_add_family,
-  prove_batch_stark_add_family_with_params, prove_batch_stark_bit_family,
-  prove_batch_stark_bit_family_with_params, prove_batch_stark_mul_family,
-  prove_batch_stark_mul_family_with_params, prove_batch_wff_proofs,
-  verify_batch_stark_add_family, verify_batch_stark_add_family_with_params,
-  verify_batch_stark_bit_family, verify_batch_stark_bit_family_with_params,
-  verify_batch_stark_mul_family, verify_batch_stark_mul_family_with_params,
-  verify_batch_wff_proofs,
+  build_lut_steps_from_rows_auto, prove_batch_wff_proofs, verify_batch_wff_proofs,
+  CircleStarkProof,
 };
+
+fn proof_bytes(p: &CircleStarkProof) -> usize {
+  bincode::serialize(p).map(|v| v.len()).unwrap_or(0)
+}
 
 #[derive(Clone)]
 struct BenchCase {
@@ -129,207 +128,133 @@ fn bool_word(v: bool) -> [u8; 32] {
   w
 }
 
-fn cmp_u128(a: u128, b: u128) -> bool {
-  a < b
+// ============================================================
+// Table-driven case generators
+//
+// Adding a new opcode:
+//   1. Write `fn make_<OP>_case(rng: &mut StdRng, idx: usize) -> BenchCase`
+//   2. Append it to CASE_GENERATORS
+//   That's it — every other bench section picks it up automatically.
+// ============================================================
+
+type CaseGen = fn(&mut StdRng, usize) -> BenchCase;
+
+fn make_add_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = u256_bytes(rng.random::<u128>());
+  let b = u256_bytes(rng.random::<u128>());
+  BenchCase { name: format!("ADD#{:02}", idx + 1), group: "ADD", opcode: opcode::ADD, inputs: vec![a, b], output: add_u256_mod(&a, &b) }
+}
+fn make_sub_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = u256_bytes(rng.random::<u128>());
+  let b = u256_bytes(rng.random::<u128>());
+  BenchCase { name: format!("SUB#{:02}", idx + 1), group: "SUB", opcode: opcode::SUB, inputs: vec![a, b], output: sub_u256_mod(&a, &b) }
+}
+fn make_mul_sparse_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = u256_bytes(rng.random::<u16>() as u128);
+  let b = u256_bytes(rng.random::<u16>() as u128);
+  BenchCase { name: format!("MULs#{:02}", idx + 1), group: "MUL (sparse)", opcode: opcode::MUL, inputs: vec![a, b], output: mul_u256_mod(&a, &b) }
+}
+fn make_mul_dense_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = random_bytes32(rng);
+  let b = random_bytes32(rng);
+  BenchCase { name: format!("MULd#{:02}", idx + 1), group: "MUL (dense)", opcode: opcode::MUL, inputs: vec![a, b], output: mul_u256_mod(&a, &b) }
+}
+fn make_div_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = rng.random::<u128>();
+  let b = random_nonzero_u128(rng);
+  BenchCase { name: format!("DIV#{:02}", idx + 1), group: "DIV", opcode: opcode::DIV, inputs: vec![u256_bytes(a), u256_bytes(b)], output: u256_bytes(a / b) }
+}
+fn make_mod_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = rng.random::<u128>();
+  let b = random_nonzero_u128(rng);
+  BenchCase { name: format!("MOD#{:02}", idx + 1), group: "MOD", opcode: opcode::MOD, inputs: vec![u256_bytes(a), u256_bytes(b)], output: u256_bytes(a % b) }
+}
+fn make_sdiv_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let (a, b) = random_sdiv_pair(rng);
+  BenchCase { name: format!("SDIV#{:02}", idx + 1), group: "SDIV", opcode: opcode::SDIV, inputs: vec![i256_bytes(a), i256_bytes(b)], output: i256_bytes(a / b) }
+}
+fn make_smod_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let (a, b) = random_sdiv_pair(rng);
+  BenchCase { name: format!("SMOD#{:02}", idx + 1), group: "SMOD", opcode: opcode::SMOD, inputs: vec![i256_bytes(a), i256_bytes(b)], output: i256_bytes(a % b) }
+}
+fn make_and_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = random_bytes32(rng);
+  let b = random_bytes32(rng);
+  let mut c = [0u8; 32]; for i in 0..32 { c[i] = a[i] & b[i]; }
+  BenchCase { name: format!("AND#{:02}", idx + 1), group: "AND", opcode: opcode::AND, inputs: vec![a, b], output: c }
+}
+fn make_or_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = random_bytes32(rng);
+  let b = random_bytes32(rng);
+  let mut c = [0u8; 32]; for i in 0..32 { c[i] = a[i] | b[i]; }
+  BenchCase { name: format!("OR#{:02}", idx + 1), group: "OR", opcode: opcode::OR, inputs: vec![a, b], output: c }
+}
+fn make_xor_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = random_bytes32(rng);
+  let b = random_bytes32(rng);
+  let mut c = [0u8; 32]; for i in 0..32 { c[i] = a[i] ^ b[i]; }
+  BenchCase { name: format!("XOR#{:02}", idx + 1), group: "XOR", opcode: opcode::XOR, inputs: vec![a, b], output: c }
+}
+fn make_not_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = random_bytes32(rng);
+  let mut c = [0u8; 32]; for i in 0..32 { c[i] = !a[i]; }
+  BenchCase { name: format!("NOT#{:02}", idx + 1), group: "NOT", opcode: opcode::NOT, inputs: vec![a], output: c }
+}
+fn make_lt_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = rng.random::<u128>(); let b = rng.random::<u128>();
+  BenchCase { name: format!("LT#{:02}", idx + 1), group: "LT", opcode: opcode::LT, inputs: vec![u256_bytes(a), u256_bytes(b)], output: bool_word(a < b) }
+}
+fn make_gt_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let a = rng.random::<u128>(); let b = rng.random::<u128>();
+  BenchCase { name: format!("GT#{:02}", idx + 1), group: "GT", opcode: opcode::GT, inputs: vec![u256_bytes(a), u256_bytes(b)], output: bool_word(a > b) }
+}
+fn make_slt_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let (a, b) = random_sdiv_pair(rng);
+  BenchCase { name: format!("SLT#{:02}", idx + 1), group: "SLT", opcode: opcode::SLT, inputs: vec![i256_bytes(a), i256_bytes(b)], output: bool_word(a < b) }
+}
+fn make_sgt_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let (a, b) = random_sdiv_pair(rng);
+  BenchCase { name: format!("SGT#{:02}", idx + 1), group: "SGT", opcode: opcode::SGT, inputs: vec![i256_bytes(a), i256_bytes(b)], output: bool_word(a > b) }
+}
+fn make_eq_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let same = rng.random::<bool>();
+  let a = u256_bytes(rng.random::<u128>());
+  let b = if same { a } else { u256_bytes(rng.random::<u128>()) };
+  BenchCase { name: format!("EQ#{:02}", idx + 1), group: "EQ", opcode: opcode::EQ, inputs: vec![a, b], output: bool_word(a == b) }
+}
+fn make_iszero_case(rng: &mut StdRng, idx: usize) -> BenchCase {
+  let v: u128 = if rng.random::<bool>() { 0 } else { rng.random::<u128>() };
+  BenchCase { name: format!("ISZERO#{:02}", idx + 1), group: "ISZERO", opcode: opcode::ISZERO, inputs: vec![u256_bytes(v)], output: bool_word(v == 0) }
 }
 
-fn cmp_i128_lt(a: i128, b: i128) -> bool {
-  a < b
+/// Per-sample case generator table.
+/// To add a new opcode: write `fn make_X_case` above and append it here.
+static CASE_GENERATORS: &[CaseGen] = &[
+  make_add_case, make_sub_case, make_mul_sparse_case, make_mul_dense_case,
+  make_div_case, make_mod_case, make_sdiv_case, make_smod_case,
+  make_and_case, make_or_case, make_xor_case, make_not_case,
+  make_lt_case, make_gt_case, make_slt_case, make_sgt_case,
+  make_eq_case, make_iszero_case,
+];
+
+/// One-off edge cases appended regardless of `samples`.
+fn edge_cases() -> Vec<BenchCase> {
+  let mut int_min = [0u8; 32]; int_min[0] = 0x80;
+  vec![BenchCase {
+    name: "SDIV_INT_MIN".to_string(), group: "SDIV_INT_MIN", opcode: opcode::SDIV,
+    inputs: vec![int_min, [0xFF; 32]], output: int_min,
+  }]
 }
 
 fn bench_cases(samples: usize, seed: u64) -> Vec<BenchCase> {
   let mut rng = StdRng::seed_from_u64(seed);
   let mut cases = Vec::new();
-
   for sample_idx in 0..samples {
-    let add_a = u256_bytes(rng.random::<u128>());
-    let add_b = u256_bytes(rng.random::<u128>());
-    let add_c = add_u256_mod(&add_a, &add_b);
-    cases.push(BenchCase {
-      name: format!("ADD#{:02}", sample_idx + 1),
-      group: "ADD",
-      opcode: opcode::ADD,
-      inputs: vec![add_a, add_b],
-      output: add_c,
-    });
-
-    let sub_a = u256_bytes(rng.random::<u128>());
-    let sub_b = u256_bytes(rng.random::<u128>());
-    let sub_c = sub_u256_mod(&sub_a, &sub_b);
-    cases.push(BenchCase {
-      name: format!("SUB#{:02}", sample_idx + 1),
-      group: "SUB",
-      opcode: opcode::SUB,
-      inputs: vec![sub_a, sub_b],
-      output: sub_c,
-    });
-
-    let mul_sparse_a = u256_bytes(rng.random::<u16>() as u128);
-    let mul_sparse_b = u256_bytes(rng.random::<u16>() as u128);
-    cases.push(BenchCase {
-      name: format!("MULs#{:02}", sample_idx + 1),
-      group: "MUL (sparse)",
-      opcode: opcode::MUL,
-      inputs: vec![mul_sparse_a, mul_sparse_b],
-      output: mul_u256_mod(&mul_sparse_a, &mul_sparse_b),
-    });
-
-    let mul_dense_a = random_bytes32(&mut rng);
-    let mul_dense_b = random_bytes32(&mut rng);
-    cases.push(BenchCase {
-      name: format!("MULd#{:02}", sample_idx + 1),
-      group: "MUL (dense)",
-      opcode: opcode::MUL,
-      inputs: vec![mul_dense_a, mul_dense_b],
-      output: mul_u256_mod(&mul_dense_a, &mul_dense_b),
-    });
-
-    let div_a = rng.random::<u128>();
-    let div_b = random_nonzero_u128(&mut rng);
-    cases.push(BenchCase {
-      name: format!("DIV#{:02}", sample_idx + 1),
-      group: "DIV",
-      opcode: opcode::DIV,
-      inputs: vec![u256_bytes(div_a), u256_bytes(div_b)],
-      output: u256_bytes(div_a / div_b),
-    });
-
-    let mod_a = rng.random::<u128>();
-    let mod_b = random_nonzero_u128(&mut rng);
-    cases.push(BenchCase {
-      name: format!("MOD#{:02}", sample_idx + 1),
-      group: "MOD",
-      opcode: opcode::MOD,
-      inputs: vec![u256_bytes(mod_a), u256_bytes(mod_b)],
-      output: u256_bytes(mod_a % mod_b),
-    });
-
-    let (sdiv_a, sdiv_b) = random_sdiv_pair(&mut rng);
-    cases.push(BenchCase {
-      name: format!("SDIV#{:02}", sample_idx + 1),
-      group: "SDIV",
-      opcode: opcode::SDIV,
-      inputs: vec![i256_bytes(sdiv_a), i256_bytes(sdiv_b)],
-      output: i256_bytes(sdiv_a / sdiv_b),
-    });
-
-    let (smod_a, smod_b) = random_sdiv_pair(&mut rng);
-    cases.push(BenchCase {
-      name: format!("SMOD#{:02}", sample_idx + 1),
-      group: "SMOD",
-      opcode: opcode::SMOD,
-      inputs: vec![i256_bytes(smod_a), i256_bytes(smod_b)],
-      output: i256_bytes(smod_a % smod_b),
-    });
-
-    let and_a = random_bytes32(&mut rng);
-    let and_b = random_bytes32(&mut rng);
-    let mut and_c = [0u8; 32];
-    let mut or_c = [0u8; 32];
-    let mut xor_c = [0u8; 32];
-    let mut not_c = [0u8; 32];
-    for i in 0..32 {
-      and_c[i] = and_a[i] & and_b[i];
-      or_c[i] = and_a[i] | and_b[i];
-      xor_c[i] = and_a[i] ^ and_b[i];
-      not_c[i] = !and_a[i];
+    for make_case in CASE_GENERATORS {
+      cases.push(make_case(&mut rng, sample_idx));
     }
-
-    cases.push(BenchCase {
-      name: format!("AND#{:02}", sample_idx + 1),
-      group: "AND",
-      opcode: opcode::AND,
-      inputs: vec![and_a, and_b],
-      output: and_c,
-    });
-    cases.push(BenchCase {
-      name: format!("OR#{:02}", sample_idx + 1),
-      group: "OR",
-      opcode: opcode::OR,
-      inputs: vec![and_a, and_b],
-      output: or_c,
-    });
-    cases.push(BenchCase {
-      name: format!("XOR#{:02}", sample_idx + 1),
-      group: "XOR",
-      opcode: opcode::XOR,
-      inputs: vec![and_a, and_b],
-      output: xor_c,
-    });
-    cases.push(BenchCase {
-      name: format!("NOT#{:02}", sample_idx + 1),
-      group: "NOT",
-      opcode: opcode::NOT,
-      inputs: vec![and_a],
-      output: not_c,
-    });
-
-    // ---- Comparison / equality opcodes (new) ----
-
-    let cmp_a = rng.random::<u128>();
-    let cmp_b = rng.random::<u128>();
-    cases.push(BenchCase {
-      name: format!("LT#{:02}", sample_idx + 1),
-      group: "LT",
-      opcode: opcode::LT,
-      inputs: vec![u256_bytes(cmp_a), u256_bytes(cmp_b)],
-      output: bool_word(cmp_u128(cmp_a, cmp_b)),
-    });
-    cases.push(BenchCase {
-      name: format!("GT#{:02}", sample_idx + 1),
-      group: "GT",
-      opcode: opcode::GT,
-      inputs: vec![u256_bytes(cmp_a), u256_bytes(cmp_b)],
-      output: bool_word(cmp_u128(cmp_b, cmp_a)),
-    });
-
-    let (slt_a, slt_b) = random_sdiv_pair(&mut rng);
-    cases.push(BenchCase {
-      name: format!("SLT#{:02}", sample_idx + 1),
-      group: "SLT",
-      opcode: opcode::SLT,
-      inputs: vec![i256_bytes(slt_a), i256_bytes(slt_b)],
-      output: bool_word(cmp_i128_lt(slt_a, slt_b)),
-    });
-    cases.push(BenchCase {
-      name: format!("SGT#{:02}", sample_idx + 1),
-      group: "SGT",
-      opcode: opcode::SGT,
-      inputs: vec![i256_bytes(slt_a), i256_bytes(slt_b)],
-      output: bool_word(cmp_i128_lt(slt_b, slt_a)),
-    });
-
-    let eq_same: bool = rng.random::<bool>();
-    let eq_a = u256_bytes(rng.random::<u128>());
-    let eq_b = if eq_same { eq_a } else { u256_bytes(rng.random::<u128>()) };
-    cases.push(BenchCase {
-      name: format!("EQ#{:02}", sample_idx + 1),
-      group: "EQ",
-      opcode: opcode::EQ,
-      inputs: vec![eq_a, eq_b],
-      output: bool_word(eq_a == eq_b),
-    });
-
-    let iszero_val: u128 = if rng.random::<bool>() { 0 } else { rng.random::<u128>() };
-    cases.push(BenchCase {
-      name: format!("ISZERO#{:02}", sample_idx + 1),
-      group: "ISZERO",
-      opcode: opcode::ISZERO,
-      inputs: vec![u256_bytes(iszero_val)],
-      output: bool_word(iszero_val == 0),
-    });
   }
-
-  let mut int_min = [0u8; 32];
-  int_min[0] = 0x80;
-  cases.push(BenchCase {
-    name: "SDIV_INT_MIN".to_string(),
-    group: "SDIV_INT_MIN",
-    opcode: opcode::SDIV,
-    inputs: vec![int_min, [0xFF; 32]],
-    output: int_min,
-  });
-
+  cases.extend(edge_cases());
   cases
 }
 
@@ -432,21 +357,13 @@ fn bench_zkp_verify(
   start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64
 }
 
-fn supports_zkp_receipt(op: u8) -> bool {
-  matches!(
-    op,
-    opcode::ADD
-      | opcode::SUB
-      | opcode::MUL
-      | opcode::DIV
-      | opcode::MOD
-      | opcode::SDIV
-      | opcode::SMOD
-      | opcode::AND
-      | opcode::OR
-      | opcode::XOR
-      | opcode::NOT
-  )
+/// Returns true if the ITP can produce a ZK receipt.
+/// Auto-detected at runtime — no hard-coded opcode list.
+/// New opcodes are supported as soon as their proof compiles.
+fn supports_zkp_receipt(itp: &InstructionTransitionProof) -> bool {
+  let Some(proof) = itp.semantic_proof.as_ref() else { return false };
+  let rows = compile_proof(proof);
+  build_lut_steps_from_rows_auto(&rows).is_ok()
 }
 
 fn bench_wff_prove(case: &BenchCase, iters: usize) -> f64 {
@@ -470,27 +387,6 @@ fn bench_wff_verify(itp: &InstructionTransitionProof, iters: usize) -> f64 {
   start.elapsed().as_secs_f64() * 1_000_000.0 / iters as f64
 }
 
-// ---- batch STARK helpers ----
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum OpcodeFamily {
-  Add,
-  Mul,
-  Bit,
-}
-
-#[allow(dead_code)]
-fn opcode_family(op: u8) -> Option<OpcodeFamily> {
-  match op {
-    opcode::ADD | opcode::SUB => Some(OpcodeFamily::Add),
-    opcode::MUL | opcode::DIV | opcode::MOD | opcode::SDIV | opcode::SMOD => {
-      Some(OpcodeFamily::Mul)
-    }
-    opcode::AND | opcode::OR | opcode::XOR | opcode::NOT => Some(OpcodeFamily::Bit),
-    _ => None,
-  }
-}
-
 fn batch_rows_for_itps(
   itps: &[InstructionTransitionProof],
 ) -> Vec<zprove_core::semantic_proof::ProofRow> {
@@ -506,83 +402,33 @@ fn batch_rows_for_itps(
     .collect()
 }
 
-/// Prove `batch_size` identical copies of `itp` as a single batched LUT STARK.
-/// Returns (prove_µs_per_instr, verify_µs_per_instr, total_rows, total_lut_steps).
-fn bench_batch_stark(
+/// Prove `batch_size` identical copies of `itp` as a single LUT STARK call.
+/// Cross-family — no opcode-family dispatch required.
+/// Returns `(prove_µs/instr, verify_µs/instr, total_rows, lut_steps)`.
+fn bench_batch_wff(
   itp: &InstructionTransitionProof,
-  family: OpcodeFamily,
   batch_size: usize,
 ) -> Option<(f64, f64, usize, usize)> {
   let batch: Vec<_> = std::iter::repeat(itp.clone()).take(batch_size).collect();
   let all_rows = batch_rows_for_itps(&batch);
   let total_rows = all_rows.len();
+  let lut_steps = build_lut_steps_from_rows_auto(&all_rows).ok()?.len();
 
-  let lut_len = match family {
-    OpcodeFamily::Add => build_lut_steps_from_rows_add_family(&all_rows).ok()?.len(),
-    OpcodeFamily::Mul => build_lut_steps_from_rows_mul_family(&all_rows).ok()?.len(),
-    OpcodeFamily::Bit => build_lut_steps_from_rows_bit_family(&all_rows).ok()?.len(),
-  };
+  let proofs: Vec<&Proof> = batch.iter()
+    .filter_map(|i| i.semantic_proof.as_ref())
+    .collect();
+  if proofs.is_empty() { return None; }
 
   let start = Instant::now();
-  let proof = match family {
-    OpcodeFamily::Add => prove_batch_stark_add_family(black_box(&all_rows)).ok()?,
-    OpcodeFamily::Mul => prove_batch_stark_mul_family(black_box(&all_rows)).ok()?,
-    OpcodeFamily::Bit => prove_batch_stark_bit_family(black_box(&all_rows)).ok()?,
-  };
-  black_box(&proof);
+  let (lut_proof, wffs) = prove_batch_wff_proofs(black_box(&proofs)).ok()?;
+  black_box(&lut_proof); black_box(&wffs);
   let prove_us = start.elapsed().as_secs_f64() * 1_000_000.0 / batch_size as f64;
 
   let start = Instant::now();
-  let ok = match family {
-    OpcodeFamily::Add => verify_batch_stark_add_family(black_box(&proof)),
-    OpcodeFamily::Mul => verify_batch_stark_mul_family(black_box(&proof)),
-    OpcodeFamily::Bit => verify_batch_stark_bit_family(black_box(&proof)),
-  };
-  black_box(ok);
+  let _ = black_box(verify_batch_wff_proofs(black_box(&lut_proof), black_box(&proofs), black_box(&wffs)));
   let verify_us = start.elapsed().as_secs_f64() * 1_000_000.0 / batch_size as f64;
 
-  Some((prove_us, verify_us, total_rows, lut_len))
-}
-
-#[derive(Clone, Copy)]
-struct FriPreset {
-  label: &'static str,
-  num_queries: usize,
-  query_pow_bits: usize,
-  log_final_poly_len: usize,
-}
-
-/// Prove a batch with custom FRI params, return (prove_µs/instr, verify_µs/instr).
-fn bench_batch_stark_fri(
-  itp: &InstructionTransitionProof,
-  family: OpcodeFamily,
-  batch_size: usize,
-  fri: FriPreset,
-) -> Option<(f64, f64)> {
-  let batch: Vec<_> = std::iter::repeat(itp.clone()).take(batch_size).collect();
-  let all_rows = batch_rows_for_itps(&batch);
-
-  let (nq, pw, lf) = (fri.num_queries, fri.query_pow_bits, fri.log_final_poly_len);
-
-  let start = Instant::now();
-  let proof = match family {
-    OpcodeFamily::Add => prove_batch_stark_add_family_with_params(black_box(&all_rows), nq, pw, lf),
-    OpcodeFamily::Mul => prove_batch_stark_mul_family_with_params(black_box(&all_rows), nq, pw, lf),
-    OpcodeFamily::Bit => prove_batch_stark_bit_family_with_params(black_box(&all_rows), nq, pw, lf),
-  }.ok()?;
-  black_box(&proof);
-  let prove_us = start.elapsed().as_secs_f64() * 1_000_000.0 / batch_size as f64;
-
-  let start = Instant::now();
-  let ok = match family {
-    OpcodeFamily::Add => verify_batch_stark_add_family_with_params(black_box(&proof), nq, pw, lf),
-    OpcodeFamily::Mul => verify_batch_stark_mul_family_with_params(black_box(&proof), nq, pw, lf),
-    OpcodeFamily::Bit => verify_batch_stark_bit_family_with_params(black_box(&proof), nq, pw, lf),
-  };
-  black_box(ok);
-  let verify_us = start.elapsed().as_secs_f64() * 1_000_000.0 / batch_size as f64;
-
-  Some((prove_us, verify_us))
+  Some((prove_us, verify_us, total_rows, lut_steps))
 }
 
 fn main() {
@@ -615,11 +461,11 @@ fn main() {
 
   // ---- warmup ----
   let warmup_seed = seed ^ 0xA5A5_5A5A_D3C3_B1B1;
-  let warmup_case = bench_cases(1, warmup_seed)
+  let warmup_itp = bench_cases(1, warmup_seed)
     .into_iter()
-    .find(|case| supports_zkp_receipt(case.opcode))
-    .expect("benchmark case generator should include supported opcodes");
-  let warmup_itp = build_itp(&warmup_case);
+    .map(|c| build_itp(&c))
+    .find(|itp| supports_zkp_receipt(itp))
+    .expect("benchmark suite includes at least one opcode with ZKP receipt support");
 
   if !no_warmup {
     warm_up(&warmup_itp, zkp_workers).unwrap_or_else(|err| panic!("warm-up failed: {err}"));
@@ -659,23 +505,14 @@ fn main() {
     agg.wff_prove_sum += wff_prove_us;
     agg.wff_verify_sum += wff_verify_us;
 
-    if no_stark || !supports_zkp_receipt(case.opcode) {
+    if no_stark || !supports_zkp_receipt(&itp) {
       continue;
     }
 
-    let lut_steps = itp.semantic_proof.as_ref().map(|p| {
+    // LUT step count — auto via cross-family builder, no opcode-family dispatch
+    let lut_steps = itp.semantic_proof.as_ref().and_then(|p| {
       let rows = compile_proof(p);
-      let maybe = match case.opcode {
-        opcode::ADD | opcode::SUB => build_lut_steps_from_rows_add_family(&rows),
-        opcode::MUL | opcode::DIV | opcode::MOD | opcode::SDIV | opcode::SMOD => {
-          build_lut_steps_from_rows_mul_family(&rows)
-        }
-        opcode::AND | opcode::OR | opcode::XOR | opcode::NOT => {
-          build_lut_steps_from_rows_bit_family(&rows)
-        }
-        _ => return 0,
-      };
-      maybe.map(|s| s.len()).unwrap_or(0)
+      build_lut_steps_from_rows_auto(&rows).ok().map(|s| s.len())
     }).unwrap_or(0);
 
     let receipt = match prove_instruction_zk_receipt(&itp) {
@@ -739,160 +576,283 @@ fn main() {
     }
   }
 
-  // ---- Batch STARK layer table ----
-  // Use one representative case per family (first sample of the cheapest opcode).
+  // ---- Per-component STARK timing ----
+  // For each receipt-capable group, break the prove time into:
+  //   StackIR STARK | LUT STARK | WFFMatch STARK
   if !no_stark {
-    // Pick one representative ITP per family from the generated cases.
-    let all_cases = bench_cases(samples.max(1), seed);
-    let rep_add = all_cases.iter().find(|c| c.opcode == opcode::ADD).map(build_itp);
-    let rep_mul = all_cases.iter().find(|c| c.opcode == opcode::MUL).map(build_itp);
-    let rep_bit = all_cases.iter().find(|c| c.opcode == opcode::AND).map(build_itp);
-
-    let batch_sizes = [1usize, 2, 4, 8, 16];
-
-    println!();
-    println!("── Batch STARK layer (amortized µs per instruction) ─────────────────────────────────────");
-    println!(
-      "{:<12}  {:>5}  {:>12}  {:>12}  {:>12}  {:>12}",
-      "family", "batch", "total_rows", "prove/instr", "verify/instr", "×WFF_verify"
-    );
-    println!("{}", "─".repeat(74));
-
-    struct FamilyRep {
-      name: &'static str,
-      family: OpcodeFamily,
-      itp: InstructionTransitionProof,
-      wff_verify_us: f64,
+    // Re-use the first case of each receipt-capable group.
+    let comp_cases = bench_cases(samples.max(1), seed);
+    let mut seen: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    let mut comp_reps: Vec<(&'static str, InstructionTransitionProof)> = Vec::new();
+    for c in &comp_cases {
+      let itp = build_itp(c);
+      if supports_zkp_receipt(&itp) && seen.insert(c.group) {
+        comp_reps.push((c.group, itp));
+      }
     }
 
-    let mut reps: Vec<FamilyRep> = Vec::new();
-
-    if let Some(itp) = rep_add {
-      let wff_verify_us = bench_wff_verify(&itp, wff_iters);
-      reps.push(FamilyRep { name: "ADD (add-fam)", family: OpcodeFamily::Add, itp, wff_verify_us });
-    }
-    if let Some(itp) = rep_mul {
-      let wff_verify_us = bench_wff_verify(&itp, wff_iters);
-      reps.push(FamilyRep { name: "MUL (mul-fam)", family: OpcodeFamily::Mul, itp, wff_verify_us });
-    }
-    if let Some(itp) = rep_bit {
-      let wff_verify_us = bench_wff_verify(&itp, wff_iters);
-      reps.push(FamilyRep { name: "AND (bit-fam)", family: OpcodeFamily::Bit, itp, wff_verify_us });
-    }
-
-    for rep in &reps {
-      for &bs in &batch_sizes {
-        match bench_batch_stark(&rep.itp, rep.family, bs) {
-          Some((prove_us, verify_us, total_rows, _lut_steps)) => {
-            let ratio = if rep.wff_verify_us > 0.0 { verify_us / rep.wff_verify_us } else { 0.0 };
+    if !comp_reps.is_empty() {
+      println!();
+      println!("── Per-component STARK timing (single instruction, single run) ──────────────────────────────");
+      println!(
+        "{:<14}  {:>9}  {:>10}  {:>12}  {:>10}  {:>10}",
+        "group", "rows", "setup µs", "StackIR µs", "LUT µs", "total µs"
+      );
+      println!("{}", "─".repeat(72));
+      for (name, itp) in &comp_reps {
+        let rows = itp.semantic_proof.as_ref().map(|p| compile_proof(p).len()).unwrap_or(0);
+        match prove_instruction_zk_receipt_timed(itp) {
+          Ok((_, (setup_us, stack_us, lut_us))) => {
             println!(
-              "{:<12}  {:>5}  {:>12}  {:>12.2}  {:>12.2}  {:>12.1}×",
-              rep.name, bs, total_rows, prove_us, verify_us, ratio,
+              "{:<14}  {:>9}  {:>10.1}  {:>12.1}  {:>10.1}  {:>10.1}",
+              name, rows, setup_us, stack_us, lut_us, setup_us + stack_us + lut_us
             );
           }
-          None => {
-            println!("{:<12}  {:>5}  — (failed)", rep.name, bs);
+          Err(e) => println!("{:<14}  — ({e})", name),
+        }
+      }
+    }
+  }
+
+  // ---- Batch LUT STARK + Cross-family table ----
+  // Representative ITPs: one per distinct group (first case of each group that
+  // supports ZKP receipt). No opcode-family enum, no manual dispatch.
+  if !no_stark {
+    let all_cases = bench_cases(samples.max(1), seed);
+    let mut seen_groups: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    struct Rep { name: &'static str, itp: InstructionTransitionProof, wff_verify_us: f64 }
+    let mut reps: Vec<Rep> = Vec::new();
+    for case in &all_cases {
+      let itp = build_itp(case);
+      if supports_zkp_receipt(&itp) && seen_groups.insert(case.group) {
+        let wff_verify_us = bench_wff_verify(&itp, wff_iters);
+        reps.push(Rep { name: case.group, itp, wff_verify_us });
+        if reps.len() >= 5 { break; }
+      }
+    }
+
+    if !reps.is_empty() {
+      let batch_sizes = [1usize, 2, 4, 8, 16];
+      println!();
+      println!("── Batch LUT STARK (amortized µs per instruction) ───────────────────────────────────────");
+      println!(
+        "{:<14}  {:>5}  {:>12}  {:>12}  {:>12}  {:>12}",
+        "group", "batch", "total_rows", "prove/instr", "verify/instr", "×WFF_verify"
+      );
+      println!("{}", "─".repeat(76));
+
+      for rep in &reps {
+        for &bs in &batch_sizes {
+          match bench_batch_wff(&rep.itp, bs) {
+            Some((prove_us, verify_us, total_rows, _lut)) => {
+              let ratio = if rep.wff_verify_us > 0.0 { verify_us / rep.wff_verify_us } else { 0.0 };
+              println!(
+                "{:<14}  {:>5}  {:>12}  {:>12.2}  {:>12.2}  {:>12.1}×",
+                rep.name, bs, total_rows, prove_us, verify_us, ratio,
+              );
+            }
+            None => println!("{:<14}  {:>5}  — (failed)", rep.name, bs),
           }
         }
       }
     }
 
-    // ---- FRI param sweep table ----
-    // Fixed batch=8, vary FRI params to show cost of each knob.
-    let fri_batch_size = 8usize;
-    let fri_presets = [
-      FriPreset { label: "default (40q,pow8,f0)", num_queries: 40, query_pow_bits: 8, log_final_poly_len: 0 },
-      FriPreset { label: "no pow  (40q,pow0,f0)", num_queries: 40, query_pow_bits: 0, log_final_poly_len: 0 },
-      FriPreset { label: "20q     (20q,pow0,f0)", num_queries: 20, query_pow_bits: 0, log_final_poly_len: 0 },
-      FriPreset { label: "10q     (10q,pow0,f0)", num_queries: 10, query_pow_bits: 0, log_final_poly_len: 0 },
-      FriPreset { label: "10q+f2  (10q,pow0,f2)", num_queries: 10, query_pow_bits: 0, log_final_poly_len: 2 },
-    ];
-
-    println!();
-    println!("── FRI param sweep  (batch={fri_batch_size}, single run each) ─────────────────────────────");
-    println!(
-      "{:<25}  {:>12}  {:>12}  {:>12}  {:>12}",
-      "preset", "ADD prove", "ADD verify", "AND prove", "AND verify"
-    );
-    println!("{}", "─".repeat(80));
-
-    for preset in &fri_presets {
-      let add_res = reps.iter()
-        .find(|r| matches!(r.family, OpcodeFamily::Add))
-        .and_then(|r| bench_batch_stark_fri(&r.itp, r.family, fri_batch_size, *preset));
-      let bit_res = reps.iter()
-        .find(|r| matches!(r.family, OpcodeFamily::Bit))
-        .and_then(|r| bench_batch_stark_fri(&r.itp, r.family, fri_batch_size, *preset));
-
-      let fmt = |v: Option<f64>| match v {
-        Some(x) => format!("{x:>10.2}µs"),
-        None => "     —    ".to_string(),
-      };
-
-      println!(
-        "{:<25}  {}  {}  {}  {}",
-        preset.label,
-        fmt(add_res.map(|(p, _)| p)),
-        fmt(add_res.map(|(_, v)| v)),
-        fmt(bit_res.map(|(p, _)| p)),
-        fmt(bit_res.map(|(_, v)| v)),
-      );
-    }
-
-    // ── Cross-family batch WFF prove/verify ────────────────────────────────
-    // Mix ADD + MUL + AND in a single LUT STARK call. Proofs come from the
-    // representative instruction of each family (the one used for the batch
-    // table above). Batch size = 1 rep of each present family.
-    //
-    // Each row of the table combines N instructions (one per family) into one
-    // prove call and one verify call, then shows the amortized cost per instruction.
-
-    // Collect (name, itp) pairs for cross-family mix
-    let cross_cases: Vec<(&str, &InstructionTransitionProof)> = reps
-      .iter()
-      .map(|r| (r.name, &r.itp))
+    // ── Cross-family batch: mix N distinct groups into one LUT STARK call ──
+    let cross_proofs: Vec<&Proof> = reps.iter()
+      .filter_map(|r| r.itp.semantic_proof.as_ref())
       .collect();
-
-    if cross_cases.len() >= 2 {
+    if cross_proofs.len() >= 2 {
       println!();
-      println!("── Cross-family WFF batch (mixed opcodes → single LUT STARK) ────────────────────────────");
+      println!("── Cross-family batch (mixed opcodes → single LUT STARK) ────────────────────────────────");
       println!(
-        "{:<30}  {:>5}  {:>14}  {:>14}  {:>14}",
+        "{:<36}  {:>5}  {:>14}  {:>14}  {:>14}",
         "mix", "n", "prove_total µs", "verify_total µs", "verify/instr µs"
       );
-      println!("{}", "─".repeat(80));
+      println!("{}", "─".repeat(84));
 
-      // Collect semantic proofs for each mix size
-      let sem_proofs: Vec<_> = cross_cases
-        .iter()
-        .filter_map(|(_, itp)| itp.semantic_proof.as_ref())
-        .collect();
-
-      for n in 2..=cross_cases.len() {
-        let batch: Vec<_> = sem_proofs.iter().take(n).copied().collect();
-        let mix_name: String = cross_cases.iter().take(n).map(|(nm, _)| *nm).collect::<Vec<_>>().join(" + ");
-
-        // Prove (single run for timing)
-        let prove_start = std::time::Instant::now();
-        let result = prove_batch_wff_proofs(&batch);
-        let prove_us = prove_start.elapsed().as_secs_f64() * 1e6;
-
-        match result {
+      for n in 2..=cross_proofs.len() {
+        let batch: Vec<&Proof> = cross_proofs.iter().take(n).copied().collect();
+        let mix_name: String = reps.iter().take(n).map(|r| r.name).collect::<Vec<_>>().join(" + ");
+        let prove_start = Instant::now();
+        match prove_batch_wff_proofs(&batch) {
           Ok((ref lut_proof, ref wffs)) => {
-            // Verify
-            let verify_start = std::time::Instant::now();
+            let prove_us = prove_start.elapsed().as_secs_f64() * 1e6;
+            let verify_start = Instant::now();
             let _ = verify_batch_wff_proofs(lut_proof, &batch, wffs);
             let verify_us = verify_start.elapsed().as_secs_f64() * 1e6;
-
             println!(
-              "{:<30}  {:>5}  {:>14.2}  {:>14.2}  {:>14.2}",
+              "{:<36}  {:>5}  {:>14.2}  {:>14.2}  {:>14.2}",
               mix_name, n, prove_us, verify_us, verify_us / n as f64
             );
           }
-          Err(e) => {
-            println!("{:<30}  {:>5}  prove failed: {e}", mix_name, n);
+          Err(e) => println!("{:<36}  {:>5}  prove failed: {e}", mix_name, n),
+        }
+      }
+    }
+  }
+
+  // ── Proof size per opcode ───────────────────────────────────────────────────
+  // Reports the serialized byte size of each STARK proof component:
+  //   - StackIR proof  (bincode of CircleStarkProof)
+  //   - LUT proof      (bincode of CircleStarkProof)
+  //   - VK             (width + degree_bits + 8×M31 commitment = fixed 48 B)
+  // The VK is constant per (Air, degree_bits) so we also show whether two
+  // opcodes with the same lut_steps share the same degree_bits.
+  if !no_stark {
+    // Re-derive one receipt per distinct ZKP-capable group.
+    let all_cases = bench_cases(samples.max(1), seed);
+    let mut seen: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    let mut size_reps: Vec<(&'static str, usize, InstructionTransitionZkReceipt)> = Vec::new();
+    for case in &all_cases {
+      let itp = build_itp(case);
+      if supports_zkp_receipt(&itp) && seen.insert(case.group) {
+        let rows = itp.semantic_proof.as_ref().map(|p| compile_proof(p).len()).unwrap_or(0);
+        if let Ok(receipt) = prove_instruction_zk_receipt(&itp) {
+          size_reps.push((case.group, rows, receipt));
+        }
+      }
+    }
+
+    if !size_reps.is_empty() {
+      // VK = 2×usize (8B each) + commitment (8×M31 = 32B) = 48B (constant)
+      let vk_bytes = 8 + 8 + 8 * 4;
+
+      println!();
+      println!("── Proof sizes (bincode serialized) ─────────────────────────────────────────────────────");
+      println!(
+        "{:<14}  {:>6}  {:>12}  {:>10}  {:>9}  {:>10}  {:>9}",
+        "opcode", "rows", "stack_ir B", "lut B", "vk B", "total B", "total kB"
+      );
+      println!("{}", "─".repeat(78));
+      let mut total_bytes_all: Vec<(usize, usize, usize, usize)> = Vec::new();
+      for (name, rows, receipt) in &size_reps {
+        let sir_b = proof_bytes(&receipt.stack_ir_proof);
+        let lut_b = proof_bytes(&receipt.lut_kernel_proof);
+        let total = sir_b + lut_b + vk_bytes;
+        println!(
+          "{:<14}  {:>6}  {:>12}  {:>10}  {:>9}  {:>10}  {:>9.2}",
+          name, rows, sir_b, lut_b, vk_bytes, total, total as f64 / 1024.0
+        );
+        total_bytes_all.push((*rows, sir_b, lut_b, total));
+      }
+
+      // Batch size vs proof size comparison
+      if let Some((_, _, rep_receipt)) = size_reps.first() {
+        let rep_itp = build_itp(
+          bench_cases(1, seed)
+            .iter()
+            .find(|c| supports_zkp_receipt(&build_itp(c)))
+            .expect("at least one case"),
+        );
+        println!();
+        println!("── Batch proof size vs N×single (ADD as representative) ─────────────────────────────");
+        println!(
+          "  {:>5}  {:>14}  {:>14}  {:>10}  {:>10}",
+          "N", "N×single B", "batch B", "saving B", "saving %"
+        );
+        println!("  {}", "─".repeat(58));
+        let single_lut_b = proof_bytes(&rep_receipt.lut_kernel_proof);
+        let single_sir_b = proof_bytes(&rep_receipt.stack_ir_proof);
+        let single_total = single_lut_b + single_sir_b + vk_bytes;
+        for &n in &[1usize, 2, 4, 8, 16] {
+          let batch_itps: Vec<_> = std::iter::repeat(rep_itp.clone()).take(n).collect();
+          if let Ok(batch_receipt) = prove_batch_transaction_zk_receipt(&batch_itps) {
+            let batch_b = proof_bytes(&batch_receipt.lut_proof) + vk_bytes;
+            let n_single_b = single_total * n;
+            let saving = n_single_b as i64 - batch_b as i64;
+            let pct = saving as f64 / n_single_b as f64 * 100.0;
+            println!(
+              "  {:>5}  {:>14}  {:>14}  {:>10}  {:>9.1}%",
+              n, n_single_b, batch_b, saving, pct
+            );
           }
         }
+      }
+    }
+  }
+
+  // ── Parallel vs Batch STARK comparison ──────────────────────────────────────────────────────
+  // Compares two paths for proving N identical instructions:
+  //   Parallel: N independent STARK proofs run in a thread-pool.
+  //   Batch:    1 shared STARK proof covering all N rows (amortises setup + FRI).
+  // Reports per-instruction latency and the batch speedup ratio.
+  if !no_stark {
+    let par_vs_batch_case = bench_cases(1, seed)
+      .into_iter()
+      .map(|c| (c.clone(), build_itp(&c)))
+      .find(|(_, itp)| supports_zkp_receipt(itp));
+
+    if let Some((rep_case, rep_itp)) = par_vs_batch_case {
+      let rep_stmt = build_statement(&rep_case);
+      let sizes = [1usize, 2, 4, 8];
+
+      println!();
+      println!(
+        "── Parallel vs Batch STARK ({} as representative) ──────────────────────────────────────",
+        rep_case.group
+      );
+      println!(
+        "  {:>5}  {:>14}  {:>14}  {:>9}  {:>14}  {:>14}",
+        "N", "par µs/N", "batch µs/N", "speedup", "batch tot µs", "bv tot µs",
+      );
+      println!("  {}", "─".repeat(78));
+
+      for &n in &sizes {
+        let batch_itps: Vec<_> =
+          std::iter::repeat(rep_itp.clone()).take(n).collect();
+
+        // --- parallel path ---
+        let t_par = Instant::now();
+        let par_ok =
+          match prove_instruction_zk_receipts_parallel(black_box(batch_itps.clone()), zkp_workers) {
+            Ok(r) => {
+              black_box(r);
+              true
+            }
+            Err(_) => false,
+          };
+        let par_us = t_par.elapsed().as_secs_f64() * 1_000_000.0;
+
+        if !par_ok {
+          println!("  {:>5}  — (parallel failed)", n);
+          continue;
+        }
+
+        // --- batch path ---
+        let t_batch = Instant::now();
+        let batch_receipt =
+          match prove_batch_transaction_zk_receipt(black_box(&batch_itps)) {
+            Ok(r) => r,
+            Err(e) => {
+              println!("  {:>5}  — batch prove failed: {e}", n);
+              continue;
+            }
+          };
+        let batch_us = t_batch.elapsed().as_secs_f64() * 1_000_000.0;
+
+        // --- batch verify ---
+        let batch_stmts: Vec<_> =
+          std::iter::repeat(rep_stmt.clone()).take(n).collect();
+        let t_bv = Instant::now();
+        let bv_ok = black_box(verify_batch_transaction_zk_receipt(
+          black_box(&batch_stmts),
+          black_box(&batch_receipt),
+        ));
+        let bv_us = t_bv.elapsed().as_secs_f64() * 1_000_000.0;
+
+        let speedup = if batch_us > 0.0 { par_us / batch_us } else { f64::INFINITY };
+        println!(
+          "  {:>5}  {:>14.1}  {:>14.1}  {:>8.2}×  {:>14.1}  {:>14.1}  verify_ok={bv_ok}",
+          n,
+          par_us / n as f64,
+          batch_us / n as f64,
+          speedup,
+          batch_us,
+          bv_us,
+        );
+
+        // Suppress unused-variable lint on the typed receipt.
+        let _: BatchTransactionZkReceipt = batch_receipt;
       }
     }
   }

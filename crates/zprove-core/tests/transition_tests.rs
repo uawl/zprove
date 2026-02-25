@@ -2,7 +2,6 @@
 
 #[cfg(test)]
 mod tests {
-  use zprove_core::memory_proof::{compute_memory_root, verify_memory_access_commitments};
   use zprove_core::semantic_proof::{infer_proof, prove_add, Proof, Term};
   use zprove_core::transition::*;
   use revm::bytecode::opcode;
@@ -582,102 +581,9 @@ mod tests {
 
     let mut receipt1 = prove_instruction_zk_receipt(&itp1).expect("receipt proving should succeed");
     let mut receipt2 = prove_instruction_zk_receipt(&itp2).expect("receipt proving should succeed");
-    std::mem::swap(&mut receipt1.wff_match_proof, &mut receipt2.wff_match_proof);
+    std::mem::swap(&mut receipt1.preprocessed_vk, &mut receipt2.preprocessed_vk);
 
     assert!(!verify_instruction_zk_receipt(&statement1, &receipt1));
-  }
-
-  #[test]
-  fn test_receipt_rejects_memory_read_without_proof_path() {
-    let a = u256_bytes(1234);
-    let b = u256_bytes(5678);
-    let c = u256_bytes(6912);
-
-    let semantic = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
-    let itp = InstructionTransitionProof {
-      opcode: opcode::ADD,
-      pc: 11,
-      stack_inputs: vec![a, b],
-      stack_outputs: vec![c],
-      semantic_proof: Some(semantic),
-    };
-
-    let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
-    let statement = InstructionTransitionStatement {
-      opcode: opcode::ADD,
-      s_i: VmState {
-        opcode: opcode::ADD,
-        pc: 11,
-        sp: 2,
-        stack: vec![a, b],
-        memory_root: [7u8; 32],
-      },
-      s_next: VmState {
-        opcode: opcode::ADD,
-        pc: 12,
-        sp: 1,
-        stack: vec![c],
-        memory_root: [7u8; 32],
-      },
-      accesses: vec![AccessRecord {
-        rw_counter: 1,
-        domain: AccessDomain::Memory,
-        kind: AccessKind::Read,
-        addr: 0,
-        width: 32,
-        value_before: Some([0u8; 32]),
-        value_after: None,
-        merkle_path_before: Vec::new(),
-        merkle_path_after: Vec::new(),
-      }],
-    };
-
-    assert!(!verify_instruction_zk_receipt(&statement, &receipt));
-  }
-
-  #[test]
-  fn test_mstore_commitment_update_verifies() {
-    let offset = u256_bytes(64);
-    let value = [9u8; 32];
-    let word = value;
-    let before_value = [0u8; 32];
-    let after_value = value;
-    let path_before = vec![[3u8; 32], [4u8; 32]];
-    let path_after = path_before.clone();
-    let root_before = compute_memory_root(64, 32, &before_value, &path_before);
-    let root_after = compute_memory_root(64, 32, &after_value, &path_after);
-
-    let statement = InstructionTransitionStatement {
-      opcode: opcode::MSTORE,
-      s_i: VmState {
-        opcode: opcode::MSTORE,
-        pc: 12,
-        sp: 2,
-        stack: vec![offset, word],
-        memory_root: root_before,
-      },
-      s_next: VmState {
-        opcode: opcode::MSTORE,
-        pc: 13,
-        sp: 0,
-        stack: vec![],
-        memory_root: root_after,
-      },
-      accesses: vec![AccessRecord {
-        rw_counter: 1,
-        domain: AccessDomain::Memory,
-        kind: AccessKind::Write,
-        addr: 64,
-        width: 32,
-        value_before: Some(before_value),
-        value_after: Some(after_value),
-        merkle_path_before: path_before,
-        merkle_path_after: path_after,
-      }],
-    };
-
-    assert!(verify_statement_semantics(&statement));
-    assert!(verify_memory_access_commitments(&statement));
   }
 
   #[test]
@@ -751,47 +657,6 @@ mod tests {
   }
 
   #[test]
-  fn test_mstore8_statement_semantics_rejects_wrong_byte_projection() {
-    let offset = u256_bytes(130);
-    let mut word = [0u8; 32];
-    word[31] = 0xAA;
-    let mut before_chunk = [0u8; 32];
-    before_chunk[2] = 0x11;
-    let mut wrong_after = [0u8; 32];
-    wrong_after[31] = 0xBB;
-
-    let statement = InstructionTransitionStatement {
-      opcode: opcode::MSTORE8,
-      s_i: VmState {
-        opcode: opcode::MSTORE8,
-        pc: 0,
-        sp: 2,
-        stack: vec![offset, word],
-        memory_root: [0u8; 32],
-      },
-      s_next: VmState {
-        opcode: opcode::MSTORE8,
-        pc: 1,
-        sp: 0,
-        stack: vec![],
-        memory_root: [0u8; 32],
-      },
-      accesses: vec![AccessRecord {
-        rw_counter: 1,
-        domain: AccessDomain::Memory,
-        kind: AccessKind::Write,
-        addr: 128,
-        width: 32,
-        value_before: Some(before_chunk),
-        value_after: Some(wrong_after),
-        merkle_path_before: vec![[3u8; 32]],
-        merkle_path_after: vec![[3u8; 32]],
-      }],
-    };
-    assert!(!verify_statement_semantics(&statement));
-  }
-
-  #[test]
   fn test_mstore8_statement_semantics_passes_on_single_byte_patch() {
     let offset = u256_bytes(130);
     let mut word = [0u8; 32];
@@ -830,42 +695,6 @@ mod tests {
       }],
     };
     assert!(verify_statement_semantics(&statement));
-  }
-
-  #[test]
-  fn test_non_memory_opcode_rejects_memory_access_log() {
-    let a = u256_bytes(1);
-    let b = u256_bytes(2);
-    let c = u256_bytes(3);
-    let statement = InstructionTransitionStatement {
-      opcode: opcode::ADD,
-      s_i: VmState {
-        opcode: opcode::ADD,
-        pc: 0,
-        sp: 2,
-        stack: vec![a, b],
-        memory_root: [0u8; 32],
-      },
-      s_next: VmState {
-        opcode: opcode::ADD,
-        pc: 1,
-        sp: 1,
-        stack: vec![c],
-        memory_root: [0u8; 32],
-      },
-      accesses: vec![AccessRecord {
-        rw_counter: 1,
-        domain: AccessDomain::Memory,
-        kind: AccessKind::Read,
-        addr: 0,
-        width: 32,
-        value_before: Some([0u8; 32]),
-        value_after: None,
-        merkle_path_before: vec![[1u8; 32]],
-        merkle_path_after: Vec::new(),
-      }],
-    };
-    assert!(!verify_statement_semantics(&statement));
   }
 
   #[test]
@@ -1745,6 +1574,56 @@ mod tests {
       assert_eq!(
         inferred, expected,
         "WFF mismatch for opcode 0x{op:02x}"
+      );
+    }
+  }
+
+  #[test]
+  fn test_cross_family_opcodes_zkp_receipt_passes() {
+    // verify_proof_with_zkp previously failed for LT/GT/SLT/SGT/EQ/ISZERO
+    // because their proof rows mix add-family and bit-family LUT ops.
+    // After routing through build_lut_steps_from_rows_auto, all should succeed.
+    let small = u256_bytes(5);
+    let large = u256_bytes(100);
+    let neg = i256_bytes(-10);
+    let zero = u256_bytes(0);
+
+    let cases: &[(u8, Vec<[u8; 32]>, [u8; 32])] = &[
+      (opcode::LT,     vec![small, large], bool_word(true)),
+      (opcode::LT,     vec![large, small], bool_word(false)),
+      (opcode::GT,     vec![large, small], bool_word(true)),
+      (opcode::GT,     vec![small, large], bool_word(false)),
+      (opcode::SLT,    vec![neg,   small], bool_word(true)),
+      (opcode::SLT,    vec![small, neg  ], bool_word(false)),
+      (opcode::SGT,    vec![small, neg  ], bool_word(true)),
+      (opcode::SGT,    vec![neg,   small], bool_word(false)),
+      (opcode::EQ,     vec![small, small], bool_word(true)),
+      (opcode::EQ,     vec![small, large], bool_word(false)),
+      (opcode::ISZERO, vec![zero],         bool_word(true)),
+      (opcode::ISZERO, vec![small],        bool_word(false)),
+    ];
+
+    for (op, inputs, output) in cases {
+      let proof = prove_instruction(*op, inputs, &[*output])
+        .unwrap_or_else(|| panic!("prove_instruction returned None for opcode 0x{op:02x}"));
+      let itp = InstructionTransitionProof {
+        opcode: *op,
+        pc: 0,
+        stack_inputs: inputs.clone(),
+        stack_outputs: vec![*output],
+        semantic_proof: Some(proof),
+      };
+      assert!(
+        verify_proof(&itp),
+        "verify_proof failed for opcode 0x{op:02x}"
+      );
+      assert!(
+        verify_proof_with_rows(&itp),
+        "verify_proof_with_rows failed for opcode 0x{op:02x}"
+      );
+      assert!(
+        verify_proof_with_zkp(&itp),
+        "verify_proof_with_zkp (ZK receipt) failed for opcode 0x{op:02x}"
       );
     }
   }

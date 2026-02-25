@@ -1,7 +1,8 @@
 use crate::transition::{
   InstructionTransitionProof, InstructionTransitionStatement, TransactionProof, VmState,
   opcode_input_count, opcode_output_count, prove_instruction,
-  prove_instruction_zk_receipts_parallel, verify_instruction_zk_receipt, verify_proof,
+  prove_batch_transaction_zk_receipt, prove_instruction_zk_receipts_parallel,
+  verify_batch_transaction_zk_receipt, verify_instruction_zk_receipt, verify_proof,
   verify_proof_with_rows,
 };
 use revm::bytecode::opcode;
@@ -345,6 +346,101 @@ pub fn execute_bytecode_and_prove(
 ) -> Result<TransactionProof, String> {
   let proof = execute_bytecode_trace(bytecode, data, value)?;
   verify_transaction_proof(&proof)?;
+  Ok(proof)
+}
+
+// ============================================================
+// Phase 6: Batch ZKP path
+//
+// Unlike the parallel path (N × individual receipt), the batch path proves
+// all arithmetic opcodes in a single LUT STARK call:
+//
+//   flush_and_verify_batch_zkp_single():
+//     all N steps → build_batch_manifest → setup_batch_prep
+//                 → prove_batch_lut_with_prep (1 STARK)
+//                 → verify_batch_transaction_zk_receipt
+//
+// batch_capacity still caps how many instructions share one STARK invocation
+// (useful to bound trace height and proof size).
+// ============================================================
+
+fn flush_and_verify_batch_zkp_single(
+  statements: &mut Vec<InstructionTransitionStatement>,
+  steps: &mut Vec<InstructionTransitionProof>,
+) -> Result<(), String> {
+  if steps.is_empty() {
+    return Ok(());
+  }
+
+  let proving_steps = std::mem::take(steps);
+  let batch_statements = std::mem::take(statements);
+
+  let receipt = prove_batch_transaction_zk_receipt(&proving_steps)?;
+  if !verify_batch_transaction_zk_receipt(&batch_statements, &receipt) {
+    return Err("batch ZKP receipt verification failed".to_string());
+  }
+
+  Ok(())
+}
+
+fn verify_transaction_proof_with_batch_zkp(
+  proof: &TransactionProof,
+  batch_capacity: usize,
+) -> Result<(), String> {
+  verify_transaction_proof(proof)?;
+
+  let cap = batch_capacity.max(1);
+  let mut statements: Vec<InstructionTransitionStatement> = Vec::with_capacity(cap);
+  let mut steps: Vec<InstructionTransitionProof> = Vec::with_capacity(cap);
+
+  for step in &proof.steps {
+    if step.semantic_proof.is_some() && supports_zkp_receipt(step.opcode) {
+      statements.push(statement_from_step(step));
+      steps.push(step.clone());
+      if steps.len() >= cap {
+        flush_and_verify_batch_zkp_single(&mut statements, &mut steps)?;
+      }
+    }
+  }
+
+  flush_and_verify_batch_zkp_single(&mut statements, &mut steps)
+}
+
+/// Execute provided EVM bytecode and verify ZKP receipts using the batch path.
+///
+/// All arithmetic opcodes within each batch window share a single LUT STARK
+/// proof, significantly reducing total proving overhead compared to the
+/// per-instruction parallel path.
+///
+/// `batch_capacity` controls the maximum number of instructions per STARK
+/// call; `0` or `DEFAULT_ZKP_BATCH_CAPACITY` is a sensible default.
+pub fn execute_bytecode_and_prove_with_batch_zkp(
+  bytecode: Bytes,
+  data: Bytes,
+  value: U256,
+) -> Result<TransactionProof, String> {
+  execute_bytecode_and_prove_with_batch_zkp_batched(
+    bytecode,
+    data,
+    value,
+    DEFAULT_ZKP_BATCH_CAPACITY,
+  )
+}
+
+/// Execute provided EVM bytecode and verify ZKP receipts using the batch path
+/// with a custom `batch_capacity`.
+///
+/// Steps with semantic proofs are accumulated and flushed to
+/// [`prove_batch_transaction_zk_receipt`] / [`verify_batch_transaction_zk_receipt`]
+/// when `batch_capacity` is reached or at the end of the transaction.
+pub fn execute_bytecode_and_prove_with_batch_zkp_batched(
+  bytecode: Bytes,
+  data: Bytes,
+  value: U256,
+  batch_capacity: usize,
+) -> Result<TransactionProof, String> {
+  let proof = execute_bytecode_trace(bytecode, data, value)?;
+  verify_transaction_proof_with_batch_zkp(&proof, batch_capacity)?;
   Ok(proof)
 }
 

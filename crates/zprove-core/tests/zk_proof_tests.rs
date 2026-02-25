@@ -1,89 +1,6 @@
 // moved from src/zk_proof.rs
 
 #[cfg(test)]
-mod memory_bus_tests {
-  use p3_matrix::Matrix;
-  use zprove_core::memory_proof::{CqMemoryEvent, CqRw};
-  use zprove_core::zk_proof::{
-    build_memory_bus_steps_from_events, build_memory_bus_trace_from_steps,
-    prove_and_verify_memory_bus_stark_from_events,
-  };
-
-  #[test]
-  fn test_memory_bus_steps_sort_and_same_cell_flag() {
-    let events = vec![
-      CqMemoryEvent {
-        addr: 10,
-        step: 2,
-        value: [2u8; 32],
-        rw: CqRw::Write,
-        width: 32,
-      },
-      CqMemoryEvent {
-        addr: 10,
-        step: 2,
-        value: [2u8; 32],
-        rw: CqRw::Read,
-        width: 32,
-      },
-      CqMemoryEvent {
-        addr: 11,
-        step: 1,
-        value: [1u8; 32],
-        rw: CqRw::Read,
-        width: 32,
-      },
-    ];
-
-    let steps = build_memory_bus_steps_from_events(&events).expect("step build should succeed");
-    assert_eq!(steps.len(), 3);
-    assert_eq!(steps[0].addr, 10);
-    assert_eq!(steps[0].rw, 0);
-    assert_eq!(steps[0].same_cell_next, 1);
-    assert_eq!(steps[1].addr, 10);
-    assert_eq!(steps[1].rw, 1);
-    assert_eq!(steps[1].same_cell_next, 0);
-  }
-
-  #[test]
-  fn test_memory_bus_trace_builds() {
-    let events = vec![CqMemoryEvent {
-      addr: 5,
-      step: 1,
-      value: [0xAB; 32],
-      rw: CqRw::Read,
-      width: 32,
-    }];
-
-    let steps = build_memory_bus_steps_from_events(&events).expect("step build should succeed");
-    let trace = build_memory_bus_trace_from_steps(&steps).expect("trace build should succeed");
-    assert!(trace.height() >= 4);
-  }
-
-  #[test]
-  fn test_memory_bus_stark_roundtrip_from_events() {
-    let events = vec![
-      CqMemoryEvent {
-        addr: 64,
-        step: 9,
-        value: [0x11; 32],
-        rw: CqRw::Read,
-        width: 32,
-      },
-      CqMemoryEvent {
-        addr: 64,
-        step: 9,
-        value: [0x11; 32],
-        rw: CqRw::Write,
-        width: 32,
-      },
-    ];
-
-    assert!(prove_and_verify_memory_bus_stark_from_events(&events));
-  }
-}
-
-#[cfg(test)]
 mod tests {
   use zprove_core::semantic_proof::{
     NUM_PROOF_COLS, OP_BYTE_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ, Proof, ProofRow, RET_WFF_EQ,
@@ -613,5 +530,433 @@ mod tests {
       &proof,
       &public_wff
     ));
+  }
+}
+
+// ============================================================
+// Phase 1: Shared preprocessed rows infrastructure tests
+// ============================================================
+
+#[cfg(test)]
+mod preprocessed_rows_tests {
+  use zprove_core::semantic_proof::{compile_proof, ProofRow};
+  use zprove_core::zk_proof::{
+    build_proof_rows_preprocessed_matrix, setup_proof_rows_preprocessed,
+    prove_stack_ir_with_prep, verify_stack_ir_with_prep, stack_ir_scaffold_public_values,
+    NUM_PREP_COLS, PREP_COL_OP, PREP_COL_SCALAR0, PREP_COL_SCALAR1, PREP_COL_VALUE,
+  };
+  use p3_matrix::Matrix;
+
+  // ---------------------------------------------------------------------------
+  // Helper: compile a small `Proof` (ByteAddEq: 5 + 3 = 8) into Vec<ProofRow>.
+  // ---------------------------------------------------------------------------
+  fn add_proof_rows() -> Vec<ProofRow> {
+    use zprove_core::semantic_proof::Proof;
+    // ByteAddEq(a, b, carry_out): 5 + 3 = 8, no carry out.
+    compile_proof(&Proof::ByteAddEq(5, 3, false))
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 1: matrix dimensions
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_preprocessed_matrix_dimensions() {
+    let rows = add_proof_rows();
+    let matrix = build_proof_rows_preprocessed_matrix(&rows, &stack_ir_scaffold_public_values());
+
+    // Height must be a power of two and at least 4.
+    let h = matrix.height();
+    assert!(h >= 4, "height must be >= 4");
+    assert!(h.is_power_of_two(), "height must be power of two");
+    assert!(h >= rows.len(), "height must cover all rows");
+
+    assert_eq!(matrix.width(), NUM_PREP_COLS, "width must equal NUM_PREP_COLS");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 2: real row values are preserved in the matrix.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_preprocessed_matrix_row_values() {
+    let rows = add_proof_rows();
+    let matrix = build_proof_rows_preprocessed_matrix(&rows, &stack_ir_scaffold_public_values());
+
+    for (i, row) in rows.iter().enumerate() {
+      use p3_mersenne_31::Mersenne31;
+      use p3_field::PrimeCharacteristicRing;
+      let row_data = matrix.row_slice(i).unwrap();
+      assert_eq!(
+        row_data[PREP_COL_OP],
+        Mersenne31::from_u32(row.op),
+        "row {i}: op mismatch"
+      );
+      assert_eq!(
+        row_data[PREP_COL_SCALAR0],
+        Mersenne31::from_u32(row.scalar0),
+        "row {i}: scalar0 mismatch"
+      );
+      assert_eq!(
+        row_data[PREP_COL_SCALAR1],
+        Mersenne31::from_u32(row.scalar1),
+        "row {i}: scalar1 mismatch"
+      );
+      assert_eq!(
+        row_data[PREP_COL_VALUE],
+        Mersenne31::from_u32(row.value),
+        "row {i}: value mismatch"
+      );
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 3: setup_proof_rows_preprocessed returns without error.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_setup_proof_rows_preprocessed_ok() {
+    let rows = add_proof_rows();
+    let result = setup_proof_rows_preprocessed(&rows, &stack_ir_scaffold_public_values());
+    assert!(result.is_ok(), "setup must succeed: {:?}", result.err());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 4: prove + verify round-trip with shared preprocessed commitment.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_prove_verify_stack_ir_with_prep_roundtrip() {
+    let rows = add_proof_rows();
+
+    // Build the public values expected by StackIrAir (tag + zeros for scaffold).
+    let pv = stack_ir_scaffold_public_values();
+
+    // Commit the compiled rows as a preprocessed trace.
+    let (prep_data, prep_vk) =
+      setup_proof_rows_preprocessed(&rows, &pv).expect("setup must succeed");
+
+    // Prove.
+    let proof =
+      prove_stack_ir_with_prep(&rows, &prep_data, &pv).expect("prove must succeed");
+
+    // Verify.
+    let result = verify_stack_ir_with_prep(&proof, &prep_vk, &pv);
+    assert!(result.is_ok(), "verify must succeed: {:?}", result.err());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 5: VK from a *different* row set must fail verification.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_verify_fails_with_wrong_prep_vk() {
+    let rows = add_proof_rows();
+
+    // Real commitment.
+    let pv = stack_ir_scaffold_public_values();
+    let (prep_data, _real_vk) =
+      setup_proof_rows_preprocessed(&rows, &pv).expect("setup must succeed");
+
+    // Manufacture a *different* row set (just one extra row).
+    let mut other_rows = rows.clone();
+    // Mutate the op of the first row to produce a different commitment.
+    other_rows[0].op = other_rows[0].op.wrapping_add(1);
+    let (_other_data, other_vk) =
+      setup_proof_rows_preprocessed(&other_rows, &pv).expect("other setup must succeed");
+
+    let pv = stack_ir_scaffold_public_values();
+    let proof = prove_stack_ir_with_prep(&rows, &prep_data, &pv).expect("prove must succeed");
+
+    // Verifying with the wrong VK should fail.
+    let result = verify_stack_ir_with_prep(&proof, &other_vk, &pv);
+    assert!(
+      result.is_err(),
+      "verification with wrong VK must fail, but succeeded"
+    );
+  }
+}
+
+// ============================================================
+// Phase 3: LUT preprocessed binding tests
+// ============================================================
+
+#[cfg(test)]
+mod lut_prep_tests {
+  use zprove_core::semantic_proof::{compile_proof, ProofRow};
+  use zprove_core::zk_proof::{
+    build_lut_trace_from_proof_rows, setup_proof_rows_preprocessed,
+    prove_lut_with_prep, verify_lut_with_prep, lut_scaffold_public_values,
+    prove_stack_ir_with_prep, verify_stack_ir_with_prep, stack_ir_scaffold_public_values,
+    NUM_LUT_COLS,
+  };
+  use p3_matrix::Matrix;
+
+  // ---------------------------------------------------------------------------
+  // Helper: ByteAddEq(5, 3, false) compiled rows.
+  // ---------------------------------------------------------------------------
+  fn add_rows() -> Vec<ProofRow> {
+    use zprove_core::semantic_proof::Proof;
+    compile_proof(&Proof::ByteAddEq(5, 3, false))
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 1: build_lut_trace_from_proof_rows dimensions match preprocessed.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_lut_trace_from_proof_rows_dimensions() {
+    let rows = add_rows();
+    let trace = build_lut_trace_from_proof_rows(&rows).expect("build must succeed");
+    let expected_height = rows.len().max(4).next_power_of_two();
+    assert_eq!(trace.height(), expected_height, "height must match preprocessed");
+    assert_eq!(trace.width(), NUM_LUT_COLS, "width must equal NUM_LUT_COLS");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 2: Prove + verify LUT with shared preprocessed commitment.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_prove_verify_lut_with_prep_roundtrip() {
+    let rows = add_rows();
+    let pv = lut_scaffold_public_values();
+    let (prep_data, prep_vk) =
+      setup_proof_rows_preprocessed(&rows, &pv).expect("setup must succeed");
+
+    let proof = prove_lut_with_prep(&rows, &prep_data, &pv).expect("prove must succeed");
+    let result = verify_lut_with_prep(&proof, &prep_vk, &pv);
+    assert!(result.is_ok(), "verify must succeed: {:?}", result.err());
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 3: Wrong VK fails verification.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_lut_verify_fails_with_wrong_prep_vk() {
+    let rows = add_rows();
+    let pv = lut_scaffold_public_values();
+    let (prep_data, _vk) =
+      setup_proof_rows_preprocessed(&rows, &pv).expect("setup must succeed");
+
+    // Different commitment: mutate first row's op.
+    let mut other_rows = rows.clone();
+    other_rows[0].op = other_rows[0].op.wrapping_add(1);
+    let (_, other_vk) =
+      setup_proof_rows_preprocessed(&other_rows, &pv).expect("other setup must succeed");
+
+    let pv = lut_scaffold_public_values();
+    let proof = prove_lut_with_prep(&rows, &prep_data, &pv).expect("prove must succeed");
+    let result = verify_lut_with_prep(&proof, &other_vk, &pv);
+    assert!(result.is_err(), "verify with wrong VK must fail");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 4: StackIR and LUT proofs share the same prep VK (same commitment).
+  //
+  // This is the core Phase 3 security property: a single setup_proof_rows call
+  // produces one VK, and both the StackIR and LUT proofs are generated — and
+  // verify — against that same VK.  A verifier checking both proofs against
+  // the *same* VK confirms they were generated from identical compiled rows.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_stack_ir_and_lut_share_same_prep_vk() {
+    let rows = add_rows();
+    let stack_pv = stack_ir_scaffold_public_values();
+    let lut_pv = lut_scaffold_public_values();
+    let (prep_data, prep_vk) =
+      setup_proof_rows_preprocessed(&rows, &stack_pv).expect("setup must succeed");
+
+    let stack_proof =
+      prove_stack_ir_with_prep(&rows, &prep_data, &stack_pv).expect("stack prove must succeed");
+    let lut_proof =
+      prove_lut_with_prep(&rows, &prep_data, &lut_pv).expect("lut prove must succeed");
+
+    // Both proofs must verify against the *same* VK.
+    assert!(
+      verify_stack_ir_with_prep(&stack_proof, &prep_vk, &stack_pv).is_ok(),
+      "StackIR verify must succeed"
+    );
+    assert!(
+      verify_lut_with_prep(&lut_proof, &prep_vk, &lut_pv).is_ok(),
+      "LUT verify must succeed"
+    );
+  }
+}
+
+// =============================================================================
+// Batch LUT STARK tests (Phase 1-5)
+// =============================================================================
+mod batch_lut_tests {
+  use revm::bytecode::opcode;
+  use zprove_core::semantic_proof::compile_proof;
+  use zprove_core::transition::{
+    InstructionTransitionProof, InstructionTransitionStatement, VmState,
+    build_batch_manifest, prove_instruction, prove_batch_transaction_zk_receipt,
+    verify_batch_transaction_zk_receipt,
+  };
+  use zprove_core::zk_proof::compute_batch_manifest_digest;
+
+  fn a256(lo: u128) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    b[16..].copy_from_slice(&lo.to_be_bytes());
+    b
+  }
+
+  fn make_itp(op: u8, inputs: &[[u8; 32]], output: [u8; 32]) -> InstructionTransitionProof {
+    let proof = prove_instruction(op, inputs, &[output])
+      .unwrap_or_else(|| panic!("prove_instruction 0x{op:02x}: unsupported opcode"));
+    InstructionTransitionProof {
+      opcode: op,
+      pc: 0,
+      stack_inputs: inputs.to_vec(),
+      stack_outputs: vec![output],
+      semantic_proof: Some(proof),
+    }
+  }
+
+  fn make_stmt(
+    op: u8,
+    inputs: &[[u8; 32]],
+    output: [u8; 32],
+  ) -> InstructionTransitionStatement {
+    InstructionTransitionStatement {
+      opcode: op,
+      s_i: VmState {
+        opcode: op,
+        pc: 0,
+        sp: inputs.len(),
+        stack: inputs.to_vec(),
+        memory_root: [0u8; 32],
+      },
+      s_next: VmState {
+        opcode: op,
+        pc: 1,
+        sp: 1,
+        stack: vec![output],
+        memory_root: [0u8; 32],
+      },
+      accesses: Vec::new(),
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 1: same inputs produce the same batch manifest digest (determinism).
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_batch_manifest_digest_is_deterministic() {
+    let add_proof = prove_instruction(opcode::ADD, &[a256(5), a256(3)], &[a256(8)])
+      .expect("prove ADD");
+    let and_proof = prove_instruction(opcode::AND, &[a256(0xF0), a256(0x0F)], &[a256(0)])
+      .expect("prove AND");
+
+    let items = vec![(opcode::ADD, &add_proof), (opcode::AND, &and_proof)];
+    let manifest_a = build_batch_manifest(&items).expect("manifest_a");
+    let manifest_b = build_batch_manifest(&items).expect("manifest_b");
+
+    let digest_a = compute_batch_manifest_digest(&manifest_a.entries);
+    let digest_b = compute_batch_manifest_digest(&manifest_b.entries);
+    assert_eq!(digest_a, digest_b, "same inputs must yield the same digest");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 2: row boundaries are contiguous and cover every row.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_batch_manifest_row_boundaries_are_contiguous() {
+    let specs: &[(u8, u128, u128, u128)] = &[
+      (opcode::ADD, 7, 2, 9),
+      (opcode::AND, 0xFF, 0x0F, 0x0F),
+    ];
+    let proofs: Vec<(u8, _)> = specs
+      .iter()
+      .map(|(op, a, b, out)| {
+        let p = prove_instruction(*op, &[a256(*a), a256(*b)], &[a256(*out)])
+          .unwrap_or_else(|| panic!("prove 0x{op:02x}: unsupported"));
+        (*op, p)
+      })
+      .collect();
+
+    let items: Vec<_> = proofs.iter().map(|(op, p)| (*op, p)).collect();
+    let manifest = build_batch_manifest(&items).expect("manifest");
+    let total = manifest.all_rows.len();
+
+    for (i, entry) in manifest.entries.iter().enumerate() {
+      let next_start = if i + 1 < manifest.entries.len() {
+        manifest.entries[i + 1].row_start
+      } else {
+        total
+      };
+      assert!(entry.row_count > 0, "entry {i} must have at least one row");
+      assert_eq!(
+        entry.row_start + entry.row_count,
+        next_start,
+        "entry {i} row range must be contiguous"
+      );
+    }
+    // Verify compile_proof row counts match the manifest.
+    for (i, ((_op, proof), entry)) in proofs.iter().zip(manifest.entries.iter()).enumerate() {
+      let rows = compile_proof(proof);
+      assert_eq!(rows.len(), entry.row_count, "entry {i} row_count must equal compile_proof len");
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 3: prove + verify round-trip for a 2-instruction batch (ADD + AND).
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_batch_lut_prove_verify_roundtrip() {
+    let add_in = [a256(10), a256(20)];
+    let and_in = [a256(0xFF), a256(0x0F)];
+
+    let itps = vec![
+      make_itp(opcode::ADD, &add_in, a256(30)),
+      make_itp(opcode::AND, &and_in, a256(0x0F)),
+    ];
+    let stmts = vec![
+      make_stmt(opcode::ADD, &add_in, a256(30)),
+      make_stmt(opcode::AND, &and_in, a256(0x0F)),
+    ];
+
+    let receipt = prove_batch_transaction_zk_receipt(&itps)
+      .expect("prove_batch_transaction_zk_receipt must succeed");
+
+    assert_eq!(
+      receipt.manifest.entries.len(),
+      2,
+      "manifest must have exactly 2 entries"
+    );
+    assert!(
+      verify_batch_transaction_zk_receipt(&stmts, &receipt),
+      "verify_batch_transaction_zk_receipt must return true"
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 4: verify rejects when statement count doesn't match manifest.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_batch_verify_rejects_wrong_statement_count() {
+    let ins = [a256(3), a256(4)];
+    let itp = make_itp(opcode::ADD, &ins, a256(7));
+    let receipt =
+      prove_batch_transaction_zk_receipt(&[itp]).expect("prove must succeed");
+
+    // Empty statements — count mismatch ⇒ false.
+    assert!(
+      !verify_batch_transaction_zk_receipt(&[], &receipt),
+      "mismatched statement count must fail"
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Test 5: verify rejects when opcode in statement doesn't match manifest.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_batch_verify_rejects_opcode_mismatch() {
+    let ins = [a256(5), a256(6)];
+    let itp = make_itp(opcode::ADD, &ins, a256(11));
+    let receipt =
+      prove_batch_transaction_zk_receipt(&[itp]).expect("prove must succeed");
+
+    // Statement claims AND but manifest has ADD.
+    let bad_stmt = make_stmt(opcode::AND, &[a256(5), a256(6)], a256(4));
+    assert!(
+      !verify_batch_transaction_zk_receipt(&[bad_stmt], &receipt),
+      "opcode mismatch must fail verification"
+    );
   }
 }
