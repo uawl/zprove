@@ -3,8 +3,7 @@ use revm::{
   primitives::{Bytes, U256},
 };
 use zprove_core::execute::{
-  execute_bytecode_and_prove, execute_bytecode_and_prove_with_zkp_parallel,
-  execute_bytecode_trace,
+  execute_bytecode_and_prove, execute_bytecode_and_prove_with_zkp_parallel, execute_bytecode_trace,
 };
 
 fn u256_bytes_u128(v: u128) -> [u8; 32] {
@@ -98,13 +97,9 @@ fn executes_add_program_with_revm_and_parallel_zkp_verify() {
     opcode::STOP,
   ]);
 
-  let proof = execute_bytecode_and_prove_with_zkp_parallel(
-    bytecode,
-    Bytes::default(),
-    U256::ZERO,
-    0,
-  )
-  .expect("revm execution and parallel zkp verification should succeed");
+  let proof =
+    execute_bytecode_and_prove_with_zkp_parallel(bytecode, Bytes::default(), U256::ZERO, 0)
+      .expect("revm execution and parallel zkp verification should succeed");
 
   let add_step = find_step_by_opcode(&proof.steps, opcode::ADD).expect("ADD step should exist");
   assert_eq!(add_step.stack_outputs.len(), 1);

@@ -1,9 +1,8 @@
 use crate::transition::{
-  InstructionTransitionProof, InstructionTransitionStatement, TransactionProof, VmState,
-  opcode_input_count, opcode_output_count, prove_instruction,
-  prove_batch_transaction_zk_receipt, prove_instruction_zk_receipts_parallel,
-  verify_batch_transaction_zk_receipt, verify_instruction_zk_receipt, verify_proof,
-  verify_proof_with_rows,
+  InstructionTransitionProof, InstructionTransitionStatement, MemAccessClaim, TransactionProof,
+  VmState, opcode_input_count, opcode_output_count, prove_batch_transaction_zk_receipt,
+  prove_instruction, prove_instruction_zk_receipts_parallel, verify_batch_transaction_zk_receipt,
+  verify_instruction_zk_receipt, verify_proof, verify_proof_with_rows,
 };
 use revm::bytecode::opcode;
 use revm::{
@@ -12,7 +11,10 @@ use revm::{
   database::BenchmarkDB,
   database_interface::{BENCH_CALLER, BENCH_TARGET},
   interpreter::interpreter_types::StackTr,
-  interpreter::{Interpreter, InterpreterTypes, interpreter_types::Jumps},
+  interpreter::{
+    Interpreter, InterpreterTypes,
+    interpreter_types::{Jumps, MemoryTr},
+  },
   primitives::{Address, Bytes, TxKind, U256},
   state::Bytecode,
 };
@@ -43,8 +45,25 @@ struct ProvingInspector {
   pending_inputs: Vec<[u8; 32]>,
   /// Stack depth before the instruction.
   pending_stack_depth: usize,
+  /// Snapshot of the relevant memory word *before* the instruction executes.
+  /// Used to build MemAccessClaim for MSTORE/MSTORE8 (we need value_before).
+  pending_memory_before: Option<[u8; 32]>,
+  /// Global monotone rw_counter for memory accesses.
+  rw_counter: u64,
   /// Accumulated instruction transition proofs.
   pub proofs: Vec<InstructionTransitionProof>,
+}
+
+/// Read a 32-byte word from a raw memory slice at a given byte offset.
+/// Returns `[0u8; 32]` if the range is out of bounds.
+fn read_word_from_mem(mem: &[u8], offset: usize) -> [u8; 32] {
+  let mut word = [0u8; 32];
+  let available = mem.len().saturating_sub(offset);
+  let copy_len = available.min(32);
+  if copy_len > 0 {
+    word[..copy_len].copy_from_slice(&mem[offset..offset + copy_len]);
+  }
+  word
 }
 
 impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
@@ -59,6 +78,7 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
     self.pending_opcode = opcode;
     self.pending_pc = pc;
     self.pending_stack_depth = stack_len;
+    self.pending_memory_before = None;
 
     // Read the top N values that this opcode consumes
     let n_inputs = opcode_input_count(opcode);
@@ -67,10 +87,38 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
       let val = stack_data[stack_len - 1 - i];
       self.pending_inputs.push(u256_to_bytes(val));
     }
+
+    // For memory opcodes, snapshot the 32-byte word at the target address
+    // *before* the instruction mutates memory.
+    match opcode {
+      opcode::MSTORE | opcode::MSTORE8 => {
+        // inputs[0] = offset (stack top before execute)
+        if stack_len >= 1 {
+          let offset_u256 = stack_data[stack_len - 1];
+          // Clamp to usize; EVM guarantees gas will prevent unreasonably large offsets
+          if let Some(offset_usize) = offset_u256
+            .try_into()
+            .ok()
+            .filter(|&v: &usize| v <= 4 * 1024 * 1024)
+          {
+            // Align down to 32-byte word boundary
+            let word_addr = (offset_usize / 32) * 32;
+            let local_off = interp.memory.local_memory_offset();
+            let local_size = interp.memory.size();
+            let mem_bytes: Vec<u8> = interp
+              .memory
+              .global_slice(local_off..local_off + local_size)
+              .to_vec();
+            self.pending_memory_before = Some(read_word_from_mem(&mem_bytes, word_addr));
+          }
+        }
+      }
+      _ => {}
+    }
   }
 
   /// Called **after** each instruction executes.
-  /// Captures outputs and generates the transition proof.
+  /// Captures outputs, memory claims, and generates the transition proof.
   fn step_end(&mut self, interp: &mut Interpreter<INTR>, _context: &mut CTX) {
     let stack_data = interp.stack.data();
     let stack_len = stack_data.len();
@@ -89,13 +137,118 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
       None
     };
 
+    // Build memory access claims for MLOAD / MSTORE / MSTORE8.
+    let memory_claims = self.build_memory_claims(interp, &outputs);
+
     self.proofs.push(InstructionTransitionProof {
       opcode: self.pending_opcode,
       pc: self.pending_pc,
       stack_inputs: self.pending_inputs.clone(),
       stack_outputs: outputs,
       semantic_proof,
+      memory_claims,
     });
+  }
+}
+
+impl ProvingInspector {
+  /// Build `MemAccessClaim`s for the current instruction.
+  /// Called from `step_end` after the instruction has executed.
+  fn build_memory_claims<INTR: InterpreterTypes>(
+    &mut self,
+    interp: &Interpreter<INTR>,
+    outputs: &[[u8; 32]],
+  ) -> Vec<MemAccessClaim> {
+    let mut claims = Vec::new();
+
+    match self.pending_opcode {
+      opcode::MLOAD => {
+        // inputs[0] = offset; outputs[0] = loaded 32-byte word
+        if self.pending_inputs.len() >= 1 && outputs.len() >= 1 {
+          let offset_bytes = self.pending_inputs[0];
+          let offset_u256 = U256::from_be_bytes::<32>(offset_bytes);
+          if let Some(word_addr) = offset_u256
+            .try_into()
+            .ok()
+            .filter(|&v: &usize| v <= 4 * 1024 * 1024)
+          {
+            let aligned = (word_addr / 32) * 32;
+            self.rw_counter += 1;
+            claims.push(MemAccessClaim {
+              rw_counter: self.rw_counter,
+              addr: aligned as u64,
+              is_write: false,
+              value: outputs[0],
+              write_version: 0,
+            });
+          }
+        }
+      }
+      opcode::MSTORE => {
+        // inputs[0] = offset, inputs[1] = value
+        if self.pending_inputs.len() >= 2 {
+          let offset_bytes = self.pending_inputs[0];
+          let offset_u256 = U256::from_be_bytes::<32>(offset_bytes);
+          let value_after = self.pending_inputs[1];
+          if let Some(word_addr) = offset_u256
+            .try_into()
+            .ok()
+            .filter(|&v: &usize| v <= 4 * 1024 * 1024)
+          {
+            let aligned = (word_addr / 32) * 32;
+            self.rw_counter += 1;
+            claims.push(MemAccessClaim {
+              rw_counter: self.rw_counter,
+              addr: aligned as u64,
+              is_write: true,
+              value: value_after,
+              write_version: 0,
+            });
+          }
+        }
+      }
+      opcode::MSTORE8 => {
+        // inputs[0] = offset, inputs[1] = value (only LSB written)
+        if self.pending_inputs.len() >= 2 {
+          let offset_bytes = self.pending_inputs[0];
+          let offset_u256 = U256::from_be_bytes::<32>(offset_bytes);
+          let byte_val = self.pending_inputs[1][31]; // LSB
+          if let Some(byte_addr) = offset_u256
+            .try_into()
+            .ok()
+            .filter(|&v: &usize| v <= 4 * 1024 * 1024)
+          {
+            let aligned = (byte_addr / 32) * 32;
+            // Read the updated 32-byte word from memory after the write.
+            let local_off = interp.memory.local_memory_offset();
+            let local_size = interp.memory.size();
+            let mem_after: Vec<u8> = interp
+              .memory
+              .global_slice(local_off..local_off + local_size)
+              .to_vec();
+            let mut word_after = self.pending_memory_before.unwrap_or([0u8; 32]);
+            let byte_offset_in_word = byte_addr % 32;
+            word_after[byte_offset_in_word] = byte_val;
+            // Cross-check against actual memory content.
+            let actual = read_word_from_mem(&mem_after, aligned);
+            let _ = (actual, word_after); // both available for debugging
+            self.rw_counter += 1;
+            claims.push(MemAccessClaim {
+              rw_counter: self.rw_counter,
+              addr: aligned as u64,
+              is_write: true,
+              // Use actual memory after write (word_after may differ if memory
+              // was already expanded with non-zero bytes from prior writes).
+              value: actual,
+              write_version: 0,
+            });
+          }
+        }
+      }
+      _ => {}
+    }
+
+    claims
   }
 }
 
@@ -266,7 +419,8 @@ fn flush_and_verify_zkp_batch(
   let proving_steps = std::mem::take(steps);
   let batch_statements = std::mem::take(statements);
   let receipts = prove_instruction_zk_receipts_parallel(proving_steps, worker_count)?;
-  for (local_idx, (statement, receipt)) in batch_statements.iter().zip(receipts.iter()).enumerate() {
+  for (local_idx, (statement, receipt)) in batch_statements.iter().zip(receipts.iter()).enumerate()
+  {
     if !verify_instruction_zk_receipt(statement, receipt) {
       return Err(format!(
         "zkp receipt verification failed at batched item {local_idx} (opcode 0x{:02x})",

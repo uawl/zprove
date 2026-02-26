@@ -2,27 +2,15 @@
 
 #[cfg(test)]
 mod tests {
+  use p3_matrix::Matrix;
   use zprove_core::semantic_proof::{
     NUM_PROOF_COLS, OP_BYTE_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ, Proof, ProofRow, RET_WFF_EQ,
     Term, compile_proof, infer_proof, prove_add, prove_mul, wff_add, wff_mul,
   };
   use zprove_core::zk_proof::*;
-  use p3_matrix::Matrix;
 
   fn tamper_first_mul_related_leaf(proof: &mut Proof) -> bool {
     match proof {
-      Proof::ByteMulLowEq(a, b) => {
-        *proof = Proof::ByteMulLowEq(*a ^ 1, *b);
-        true
-      }
-      Proof::ByteMulHighEq(a, b) => {
-        *proof = Proof::ByteMulHighEq(*a ^ 1, *b);
-        true
-      }
-      Proof::ByteAddEq(a, b, c) => {
-        *proof = Proof::ByteAddEq(*a, *b, !*c);
-        true
-      }
       Proof::U15MulEq(a, b) => {
         *proof = Proof::U15MulEq(*a ^ 1, *b);
         true
@@ -211,24 +199,6 @@ mod tests {
   }
 
   #[test]
-  fn test_build_lut_steps_from_rows_byte_add_eq_only() {
-    let proof = Proof::ByteAddEq(10, 20, true);
-    let rows = compile_proof(&proof);
-    let steps = build_lut_steps_from_rows(&rows).expect("lut steps should build");
-    assert_eq!(steps.len(), 1);
-    assert_eq!(steps[0].op, LutOpcode::ByteAddEq);
-    assert_eq!(steps[0].in0, 10);
-    assert_eq!(steps[0].in1, 20);
-    assert_eq!(steps[0].in2, 1);
-    assert_eq!(steps[0].out0, 31);
-    assert_eq!(steps[0].out1, 0);
-
-    let trace = build_lut_trace_from_steps(&steps).expect("lut trace should build");
-    assert_eq!(trace.width(), 6);
-    assert!(trace.height() >= 4);
-  }
-
-  #[test]
   fn test_build_lut_steps_rejects_structural_rows() {
     let proof = Proof::EqRefl(Term::Byte(7));
     let rows = compile_proof(&proof);
@@ -334,7 +304,7 @@ mod tests {
     assert_eq!(steps[1].sp_after, 1);
 
     let trace = build_stack_ir_trace_from_steps(&steps).expect("stack-ir trace should build");
-    assert_eq!(trace.width(), 10);
+    assert_eq!(trace.width(), zprove_core::zk_proof::NUM_STACK_IR_COLS);
     assert!(trace.height() >= 4);
   }
 
@@ -368,30 +338,6 @@ mod tests {
   }
 
   #[test]
-  fn test_lut_kernel_stark_byte_add_eq_roundtrip() {
-    let proof = Proof::ByteAddEq(100, 200, false);
-    let rows = compile_proof(&proof);
-    let steps = build_lut_steps_from_rows(&rows).expect("lut steps should build");
-    assert!(prove_and_verify_lut_kernel_stark_from_steps(&steps));
-  }
-
-  #[test]
-  fn test_lut_kernel_stark_byte_add_carry_eq_roundtrip() {
-    let proof = Proof::ByteAddCarryEq(200, 100, false);
-    let rows = compile_proof(&proof);
-    let steps = build_lut_steps_from_rows(&rows).expect("lut steps should build");
-    assert!(prove_and_verify_lut_kernel_stark_from_steps(&steps));
-  }
-
-  #[test]
-  fn test_lut_kernel_stark_supports_mul_ops() {
-    let proof = Proof::ByteMulLowEq(3, 7);
-    let rows = compile_proof(&proof);
-    let steps = build_lut_steps_from_rows(&rows).expect("lut steps should build");
-    assert!(prove_and_verify_lut_kernel_stark_from_steps(&steps));
-  }
-
-  #[test]
   fn test_build_lut_trace_accepts_bit_level_bit_ops_inputs() {
     let steps = vec![LutStep {
       op: LutOpcode::ByteAndEq,
@@ -404,14 +350,51 @@ mod tests {
 
     let trace = build_lut_trace_from_steps(&steps)
       .expect("bit-level bitwise steps should be trace-encodable");
-    assert_eq!(trace.width(), 6);
+    assert_eq!(trace.width(), zprove_core::zk_proof::NUM_LUT_COLS);
   }
 
   #[test]
-  fn test_build_lut_trace_rejects_non_bool_bit_ops_inputs() {
+  fn test_build_lut_trace_accepts_byte_level_bit_ops_inputs() {
+    // ByteAndEq/OrEq/XorEq now operate at byte level (0..=255), not bit level.
+    // in0=2, in1=1 are valid byte inputs; soundness is delegated to the LogUp byte table argument.
+    let steps = vec![
+      LutStep {
+        op: LutOpcode::ByteAndEq,
+        in0: 0xAB,
+        in1: 0xCD,
+        in2: 0,
+        out0: (0xAB_u8 & 0xCD_u8) as u32,
+        out1: 0,
+      },
+      LutStep {
+        op: LutOpcode::ByteOrEq,
+        in0: 0xAB,
+        in1: 0xCD,
+        in2: 0,
+        out0: (0xAB_u8 | 0xCD_u8) as u32,
+        out1: 0,
+      },
+      LutStep {
+        op: LutOpcode::ByteXorEq,
+        in0: 0xAB,
+        in1: 0xCD,
+        in2: 0,
+        out0: (0xAB_u8 ^ 0xCD_u8) as u32,
+        out1: 0,
+      },
+    ];
+
+    let trace = build_lut_trace_from_steps(&steps)
+      .expect("byte-level bitwise steps should be trace-encodable");
+    assert_eq!(trace.width(), zprove_core::zk_proof::NUM_LUT_COLS);
+  }
+
+  #[test]
+  fn test_build_lut_trace_rejects_out_of_byte_range_bit_ops_inputs() {
+    // Values > 255 are invalid even for byte-level operations.
     let steps = vec![LutStep {
       op: LutOpcode::ByteAndEq,
-      in0: 2,
+      in0: 256,
       in1: 1,
       in2: 0,
       out0: 0,
@@ -419,7 +402,7 @@ mod tests {
     }];
 
     let err =
-      build_lut_trace_from_steps(&steps).expect_err("non-bool bitwise step should be rejected");
+      build_lut_trace_from_steps(&steps).expect_err("out-of-byte-range input should be rejected");
     assert!(err.contains("out of range"));
   }
 
@@ -539,21 +522,20 @@ mod tests {
 
 #[cfg(test)]
 mod preprocessed_rows_tests {
-  use zprove_core::semantic_proof::{compile_proof, ProofRow};
-  use zprove_core::zk_proof::{
-    build_proof_rows_preprocessed_matrix, setup_proof_rows_preprocessed,
-    prove_stack_ir_with_prep, verify_stack_ir_with_prep, stack_ir_scaffold_public_values,
-    NUM_PREP_COLS, PREP_COL_OP, PREP_COL_SCALAR0, PREP_COL_SCALAR1, PREP_COL_VALUE,
-  };
   use p3_matrix::Matrix;
+  use zprove_core::semantic_proof::{ProofRow, compile_proof};
+  use zprove_core::zk_proof::{
+    NUM_PREP_COLS, PREP_COL_OP, PREP_COL_SCALAR0, PREP_COL_SCALAR1, PREP_COL_VALUE,
+    build_proof_rows_preprocessed_matrix, prove_stack_ir_with_prep, setup_proof_rows_preprocessed,
+    stack_ir_scaffold_public_values, verify_stack_ir_with_prep,
+  };
 
   // ---------------------------------------------------------------------------
-  // Helper: compile a small `Proof` (ByteAddEq: 5 + 3 = 8) into Vec<ProofRow>.
+  // Helper: a minimal add proof compiled into rows.
   // ---------------------------------------------------------------------------
   fn add_proof_rows() -> Vec<ProofRow> {
-    use zprove_core::semantic_proof::Proof;
-    // ByteAddEq(a, b, carry_out): 5 + 3 = 8, no carry out.
-    compile_proof(&Proof::ByteAddEq(5, 3, false))
+    use zprove_core::semantic_proof::prove_add;
+    compile_proof(&prove_add(&[0u8; 32], &[0u8; 32], &[0u8; 32]))
   }
 
   // ---------------------------------------------------------------------------
@@ -570,7 +552,11 @@ mod preprocessed_rows_tests {
     assert!(h.is_power_of_two(), "height must be power of two");
     assert!(h >= rows.len(), "height must cover all rows");
 
-    assert_eq!(matrix.width(), NUM_PREP_COLS, "width must equal NUM_PREP_COLS");
+    assert_eq!(
+      matrix.width(),
+      NUM_PREP_COLS,
+      "width must equal NUM_PREP_COLS"
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -582,8 +568,8 @@ mod preprocessed_rows_tests {
     let matrix = build_proof_rows_preprocessed_matrix(&rows, &stack_ir_scaffold_public_values());
 
     for (i, row) in rows.iter().enumerate() {
-      use p3_mersenne_31::Mersenne31;
       use p3_field::PrimeCharacteristicRing;
+      use p3_mersenne_31::Mersenne31;
       let row_data = matrix.row_slice(i).unwrap();
       assert_eq!(
         row_data[PREP_COL_OP],
@@ -633,8 +619,7 @@ mod preprocessed_rows_tests {
       setup_proof_rows_preprocessed(&rows, &pv).expect("setup must succeed");
 
     // Prove.
-    let proof =
-      prove_stack_ir_with_prep(&rows, &prep_data, &pv).expect("prove must succeed");
+    let proof = prove_stack_ir_with_prep(&rows, &prep_data, &pv).expect("prove must succeed");
 
     // Verify.
     let result = verify_stack_ir_with_prep(&proof, &prep_vk, &pv);
@@ -678,21 +663,20 @@ mod preprocessed_rows_tests {
 
 #[cfg(test)]
 mod lut_prep_tests {
-  use zprove_core::semantic_proof::{compile_proof, ProofRow};
-  use zprove_core::zk_proof::{
-    build_lut_trace_from_proof_rows, setup_proof_rows_preprocessed,
-    prove_lut_with_prep, verify_lut_with_prep, lut_scaffold_public_values,
-    prove_stack_ir_with_prep, verify_stack_ir_with_prep, stack_ir_scaffold_public_values,
-    NUM_LUT_COLS,
-  };
   use p3_matrix::Matrix;
+  use zprove_core::semantic_proof::{ProofRow, compile_proof};
+  use zprove_core::zk_proof::{
+    NUM_LUT_COLS, build_lut_trace_from_proof_rows, lut_scaffold_public_values, prove_lut_with_prep,
+    prove_stack_ir_with_prep, setup_proof_rows_preprocessed, stack_ir_scaffold_public_values,
+    verify_lut_with_prep, verify_stack_ir_with_prep,
+  };
 
   // ---------------------------------------------------------------------------
-  // Helper: ByteAddEq(5, 3, false) compiled rows.
+  // Helper: a minimal add proof compiled into rows.
   // ---------------------------------------------------------------------------
   fn add_rows() -> Vec<ProofRow> {
-    use zprove_core::semantic_proof::Proof;
-    compile_proof(&Proof::ByteAddEq(5, 3, false))
+    use zprove_core::semantic_proof::prove_add;
+    compile_proof(&prove_add(&[0u8; 32], &[0u8; 32], &[0u8; 32]))
   }
 
   // ---------------------------------------------------------------------------
@@ -703,7 +687,11 @@ mod lut_prep_tests {
     let rows = add_rows();
     let trace = build_lut_trace_from_proof_rows(&rows).expect("build must succeed");
     let expected_height = rows.len().max(4).next_power_of_two();
-    assert_eq!(trace.height(), expected_height, "height must match preprocessed");
+    assert_eq!(
+      trace.height(),
+      expected_height,
+      "height must match preprocessed"
+    );
     assert_eq!(trace.width(), NUM_LUT_COLS, "width must equal NUM_LUT_COLS");
   }
 
@@ -729,8 +717,7 @@ mod lut_prep_tests {
   fn test_lut_verify_fails_with_wrong_prep_vk() {
     let rows = add_rows();
     let pv = lut_scaffold_public_values();
-    let (prep_data, _vk) =
-      setup_proof_rows_preprocessed(&rows, &pv).expect("setup must succeed");
+    let (prep_data, _vk) = setup_proof_rows_preprocessed(&rows, &pv).expect("setup must succeed");
 
     // Different commitment: mutate first row's op.
     let mut other_rows = rows.clone();
@@ -784,9 +771,8 @@ mod batch_lut_tests {
   use revm::bytecode::opcode;
   use zprove_core::semantic_proof::compile_proof;
   use zprove_core::transition::{
-    InstructionTransitionProof, InstructionTransitionStatement, VmState,
-    build_batch_manifest, prove_instruction, prove_batch_transaction_zk_receipt,
-    verify_batch_transaction_zk_receipt,
+    InstructionTransitionProof, InstructionTransitionStatement, VmState, build_batch_manifest,
+    prove_batch_transaction_zk_receipt, prove_instruction, verify_batch_transaction_zk_receipt,
   };
   use zprove_core::zk_proof::compute_batch_manifest_digest;
 
@@ -805,14 +791,11 @@ mod batch_lut_tests {
       stack_inputs: inputs.to_vec(),
       stack_outputs: vec![output],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     }
   }
 
-  fn make_stmt(
-    op: u8,
-    inputs: &[[u8; 32]],
-    output: [u8; 32],
-  ) -> InstructionTransitionStatement {
+  fn make_stmt(op: u8, inputs: &[[u8; 32]], output: [u8; 32]) -> InstructionTransitionStatement {
     InstructionTransitionStatement {
       opcode: op,
       s_i: VmState {
@@ -838,10 +821,10 @@ mod batch_lut_tests {
   // ---------------------------------------------------------------------------
   #[test]
   fn test_batch_manifest_digest_is_deterministic() {
-    let add_proof = prove_instruction(opcode::ADD, &[a256(5), a256(3)], &[a256(8)])
-      .expect("prove ADD");
-    let and_proof = prove_instruction(opcode::AND, &[a256(0xF0), a256(0x0F)], &[a256(0)])
-      .expect("prove AND");
+    let add_proof =
+      prove_instruction(opcode::ADD, &[a256(5), a256(3)], &[a256(8)]).expect("prove ADD");
+    let and_proof =
+      prove_instruction(opcode::AND, &[a256(0xF0), a256(0x0F)], &[a256(0)]).expect("prove AND");
 
     let items = vec![(opcode::ADD, &add_proof), (opcode::AND, &and_proof)];
     let manifest_a = build_batch_manifest(&items).expect("manifest_a");
@@ -857,10 +840,8 @@ mod batch_lut_tests {
   // ---------------------------------------------------------------------------
   #[test]
   fn test_batch_manifest_row_boundaries_are_contiguous() {
-    let specs: &[(u8, u128, u128, u128)] = &[
-      (opcode::ADD, 7, 2, 9),
-      (opcode::AND, 0xFF, 0x0F, 0x0F),
-    ];
+    let specs: &[(u8, u128, u128, u128)] =
+      &[(opcode::ADD, 7, 2, 9), (opcode::AND, 0xFF, 0x0F, 0x0F)];
     let proofs: Vec<(u8, _)> = specs
       .iter()
       .map(|(op, a, b, out)| {
@@ -890,7 +871,11 @@ mod batch_lut_tests {
     // Verify compile_proof row counts match the manifest.
     for (i, ((_op, proof), entry)) in proofs.iter().zip(manifest.entries.iter()).enumerate() {
       let rows = compile_proof(proof);
-      assert_eq!(rows.len(), entry.row_count, "entry {i} row_count must equal compile_proof len");
+      assert_eq!(
+        rows.len(),
+        entry.row_count,
+        "entry {i} row_count must equal compile_proof len"
+      );
     }
   }
 
@@ -932,8 +917,7 @@ mod batch_lut_tests {
   fn test_batch_verify_rejects_wrong_statement_count() {
     let ins = [a256(3), a256(4)];
     let itp = make_itp(opcode::ADD, &ins, a256(7));
-    let receipt =
-      prove_batch_transaction_zk_receipt(&[itp]).expect("prove must succeed");
+    let receipt = prove_batch_transaction_zk_receipt(&[itp]).expect("prove must succeed");
 
     // Empty statements — count mismatch ⇒ false.
     assert!(
@@ -949,8 +933,7 @@ mod batch_lut_tests {
   fn test_batch_verify_rejects_opcode_mismatch() {
     let ins = [a256(5), a256(6)];
     let itp = make_itp(opcode::ADD, &ins, a256(11));
-    let receipt =
-      prove_batch_transaction_zk_receipt(&[itp]).expect("prove must succeed");
+    let receipt = prove_batch_transaction_zk_receipt(&[itp]).expect("prove must succeed");
 
     // Statement claims AND but manifest has ADD.
     let bad_stmt = make_stmt(opcode::AND, &[a256(5), a256(6)], a256(4));

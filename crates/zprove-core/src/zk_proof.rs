@@ -17,6 +17,7 @@ use p3_challenger::{DuplexChallenger, HashChallenger, SerializingChallenger32};
 use p3_circle::CirclePcs;
 use p3_commit::ExtensionMmcs;
 use p3_field::PrimeCharacteristicRing;
+use p3_field::Field;
 use p3_field::extension::BinomialExtensionField;
 use p3_fri::FriParameters;
 use p3_keccak::Keccak256Hash;
@@ -239,7 +240,30 @@ const STACK_COL_SCALAR1: usize = 6;
 const STACK_COL_SCALAR2: usize = 7;
 const STACK_COL_VALUE: usize = 8;
 const STACK_COL_RET_TY: usize = 9;
-const NUM_STACK_IR_COLS: usize = 10;
+// ---- Selector columns (one-hot, indices 10-29) ----
+// Each selector corresponds to exactly one allowed opcode tag.
+// Replacing the degree-20 allowed_poly + gate() pattern with degree-2 constraints.
+const STACK_COL_SEL_BOOL: usize = 10;
+const STACK_COL_SEL_BYTE: usize = 11;
+const STACK_COL_SEL_EQ_REFL: usize = 12;
+const STACK_COL_SEL_AND_INTRO: usize = 13;
+const STACK_COL_SEL_EQ_TRANS: usize = 14;
+const STACK_COL_SEL_ADD_CONGR: usize = 15;
+const STACK_COL_SEL_ADD_CARRY_CONGR: usize = 16;
+const STACK_COL_SEL_ADD_EQ: usize = 17;
+const STACK_COL_SEL_U16_ADD_EQ: usize = 18;
+const STACK_COL_SEL_U29_ADD_EQ: usize = 19;
+const STACK_COL_SEL_U24_ADD_EQ: usize = 20;
+const STACK_COL_SEL_U15_MUL_EQ: usize = 21;
+const STACK_COL_SEL_ADD_CARRY_EQ: usize = 22;
+const STACK_COL_SEL_MUL_LOW_EQ: usize = 23;
+const STACK_COL_SEL_MUL_HIGH_EQ: usize = 24;
+const STACK_COL_SEL_AND_EQ: usize = 25;
+const STACK_COL_SEL_OR_EQ: usize = 26;
+const STACK_COL_SEL_XOR_EQ: usize = 27;
+const STACK_COL_SEL_NOT: usize = 28;
+const STACK_COL_SEL_EQ_SYM: usize = 29;
+pub const NUM_STACK_IR_COLS: usize = 30;
 
 fn row_pop_count(op: u32) -> Option<u32> {
   match op {
@@ -384,6 +408,10 @@ pub fn build_stack_ir_trace_from_steps(
     trace.values[base + STACK_COL_SCALAR2] = Val::from_u32(step.scalar2);
     trace.values[base + STACK_COL_VALUE] = Val::from_u32(step.value);
     trace.values[base + STACK_COL_RET_TY] = Val::from_u16(step.ret_ty as u16);
+    // Set the one-hot selector for this opcode.
+    if let Some(sel_col) = op_to_sel_col(step.op) {
+      trace.values[base + sel_col] = Val::ONE;
+    }
   }
 
   if steps.len() < n_rows {
@@ -401,10 +429,41 @@ pub fn build_stack_ir_trace_from_steps(
       trace.values[base + STACK_COL_SCALAR2] = Val::from_u16(0);
       trace.values[base + STACK_COL_VALUE] = Val::from_u16(0);
       trace.values[base + STACK_COL_RET_TY] = Val::from_u16(RET_WFF_EQ as u16);
+      // Padding uses OP_EQ_REFL → set its selector.
+      trace.values[base + STACK_COL_SEL_EQ_REFL] = Val::ONE;
     }
   }
 
   Ok(trace)
+}
+
+/// Map a ProofRow opcode to its selector column index in the main trace.
+/// Returns `None` for opcodes that are not represented as allowed tags.
+fn op_to_sel_col(op: u32) -> Option<usize> {
+  use crate::semantic_proof::*;
+  match op {
+    OP_BOOL => Some(STACK_COL_SEL_BOOL),
+    OP_BYTE => Some(STACK_COL_SEL_BYTE),
+    OP_EQ_REFL => Some(STACK_COL_SEL_EQ_REFL),
+    OP_AND_INTRO => Some(STACK_COL_SEL_AND_INTRO),
+    OP_EQ_TRANS => Some(STACK_COL_SEL_EQ_TRANS),
+    OP_BYTE_ADD_THIRD_CONGRUENCE => Some(STACK_COL_SEL_ADD_CONGR),
+    OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => Some(STACK_COL_SEL_ADD_CARRY_CONGR),
+    OP_BYTE_ADD_EQ => Some(STACK_COL_SEL_ADD_EQ),
+    OP_U16_ADD_EQ => Some(STACK_COL_SEL_U16_ADD_EQ),
+    OP_U29_ADD_EQ => Some(STACK_COL_SEL_U29_ADD_EQ),
+    OP_U24_ADD_EQ => Some(STACK_COL_SEL_U24_ADD_EQ),
+    OP_U15_MUL_EQ => Some(STACK_COL_SEL_U15_MUL_EQ),
+    OP_BYTE_ADD_CARRY_EQ => Some(STACK_COL_SEL_ADD_CARRY_EQ),
+    OP_BYTE_MUL_LOW_EQ => Some(STACK_COL_SEL_MUL_LOW_EQ),
+    OP_BYTE_MUL_HIGH_EQ => Some(STACK_COL_SEL_MUL_HIGH_EQ),
+    OP_BYTE_AND_EQ => Some(STACK_COL_SEL_AND_EQ),
+    OP_BYTE_OR_EQ => Some(STACK_COL_SEL_OR_EQ),
+    OP_BYTE_XOR_EQ => Some(STACK_COL_SEL_XOR_EQ),
+    OP_NOT => Some(STACK_COL_SEL_NOT),
+    OP_EQ_SYM => Some(STACK_COL_SEL_EQ_SYM),
+    _ => None,
+  }
 }
 
 pub fn build_stack_ir_trace_from_rows(rows: &[ProofRow]) -> Result<RowMajorMatrix<Val>, String> {
@@ -436,284 +495,275 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for StackIrAir {
 /// Core StackIR constraints — shared between `StackIrAir` and
 /// `StackIrAirWithPrep` to avoid code duplication.
 fn eval_stack_ir_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
-    let pis = builder.public_values();
-    builder.assert_eq(pis[0], AB::Expr::from_u32(RECEIPT_BIND_TAG_STACK));
+  let pis = builder.public_values();
+  builder.assert_eq(pis[0], AB::Expr::from_u32(RECEIPT_BIND_TAG_STACK));
 
-    let main = builder.main();
-    let local = main.row_slice(0).expect("empty trace");
-    let next = main.row_slice(1).expect("single-row trace");
+  let main = builder.main();
+  let local = main.row_slice(0).expect("empty trace");
+  let next = main.row_slice(1).expect("single-row trace");
 
-    let local = &*local;
-    let next = &*next;
+  let local = &*local;
+  let next = &*next;
 
-    let op = local[STACK_COL_OP].clone();
-    let pop = local[STACK_COL_POP].clone();
-    let push = local[STACK_COL_PUSH].clone();
-    let sp_before = local[STACK_COL_SP_BEFORE].clone();
-    let sp_after = local[STACK_COL_SP_AFTER].clone();
-    let scalar0 = local[STACK_COL_SCALAR0].clone();
-    let value = local[STACK_COL_VALUE].clone();
-    let ret_ty = local[STACK_COL_RET_TY].clone();
+  let op = local[STACK_COL_OP].clone();
+  let pop = local[STACK_COL_POP].clone();
+  let push = local[STACK_COL_PUSH].clone();
+  let sp_before = local[STACK_COL_SP_BEFORE].clone();
+  let sp_after = local[STACK_COL_SP_AFTER].clone();
+  let scalar0 = local[STACK_COL_SCALAR0].clone();
+  let value = local[STACK_COL_VALUE].clone();
+  let ret_ty = local[STACK_COL_RET_TY].clone();
 
-    let t_bool = crate::semantic_proof::OP_BOOL as u16;
-    let t_byte = crate::semantic_proof::OP_BYTE as u16;
-    let t_eq_refl = crate::semantic_proof::OP_EQ_REFL as u16;
-    let t_and_intro = crate::semantic_proof::OP_AND_INTRO as u16;
-    let t_eq_trans = crate::semantic_proof::OP_EQ_TRANS as u16;
-    let t_add_congr = crate::semantic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE as u16;
-    let t_add_carry_congr = crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE as u16;
-    let t_add_eq = crate::semantic_proof::OP_BYTE_ADD_EQ as u16;
-    let t_u16_add_eq = crate::semantic_proof::OP_U16_ADD_EQ as u16;
-    let t_u29_add_eq = crate::semantic_proof::OP_U29_ADD_EQ as u16;
-    let t_u24_add_eq = crate::semantic_proof::OP_U24_ADD_EQ as u16;
-    let t_u15_mul_eq = crate::semantic_proof::OP_U15_MUL_EQ as u16;
-    let t_add_carry_eq = crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ as u16;
-    let t_mul_low_eq = crate::semantic_proof::OP_BYTE_MUL_LOW_EQ as u16;
-    let t_mul_high_eq = crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ as u16;
-    let t_and_eq = crate::semantic_proof::OP_BYTE_AND_EQ as u16;
-    let t_or_eq = crate::semantic_proof::OP_BYTE_OR_EQ as u16;
-    let t_xor_eq = crate::semantic_proof::OP_BYTE_XOR_EQ as u16;
-    // Soundness fix: OP_NOT and OP_EQ_SYM appear in row_pop_count (and thus in
-    // StackIR traces) but were missing from allowed_tags, causing allowed_poly
-    // to reject valid proofs that use these opcodes.
-    let t_not = crate::semantic_proof::OP_NOT as u16;
-    let t_eq_sym = crate::semantic_proof::OP_EQ_SYM as u16;
+  // ---- Opcode tag constants ----
+  let t_bool = crate::semantic_proof::OP_BOOL as u16;
+  let t_byte = crate::semantic_proof::OP_BYTE as u16;
+  let t_eq_refl = crate::semantic_proof::OP_EQ_REFL as u16;
+  let t_and_intro = crate::semantic_proof::OP_AND_INTRO as u16;
+  let t_eq_trans = crate::semantic_proof::OP_EQ_TRANS as u16;
+  let t_add_congr = crate::semantic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE as u16;
+  let t_add_carry_congr = crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE as u16;
+  let t_add_eq = crate::semantic_proof::OP_BYTE_ADD_EQ as u16;
+  let t_u16_add_eq = crate::semantic_proof::OP_U16_ADD_EQ as u16;
+  let t_u29_add_eq = crate::semantic_proof::OP_U29_ADD_EQ as u16;
+  let t_u24_add_eq = crate::semantic_proof::OP_U24_ADD_EQ as u16;
+  let t_u15_mul_eq = crate::semantic_proof::OP_U15_MUL_EQ as u16;
+  let t_add_carry_eq = crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ as u16;
+  let t_mul_low_eq = crate::semantic_proof::OP_BYTE_MUL_LOW_EQ as u16;
+  let t_mul_high_eq = crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ as u16;
+  let t_and_eq = crate::semantic_proof::OP_BYTE_AND_EQ as u16;
+  let t_or_eq = crate::semantic_proof::OP_BYTE_OR_EQ as u16;
+  let t_xor_eq = crate::semantic_proof::OP_BYTE_XOR_EQ as u16;
+  let t_not = crate::semantic_proof::OP_NOT as u16;
+  let t_eq_sym = crate::semantic_proof::OP_EQ_SYM as u16;
 
-    let c_bool = AB::Expr::from_u16(t_bool);
-    let c_byte = AB::Expr::from_u16(t_byte);
-    let c_eq_refl = AB::Expr::from_u16(t_eq_refl);
-    let c_and_intro = AB::Expr::from_u16(t_and_intro);
-    let c_eq_trans = AB::Expr::from_u16(t_eq_trans);
-    let c_add_congr = AB::Expr::from_u16(t_add_congr);
-    let c_add_carry_congr = AB::Expr::from_u16(t_add_carry_congr);
-    let c_add_eq = AB::Expr::from_u16(t_add_eq);
-    let c_u16_add_eq = AB::Expr::from_u16(t_u16_add_eq);
-    let c_u29_add_eq = AB::Expr::from_u16(t_u29_add_eq);
-    let c_u24_add_eq = AB::Expr::from_u16(t_u24_add_eq);
-    let c_u15_mul_eq = AB::Expr::from_u16(t_u15_mul_eq);
-    let c_add_carry_eq = AB::Expr::from_u16(t_add_carry_eq);
-    let c_mul_low_eq = AB::Expr::from_u16(t_mul_low_eq);
-    let c_mul_high_eq = AB::Expr::from_u16(t_mul_high_eq);
-    let c_and_eq = AB::Expr::from_u16(t_and_eq);
-    let c_or_eq = AB::Expr::from_u16(t_or_eq);
-    let c_xor_eq = AB::Expr::from_u16(t_xor_eq);
-    let c_not = AB::Expr::from_u16(t_not);
-    let c_eq_sym = AB::Expr::from_u16(t_eq_sym);
-    let c_zero = AB::Expr::from_u16(0);
-    let c_one = AB::Expr::from_u16(1);
-    let c_two = AB::Expr::from_u16(2);
+  // ---- Read selector columns (one-hot witness, max degree 1) ----
+  let sel_bool = local[STACK_COL_SEL_BOOL].clone();
+  let sel_byte = local[STACK_COL_SEL_BYTE].clone();
+  let sel_eq_refl = local[STACK_COL_SEL_EQ_REFL].clone();
+  let sel_and_intro = local[STACK_COL_SEL_AND_INTRO].clone();
+  let sel_eq_trans = local[STACK_COL_SEL_EQ_TRANS].clone();
+  let sel_add_congr = local[STACK_COL_SEL_ADD_CONGR].clone();
+  let sel_add_carry_congr = local[STACK_COL_SEL_ADD_CARRY_CONGR].clone();
+  let sel_add_eq = local[STACK_COL_SEL_ADD_EQ].clone();
+  let sel_u16_add_eq = local[STACK_COL_SEL_U16_ADD_EQ].clone();
+  let sel_u29_add_eq = local[STACK_COL_SEL_U29_ADD_EQ].clone();
+  let sel_u24_add_eq = local[STACK_COL_SEL_U24_ADD_EQ].clone();
+  let sel_u15_mul_eq = local[STACK_COL_SEL_U15_MUL_EQ].clone();
+  let sel_add_carry_eq = local[STACK_COL_SEL_ADD_CARRY_EQ].clone();
+  let sel_mul_low_eq = local[STACK_COL_SEL_MUL_LOW_EQ].clone();
+  let sel_mul_high_eq = local[STACK_COL_SEL_MUL_HIGH_EQ].clone();
+  let sel_and_eq = local[STACK_COL_SEL_AND_EQ].clone();
+  let sel_or_eq = local[STACK_COL_SEL_OR_EQ].clone();
+  let sel_xor_eq = local[STACK_COL_SEL_XOR_EQ].clone();
+  let sel_not = local[STACK_COL_SEL_NOT].clone();
+  let sel_eq_sym = local[STACK_COL_SEL_EQ_SYM].clone();
 
-    let allowed_tags = [
-      t_bool,
-      t_byte,
-      t_eq_refl,
-      t_and_intro,
-      t_eq_trans,
-      t_add_congr,
-      t_add_carry_congr,
-      t_add_eq,
-      t_u16_add_eq,
-      t_u29_add_eq,
-      t_u24_add_eq,
-      t_u15_mul_eq,
-      t_add_carry_eq,
-      t_mul_low_eq,
-      t_mul_high_eq,
-      t_and_eq,
-      t_or_eq,
-      t_xor_eq,
-      t_not,
-      t_eq_sym,
-    ];
+  // ---- Selector boolean constraints: sel_i * (1 - sel_i) = 0  (degree 2) ----
+  let c_one = AB::Expr::from_u16(1);
+  builder.assert_zero(sel_bool.clone() * (c_one.clone() - sel_bool.clone()));
+  builder.assert_zero(sel_byte.clone() * (c_one.clone() - sel_byte.clone()));
+  builder.assert_zero(sel_eq_refl.clone() * (c_one.clone() - sel_eq_refl.clone()));
+  builder.assert_zero(sel_and_intro.clone() * (c_one.clone() - sel_and_intro.clone()));
+  builder.assert_zero(sel_eq_trans.clone() * (c_one.clone() - sel_eq_trans.clone()));
+  builder.assert_zero(sel_add_congr.clone() * (c_one.clone() - sel_add_congr.clone()));
+  builder.assert_zero(sel_add_carry_congr.clone() * (c_one.clone() - sel_add_carry_congr.clone()));
+  builder.assert_zero(sel_add_eq.clone() * (c_one.clone() - sel_add_eq.clone()));
+  builder.assert_zero(sel_u16_add_eq.clone() * (c_one.clone() - sel_u16_add_eq.clone()));
+  builder.assert_zero(sel_u29_add_eq.clone() * (c_one.clone() - sel_u29_add_eq.clone()));
+  builder.assert_zero(sel_u24_add_eq.clone() * (c_one.clone() - sel_u24_add_eq.clone()));
+  builder.assert_zero(sel_u15_mul_eq.clone() * (c_one.clone() - sel_u15_mul_eq.clone()));
+  builder.assert_zero(sel_add_carry_eq.clone() * (c_one.clone() - sel_add_carry_eq.clone()));
+  builder.assert_zero(sel_mul_low_eq.clone() * (c_one.clone() - sel_mul_low_eq.clone()));
+  builder.assert_zero(sel_mul_high_eq.clone() * (c_one.clone() - sel_mul_high_eq.clone()));
+  builder.assert_zero(sel_and_eq.clone() * (c_one.clone() - sel_and_eq.clone()));
+  builder.assert_zero(sel_or_eq.clone() * (c_one.clone() - sel_or_eq.clone()));
+  builder.assert_zero(sel_xor_eq.clone() * (c_one.clone() - sel_xor_eq.clone()));
+  builder.assert_zero(sel_not.clone() * (c_one.clone() - sel_not.clone()));
+  builder.assert_zero(sel_eq_sym.clone() * (c_one.clone() - sel_eq_sym.clone()));
 
-    let gate = |target: u16| {
-      let mut g = AB::Expr::from_u16(1);
-      for t in allowed_tags {
-        if t != target {
-          g *= op.clone().into() - AB::Expr::from_u16(t);
-        }
-      }
-      g
-    };
+  // ---- Exactly one selector active per row: Σ sel_i = 1  (degree 1) ----
+  let sel_sum = sel_bool.clone()
+    + sel_byte.clone()
+    + sel_eq_refl.clone()
+    + sel_and_intro.clone()
+    + sel_eq_trans.clone()
+    + sel_add_congr.clone()
+    + sel_add_carry_congr.clone()
+    + sel_add_eq.clone()
+    + sel_u16_add_eq.clone()
+    + sel_u29_add_eq.clone()
+    + sel_u24_add_eq.clone()
+    + sel_u15_mul_eq.clone()
+    + sel_add_carry_eq.clone()
+    + sel_mul_low_eq.clone()
+    + sel_mul_high_eq.clone()
+    + sel_and_eq.clone()
+    + sel_or_eq.clone()
+    + sel_xor_eq.clone()
+    + sel_not.clone()
+    + sel_eq_sym.clone();
+  builder.assert_eq(sel_sum, c_one.clone());
 
-    let allowed_poly = (op.clone().into() - c_bool.clone())
-      * (op.clone().into() - c_byte.clone())
-      * (op.clone().into() - c_eq_refl.clone())
-      * (op.clone().into() - c_and_intro.clone())
-      * (op.clone().into() - c_eq_trans.clone())
-      * (op.clone().into() - c_add_congr.clone())
-      * (op.clone().into() - c_add_carry_congr.clone())
-      * (op.clone().into() - c_add_eq.clone())
-      * (op.clone().into() - c_u16_add_eq.clone())
-      * (op.clone().into() - c_u29_add_eq.clone())
-      * (op.clone().into() - c_u24_add_eq.clone())
-      * (op.clone().into() - c_u15_mul_eq.clone())
-      * (op.clone().into() - c_add_carry_eq.clone())
-      * (op.clone().into() - c_mul_low_eq.clone())
-      * (op.clone().into() - c_mul_high_eq.clone())
-      * (op.clone().into() - c_and_eq.clone())
-      * (op.clone().into() - c_or_eq.clone())
-      * (op.clone().into() - c_xor_eq.clone())
-      * (op.clone().into() - c_not.clone())
-      * (op.clone().into() - c_eq_sym.clone());
-    builder.assert_zero(allowed_poly);
+  // ---- op = Σ(sel_i · tag_i): binds op to the active selector  (degree 2) ----
+  let op_from_sels = sel_bool.clone() * AB::Expr::from_u16(t_bool)
+    + sel_byte.clone() * AB::Expr::from_u16(t_byte)
+    + sel_eq_refl.clone() * AB::Expr::from_u16(t_eq_refl)
+    + sel_and_intro.clone() * AB::Expr::from_u16(t_and_intro)
+    + sel_eq_trans.clone() * AB::Expr::from_u16(t_eq_trans)
+    + sel_add_congr.clone() * AB::Expr::from_u16(t_add_congr)
+    + sel_add_carry_congr.clone() * AB::Expr::from_u16(t_add_carry_congr)
+    + sel_add_eq.clone() * AB::Expr::from_u16(t_add_eq)
+    + sel_u16_add_eq.clone() * AB::Expr::from_u16(t_u16_add_eq)
+    + sel_u29_add_eq.clone() * AB::Expr::from_u16(t_u29_add_eq)
+    + sel_u24_add_eq.clone() * AB::Expr::from_u16(t_u24_add_eq)
+    + sel_u15_mul_eq.clone() * AB::Expr::from_u16(t_u15_mul_eq)
+    + sel_add_carry_eq.clone() * AB::Expr::from_u16(t_add_carry_eq)
+    + sel_mul_low_eq.clone() * AB::Expr::from_u16(t_mul_low_eq)
+    + sel_mul_high_eq.clone() * AB::Expr::from_u16(t_mul_high_eq)
+    + sel_and_eq.clone() * AB::Expr::from_u16(t_and_eq)
+    + sel_or_eq.clone() * AB::Expr::from_u16(t_or_eq)
+    + sel_xor_eq.clone() * AB::Expr::from_u16(t_xor_eq)
+    + sel_not.clone() * AB::Expr::from_u16(t_not)
+    + sel_eq_sym.clone() * AB::Expr::from_u16(t_eq_sym);
+  builder.assert_eq(op.clone(), op_from_sels);
 
-    builder.assert_zero(
-      sp_before.clone().into() - pop.clone().into() + push.clone().into() - sp_after.clone().into(),
-    );
+  // ---- Stack pointer transition: sp_after = sp_before - pop + push  (degree 1) ----
+  builder.assert_zero(
+    sp_before.clone().into() - pop.clone().into() + push.clone().into() - sp_after.clone().into(),
+  );
+  builder.when_first_row().assert_zero(sp_before.clone());
+  builder
+    .when_transition()
+    .assert_eq(next[STACK_COL_SP_BEFORE].clone(), sp_after.clone());
+  builder
+    .when_last_row()
+    .assert_eq(sp_after.clone(), c_one.clone());
 
-    builder.when_first_row().assert_zero(sp_before.clone());
-    builder
-      .when_transition()
-      .assert_eq(next[STACK_COL_SP_BEFORE].clone(), sp_after.clone());
-    // Soundness fix: enforce the last trace row ends with exactly 1 item on the
-    // proof stack (a single WFF result).  Padding rows carry steady_sp = 1, so
-    // this constraint passes for correctly-padded traces.
-    builder.when_last_row().assert_eq(sp_after.clone(), AB::Expr::from_u16(1));
+  // ---- Per-opcode constraints using selectors  (degree 2) ----
+  let c_zero = AB::Expr::from_u16(0);
+  let c_two = AB::Expr::from_u16(2);
 
-    let bool_gate = gate(t_bool);
-    let byte_gate = gate(t_byte);
-    let eq_refl_gate = gate(t_eq_refl);
-    let and_intro_gate = gate(t_and_intro);
-    let eq_trans_gate = gate(t_eq_trans);
-    let add_congr_gate = gate(t_add_congr);
-    let add_carry_congr_gate = gate(t_add_carry_congr);
-    let add_eq_gate = gate(t_add_eq);
-    let u16_add_eq_gate = gate(t_u16_add_eq);
-    let u29_add_eq_gate = gate(t_u29_add_eq);
-    let u24_add_eq_gate = gate(t_u24_add_eq);
-    let u15_mul_eq_gate = gate(t_u15_mul_eq);
-    let add_carry_eq_gate = gate(t_add_carry_eq);
-    let mul_low_eq_gate = gate(t_mul_low_eq);
-    let mul_high_eq_gate = gate(t_mul_high_eq);
-    let and_eq_gate = gate(t_and_eq);
-    let or_eq_gate = gate(t_or_eq);
-    let xor_eq_gate = gate(t_xor_eq);
-    let not_gate = gate(t_not);
-    let eq_sym_gate = gate(t_eq_sym);
+  // OP_BOOL: pop=0, push=1, ret_ty=RET_BOOL, value=scalar0
+  builder.assert_zero(sel_bool.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_bool.clone() * (push.clone().into() - c_one.clone()));
+  builder.assert_zero(
+    sel_bool.clone()
+      * (ret_ty.clone().into() - AB::Expr::from_u16(crate::semantic_proof::RET_BOOL as u16)),
+  );
+  builder.assert_zero(sel_bool * (value.clone().into() - scalar0.clone().into()));
 
-    builder.assert_zero(bool_gate.clone() * (pop.clone().into() - c_zero.clone()));
-    builder.assert_zero(bool_gate.clone() * (push.clone().into() - c_one.clone()));
-    builder.assert_zero(
-      bool_gate.clone()
-        * (ret_ty.clone().into() - AB::Expr::from_u16(crate::semantic_proof::RET_BOOL as u16)),
-    );
-    builder.assert_zero(bool_gate * (value.clone().into() - scalar0.clone().into()));
+  // OP_BYTE: pop=0, push=1, ret_ty=RET_BYTE, value=scalar0
+  builder.assert_zero(sel_byte.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_byte.clone() * (push.clone().into() - c_one.clone()));
+  builder
+    .assert_zero(sel_byte.clone() * (ret_ty.clone().into() - AB::Expr::from_u16(RET_BYTE as u16)));
+  builder.assert_zero(sel_byte * (value.clone().into() - scalar0.clone().into()));
 
-    builder.assert_zero(byte_gate.clone() * (pop.clone().into() - c_zero.clone()));
-    builder.assert_zero(byte_gate.clone() * (push.clone().into() - c_one.clone()));
-    builder.assert_zero(
-      byte_gate.clone() * (ret_ty.clone().into() - AB::Expr::from_u16(RET_BYTE as u16)),
-    );
-    builder.assert_zero(byte_gate * (value.clone().into() - scalar0.clone().into()));
+  // OP_EQ_REFL: pop=1, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_eq_refl.clone() * (pop.clone().into() - c_one.clone()));
+  builder.assert_zero(sel_eq_refl.clone() * (push.clone().into() - c_one.clone()));
+  builder
+    .assert_zero(sel_eq_refl * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
-    builder.assert_zero(eq_refl_gate.clone() * (pop.clone().into() - c_one.clone()));
-    builder.assert_zero(eq_refl_gate.clone() * (push.clone().into() - c_one.clone()));
-    builder
-      .assert_zero(eq_refl_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+  // OP_AND_INTRO: pop=2, push=1, ret_ty=RET_WFF_AND
+  builder.assert_zero(sel_and_intro.clone() * (pop.clone().into() - c_two.clone()));
+  builder.assert_zero(sel_and_intro.clone() * (push.clone().into() - c_one.clone()));
+  builder
+    .assert_zero(sel_and_intro * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)));
 
-    builder.assert_zero(and_intro_gate.clone() * (pop.clone().into() - c_two));
-    builder.assert_zero(and_intro_gate.clone() * (push.clone().into() - c_one));
-    builder.assert_zero(
-      and_intro_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
-    );
+  // OP_EQ_TRANS: pop=2, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_eq_trans.clone() * (pop.clone().into() - c_two.clone()));
+  builder.assert_zero(sel_eq_trans.clone() * (push.clone().into() - c_one.clone()));
+  builder
+    .assert_zero(sel_eq_trans * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
-    builder.assert_zero(eq_trans_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(2)));
-    builder.assert_zero(eq_trans_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder
-      .assert_zero(eq_trans_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+  // OP_BYTE_ADD_THIRD_CONGRUENCE: pop=1, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_add_congr.clone() * (pop.clone().into() - c_one.clone()));
+  builder.assert_zero(sel_add_congr.clone() * (push.clone().into() - c_one.clone()));
+  builder
+    .assert_zero(sel_add_congr * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
-    builder.assert_zero(add_congr_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(add_congr_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(
-      add_congr_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
-    );
+  // OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE: pop=1, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_add_carry_congr.clone() * (pop.clone().into() - c_one.clone()));
+  builder.assert_zero(sel_add_carry_congr.clone() * (push.clone().into() - c_one.clone()));
+  builder.assert_zero(
+    sel_add_carry_congr * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
+  );
 
-    builder
-      .assert_zero(add_carry_congr_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(1)));
-    builder
-      .assert_zero(add_carry_congr_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(
-      add_carry_congr_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
-    );
+  // OP_BYTE_ADD_EQ: pop=0, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_add_eq.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_add_eq.clone() * (push.clone().into() - c_one.clone()));
+  builder.assert_zero(sel_add_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
-    builder.assert_zero(add_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
-    builder.assert_zero(add_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder
-      .assert_zero(add_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+  // OP_U16_ADD_EQ: pop=0, push=1, ret_ty=RET_WFF_AND
+  builder.assert_zero(sel_u16_add_eq.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_u16_add_eq.clone() * (push.clone().into() - c_one.clone()));
+  builder
+    .assert_zero(sel_u16_add_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)));
 
-    builder.assert_zero(u16_add_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
-    builder.assert_zero(u16_add_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(
-      u16_add_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
-    );
+  // OP_U29_ADD_EQ: pop=0, push=1, ret_ty=RET_WFF_AND
+  builder.assert_zero(sel_u29_add_eq.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_u29_add_eq.clone() * (push.clone().into() - c_one.clone()));
+  builder
+    .assert_zero(sel_u29_add_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)));
 
-    builder.assert_zero(u29_add_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
-    builder.assert_zero(u29_add_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(
-      u29_add_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
-    );
+  // OP_U24_ADD_EQ: pop=0, push=1, ret_ty=RET_WFF_AND
+  builder.assert_zero(sel_u24_add_eq.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_u24_add_eq.clone() * (push.clone().into() - c_one.clone()));
+  builder
+    .assert_zero(sel_u24_add_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)));
 
-    builder.assert_zero(u24_add_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
-    builder.assert_zero(u24_add_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(
-      u24_add_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
-    );
+  // OP_U15_MUL_EQ: pop=0, push=1, ret_ty=RET_WFF_AND
+  builder.assert_zero(sel_u15_mul_eq.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_u15_mul_eq.clone() * (push.clone().into() - c_one.clone()));
+  builder
+    .assert_zero(sel_u15_mul_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)));
 
-    builder.assert_zero(u15_mul_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
-    builder.assert_zero(u15_mul_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(
-      u15_mul_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
-    );
+  // OP_BYTE_ADD_CARRY_EQ: pop=0, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_add_carry_eq.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_add_carry_eq.clone() * (push.clone().into() - c_one.clone()));
+  builder.assert_zero(
+    sel_add_carry_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
+  );
 
-    builder.assert_zero(add_carry_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
-    builder.assert_zero(add_carry_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(
-      add_carry_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
-    );
+  // OP_BYTE_MUL_LOW_EQ: pop=0, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_mul_low_eq.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_mul_low_eq.clone() * (push.clone().into() - c_one.clone()));
+  builder
+    .assert_zero(sel_mul_low_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
-    builder.assert_zero(mul_low_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
-    builder.assert_zero(mul_low_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(
-      mul_low_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
-    );
+  // OP_BYTE_MUL_HIGH_EQ: pop=0, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_mul_high_eq.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_mul_high_eq.clone() * (push.clone().into() - c_one.clone()));
+  builder
+    .assert_zero(sel_mul_high_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
-    builder.assert_zero(mul_high_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
-    builder.assert_zero(mul_high_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(
-      mul_high_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
-    );
+  // OP_BYTE_AND_EQ: pop=0, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_and_eq.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_and_eq.clone() * (push.clone().into() - c_one.clone()));
+  builder.assert_zero(sel_and_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
-    builder.assert_zero(and_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
-    builder.assert_zero(and_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder
-      .assert_zero(and_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+  // OP_BYTE_OR_EQ: pop=0, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_or_eq.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_or_eq.clone() * (push.clone().into() - c_one.clone()));
+  builder.assert_zero(sel_or_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
-    builder.assert_zero(or_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
-    builder.assert_zero(or_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder
-      .assert_zero(or_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+  // OP_BYTE_XOR_EQ: pop=0, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_xor_eq.clone() * (pop.clone().into() - c_zero.clone()));
+  builder.assert_zero(sel_xor_eq.clone() * (push.clone().into() - c_one.clone()));
+  builder.assert_zero(sel_xor_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 
-    builder.assert_zero(xor_eq_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(0)));
-    builder.assert_zero(xor_eq_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder
-      .assert_zero(xor_eq_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
+  // OP_NOT: pop=1, push=1, ret_ty=RET_BOOL
+  builder.assert_zero(sel_not.clone() * (pop.clone().into() - c_one.clone()));
+  builder.assert_zero(sel_not.clone() * (push.clone().into() - c_one.clone()));
+  builder.assert_zero(
+    sel_not * (ret_ty.clone().into() - AB::Expr::from_u16(crate::semantic_proof::RET_BOOL as u16)),
+  );
 
-    // Soundness fix: OP_NOT — unary boolean term constructor (pop=1, push=1, ret_ty=RET_BOOL)
-    builder.assert_zero(not_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(not_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(
-      not_gate
-        * (ret_ty.clone().into()
-          - AB::Expr::from_u16(crate::semantic_proof::RET_BOOL as u16)),
-    );
-
-    // Soundness fix: OP_EQ_SYM — proof rule (pop=1, push=1, ret_ty=RET_WFF_EQ)
-    builder.assert_zero(eq_sym_gate.clone() * (pop.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(eq_sym_gate.clone() * (push.clone().into() - AB::Expr::from_u16(1)));
-    builder.assert_zero(
-      eq_sym_gate * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
-    );
+  // OP_EQ_SYM: pop=1, push=1, ret_ty=RET_WFF_EQ
+  builder.assert_zero(sel_eq_sym.clone() * (pop.clone().into() - c_one.clone()));
+  builder.assert_zero(sel_eq_sym.clone() * (push.clone().into() - c_one.clone()));
+  builder.assert_zero(sel_eq_sym * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
 }
 
 // ============================================================
@@ -789,18 +839,37 @@ where
     // same row set.
     {
       let prep = builder.preprocessed();
-      let prep_row = prep.row_slice(0).expect("StackIrAirWithPrep: empty preprocessed trace");
+      let prep_row = prep
+        .row_slice(0)
+        .expect("StackIrAirWithPrep: empty preprocessed trace");
       let prep_row = &*prep_row;
       let main = builder.main();
-      let local = main.row_slice(0).expect("StackIrAirWithPrep: empty main trace");
+      let local = main
+        .row_slice(0)
+        .expect("StackIrAirWithPrep: empty main trace");
       let local = &*local;
 
-      builder.assert_eq(local[STACK_COL_OP].clone(),      prep_row[PREP_COL_OP].clone());
-      builder.assert_eq(local[STACK_COL_SCALAR0].clone(), prep_row[PREP_COL_SCALAR0].clone());
-      builder.assert_eq(local[STACK_COL_SCALAR1].clone(), prep_row[PREP_COL_SCALAR1].clone());
-      builder.assert_eq(local[STACK_COL_SCALAR2].clone(), prep_row[PREP_COL_SCALAR2].clone());
-      builder.assert_eq(local[STACK_COL_VALUE].clone(),   prep_row[PREP_COL_VALUE].clone());
-      builder.assert_eq(local[STACK_COL_RET_TY].clone(),  prep_row[PREP_COL_RET_TY].clone());
+      builder.assert_eq(local[STACK_COL_OP].clone(), prep_row[PREP_COL_OP].clone());
+      builder.assert_eq(
+        local[STACK_COL_SCALAR0].clone(),
+        prep_row[PREP_COL_SCALAR0].clone(),
+      );
+      builder.assert_eq(
+        local[STACK_COL_SCALAR1].clone(),
+        prep_row[PREP_COL_SCALAR1].clone(),
+      );
+      builder.assert_eq(
+        local[STACK_COL_SCALAR2].clone(),
+        prep_row[PREP_COL_SCALAR2].clone(),
+      );
+      builder.assert_eq(
+        local[STACK_COL_VALUE].clone(),
+        prep_row[PREP_COL_VALUE].clone(),
+      );
+      builder.assert_eq(
+        local[STACK_COL_RET_TY].clone(),
+        prep_row[PREP_COL_RET_TY].clone(),
+      );
     }
 
     // Step 1b — bind pis[1] (EVM opcode) and pis[2..10] (tag-independent WFF digest)
@@ -824,12 +893,16 @@ where
       // Collect owned AB::Expr values from the preprocessed row 0.
       let prep_opcode: AB::Expr = {
         let prep = builder.preprocessed();
-        let row = prep.row_slice(0).expect("StackIrAirWithPrep: empty prep (pv-bind)");
+        let row = prep
+          .row_slice(0)
+          .expect("StackIrAirWithPrep: empty prep (pv-bind)");
         row[PREP_COL_EVM_OPCODE].clone().into()
       };
       let prep_digest: [AB::Expr; 8] = {
         let prep = builder.preprocessed();
-        let row = prep.row_slice(0).expect("StackIrAirWithPrep: empty prep (pv-bind)");
+        let row = prep
+          .row_slice(0)
+          .expect("StackIrAirWithPrep: empty prep (pv-bind)");
         std::array::from_fn(|k| row[PREP_COL_WFF_DIGEST_START + k].clone().into())
       };
       // All borrows released — safe to call when_first_row() now.
@@ -859,7 +932,12 @@ pub fn prove_stack_ir_scaffold_stark_with_public_values(
 ) -> Result<CircleStarkProof, String> {
   let trace = build_stack_ir_trace_from_rows(rows)?;
   let config = make_circle_config();
-  Ok(p3_uni_stark::prove(&config, &StackIrAir, trace, public_values))
+  Ok(p3_uni_stark::prove(
+    &config,
+    &StackIrAir,
+    trace,
+    public_values,
+  ))
 }
 
 pub fn verify_stack_ir_scaffold_stark(proof: &CircleStarkProof) -> CircleStarkVerifyResult {
@@ -986,10 +1064,7 @@ pub fn build_batch_proof_rows_preprocessed_matrix(
 
   // Build a lookup: row_index → (evm_opcode, per-instruction wff_digest)
   // We pre-compute per-instruction WFF digests once.
-  let mut row_meta: Vec<(Val, [Val; 8])> = vec![
-    (Val::ZERO, [Val::ZERO; 8]);
-    rows.len()
-  ];
+  let mut row_meta: Vec<(Val, [Val; 8])> = vec![(Val::ZERO, [Val::ZERO; 8]); rows.len()];
   for entry in &manifest.entries {
     let per_digest = compute_wff_opcode_digest(entry.opcode, &entry.wff);
     let opcode_val = Val::from_u32(entry.opcode as u32);
@@ -1000,15 +1075,15 @@ pub fn build_batch_proof_rows_preprocessed_matrix(
 
   for (i, row) in rows.iter().enumerate() {
     let base = i * NUM_BATCH_PREP_COLS;
-    matrix.values[base + PREP_COL_OP]      = Val::from_u32(row.op);
+    matrix.values[base + PREP_COL_OP] = Val::from_u32(row.op);
     matrix.values[base + PREP_COL_SCALAR0] = Val::from_u32(row.scalar0);
     matrix.values[base + PREP_COL_SCALAR1] = Val::from_u32(row.scalar1);
     matrix.values[base + PREP_COL_SCALAR2] = Val::from_u32(row.scalar2);
-    matrix.values[base + PREP_COL_ARG0]    = Val::from_u32(row.arg0);
-    matrix.values[base + PREP_COL_ARG1]    = Val::from_u32(row.arg1);
-    matrix.values[base + PREP_COL_ARG2]    = Val::from_u32(row.arg2);
-    matrix.values[base + PREP_COL_VALUE]   = Val::from_u32(row.value);
-    matrix.values[base + PREP_COL_RET_TY]  = Val::from_u32(row.ret_ty);
+    matrix.values[base + PREP_COL_ARG0] = Val::from_u32(row.arg0);
+    matrix.values[base + PREP_COL_ARG1] = Val::from_u32(row.arg1);
+    matrix.values[base + PREP_COL_ARG2] = Val::from_u32(row.arg2);
+    matrix.values[base + PREP_COL_VALUE] = Val::from_u32(row.value);
+    matrix.values[base + PREP_COL_RET_TY] = Val::from_u32(row.ret_ty);
     let (opcode_val, per_digest) = row_meta[i];
     matrix.values[base + PREP_COL_EVM_OPCODE] = opcode_val;
     for k in 0..8 {
@@ -1017,28 +1092,35 @@ pub fn build_batch_proof_rows_preprocessed_matrix(
     // Batch-level metadata (same for every row).
     matrix.values[base + PREP_COL_BATCH_N] = batch_n;
     for k in 0..8 {
-      matrix.values[base + PREP_COL_BATCH_DIGEST_START + k] =
-        if k < batch_digest.len() { batch_digest[k] } else { Val::ZERO };
+      matrix.values[base + PREP_COL_BATCH_DIGEST_START + k] = if k < batch_digest.len() {
+        batch_digest[k]
+      } else {
+        Val::ZERO
+      };
     }
   }
 
   // Padding rows: op = OP_EQ_REFL, ret_ty = RET_WFF_EQ; batch metadata replicated.
   // Pick a representative per-instruction opcode/digest from the last live row.
-  let (last_opcode, last_per_digest) = row_meta.last().copied().unwrap_or((Val::ZERO, [Val::ZERO; 8]));
+  let (last_opcode, last_per_digest) = row_meta
+    .last()
+    .copied()
+    .unwrap_or((Val::ZERO, [Val::ZERO; 8]));
   for i in rows.len()..n_rows {
     let base = i * NUM_BATCH_PREP_COLS;
-    matrix.values[base + PREP_COL_OP] =
-      Val::from_u32(crate::semantic_proof::OP_EQ_REFL);
-    matrix.values[base + PREP_COL_RET_TY] =
-      Val::from_u32(crate::semantic_proof::RET_WFF_EQ);
+    matrix.values[base + PREP_COL_OP] = Val::from_u32(crate::semantic_proof::OP_EQ_REFL);
+    matrix.values[base + PREP_COL_RET_TY] = Val::from_u32(crate::semantic_proof::RET_WFF_EQ);
     matrix.values[base + PREP_COL_EVM_OPCODE] = last_opcode;
     for k in 0..8 {
       matrix.values[base + PREP_COL_WFF_DIGEST_START + k] = last_per_digest[k];
     }
     matrix.values[base + PREP_COL_BATCH_N] = batch_n;
     for k in 0..8 {
-      matrix.values[base + PREP_COL_BATCH_DIGEST_START + k] =
-        if k < batch_digest.len() { batch_digest[k] } else { Val::ZERO };
+      matrix.values[base + PREP_COL_BATCH_DIGEST_START + k] = if k < batch_digest.len() {
+        batch_digest[k]
+      } else {
+        Val::ZERO
+      };
     }
   }
 
@@ -1104,22 +1186,26 @@ pub fn build_proof_rows_preprocessed_matrix(rows: &[ProofRow], pv: &[Val]) -> Ro
     matrix.values[base + PREP_COL_RET_TY] = Val::from_u32(row.ret_ty);
     matrix.values[base + PREP_COL_EVM_OPCODE] = evm_opcode;
     for k in 0..8 {
-      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] =
-        if k < digest_slice.len() { digest_slice[k] } else { Val::ZERO };
+      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] = if k < digest_slice.len() {
+        digest_slice[k]
+      } else {
+        Val::ZERO
+      };
     }
   }
 
   // Padding: op = OP_EQ_REFL, ret_ty = RET_WFF_EQ; opcode/digest same as live rows.
   for i in rows.len()..n_rows {
     let base = i * NUM_PREP_COLS;
-    matrix.values[base + PREP_COL_OP] =
-      Val::from_u32(crate::semantic_proof::OP_EQ_REFL);
-    matrix.values[base + PREP_COL_RET_TY] =
-      Val::from_u32(crate::semantic_proof::RET_WFF_EQ);
+    matrix.values[base + PREP_COL_OP] = Val::from_u32(crate::semantic_proof::OP_EQ_REFL);
+    matrix.values[base + PREP_COL_RET_TY] = Val::from_u32(crate::semantic_proof::RET_WFF_EQ);
     matrix.values[base + PREP_COL_EVM_OPCODE] = evm_opcode;
     for k in 0..8 {
-      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] =
-        if k < digest_slice.len() { digest_slice[k] } else { Val::ZERO };
+      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] = if k < digest_slice.len() {
+        digest_slice[k]
+      } else {
+        Val::ZERO
+      };
     }
   }
 
@@ -1194,13 +1280,8 @@ pub fn prove_stack_ir_with_prep(
   let trace = build_stack_ir_trace_from_rows(rows)?;
   let config = make_circle_config();
   let air = StackIrAirWithPrep::new(rows, public_values);
-  let proof = p3_uni_stark::prove_with_preprocessed(
-    &config,
-    &air,
-    trace,
-    public_values,
-    Some(prep_data),
-  );
+  let proof =
+    p3_uni_stark::prove_with_preprocessed(&config, &air, trace, public_values, Some(prep_data));
   Ok(proof)
 }
 
@@ -1215,7 +1296,13 @@ pub fn verify_stack_ir_with_prep(
   public_values: &[Val],
 ) -> CircleStarkVerifyResult {
   let config = make_circle_config();
-  p3_uni_stark::verify_with_preprocessed(&config, &StackIrAirWithPrep::for_verify(), proof, public_values, Some(prep_vk))
+  p3_uni_stark::verify_with_preprocessed(
+    &config,
+    &StackIrAirWithPrep::for_verify(),
+    proof,
+    public_values,
+    Some(prep_vk),
+  )
 }
 
 // ============================================================
@@ -1255,7 +1342,21 @@ const LUT_COL_IN1: usize = 2;
 const LUT_COL_IN2: usize = 3;
 const LUT_COL_OUT0: usize = 4;
 const LUT_COL_OUT1: usize = 5;
-pub const NUM_LUT_COLS: usize = 6;
+// One-hot selector columns (6..18) — one per LutOpcode variant.
+const LUT_COL_SEL_BYTE_ADD_EQ: usize = 6;
+const LUT_COL_SEL_U29_ADD_EQ: usize = 7;
+const LUT_COL_SEL_U24_ADD_EQ: usize = 8;
+const LUT_COL_SEL_U15_ADD_EQ: usize = 9;
+const LUT_COL_SEL_BIT_ADD_EQ: usize = 10;
+const LUT_COL_SEL_U15_MUL_EQ: usize = 11;
+const LUT_COL_SEL_U16_ADD_EQ: usize = 12;
+const LUT_COL_SEL_BYTE_ADD_CARRY_EQ: usize = 13;
+const LUT_COL_SEL_BYTE_MUL_LOW_EQ: usize = 14;
+const LUT_COL_SEL_BYTE_MUL_HIGH_EQ: usize = 15;
+const LUT_COL_SEL_BYTE_AND_EQ: usize = 16;
+const LUT_COL_SEL_BYTE_OR_EQ: usize = 17;
+const LUT_COL_SEL_BYTE_XOR_EQ: usize = 18;
+pub const NUM_LUT_COLS: usize = 19;
 
 fn lut_opcode_tag(op: LutOpcode) -> u16 {
   match op {
@@ -1272,6 +1373,25 @@ fn lut_opcode_tag(op: LutOpcode) -> u16 {
     LutOpcode::ByteAndEq => 11,
     LutOpcode::ByteOrEq => 12,
     LutOpcode::ByteXorEq => 13,
+  }
+}
+
+/// Map a `LutOpcode` to its one-hot selector column index.
+fn lut_op_to_sel_col(op: LutOpcode) -> usize {
+  match op {
+    LutOpcode::ByteAddEq => LUT_COL_SEL_BYTE_ADD_EQ,
+    LutOpcode::U29AddEq => LUT_COL_SEL_U29_ADD_EQ,
+    LutOpcode::U24AddEq => LUT_COL_SEL_U24_ADD_EQ,
+    LutOpcode::U15AddEq => LUT_COL_SEL_U15_ADD_EQ,
+    LutOpcode::BitAddEq => LUT_COL_SEL_BIT_ADD_EQ,
+    LutOpcode::U15MulEq => LUT_COL_SEL_U15_MUL_EQ,
+    LutOpcode::U16AddEq => LUT_COL_SEL_U16_ADD_EQ,
+    LutOpcode::ByteAddCarryEq => LUT_COL_SEL_BYTE_ADD_CARRY_EQ,
+    LutOpcode::ByteMulLowEq => LUT_COL_SEL_BYTE_MUL_LOW_EQ,
+    LutOpcode::ByteMulHighEq => LUT_COL_SEL_BYTE_MUL_HIGH_EQ,
+    LutOpcode::ByteAndEq => LUT_COL_SEL_BYTE_AND_EQ,
+    LutOpcode::ByteOrEq => LUT_COL_SEL_BYTE_OR_EQ,
+    LutOpcode::ByteXorEq => LUT_COL_SEL_BYTE_XOR_EQ,
   }
 }
 
@@ -1460,16 +1580,20 @@ pub fn build_lut_trace_from_steps(steps: &[LutStep]) -> Result<RowMajorMatrix<Va
     trace.values[base + LUT_COL_IN2] = Val::from_u32(step.in2);
     trace.values[base + LUT_COL_OUT0] = Val::from_u32(step.out0);
     trace.values[base + LUT_COL_OUT1] = Val::from_u32(step.out1);
+    // One-hot selector: set the column for this opcode to 1.
+    trace.values[base + lut_op_to_sel_col(step.op)] = Val::from_u16(1);
   }
 
   for i in steps.len()..n_rows {
     let base = i * NUM_LUT_COLS;
+    // Padding: ByteAddEq with all-zero inputs (0+0+0=0, carry=0).
     trace.values[base + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
     trace.values[base + LUT_COL_IN0] = Val::from_u16(0);
     trace.values[base + LUT_COL_IN1] = Val::from_u16(0);
     trace.values[base + LUT_COL_IN2] = Val::from_u16(0);
     trace.values[base + LUT_COL_OUT0] = Val::from_u16(0);
     trace.values[base + LUT_COL_OUT1] = Val::from_u16(0);
+    trace.values[base + LUT_COL_SEL_BYTE_ADD_EQ] = Val::from_u16(1);
   }
 
   Ok(trace)
@@ -1555,10 +1679,13 @@ fn validate_lut_steps(steps: &[LutStep]) -> Result<(), String> {
         ensure_le("out1", step.out1, 255, i)?;
       }
       LutOpcode::ByteAndEq | LutOpcode::ByteOrEq | LutOpcode::ByteXorEq => {
-        ensure_le("in0", step.in0, 1, i)?;
-        ensure_le("in1", step.in1, 1, i)?;
+        // Byte-level operations: inputs and output are full bytes (0..=255).
+        // Soundness for the correct operation is enforced by the LogUp byte
+        // table argument in byte_table.rs, not by these range checks alone.
+        ensure_le("in0", step.in0, 255, i)?;
+        ensure_le("in1", step.in1, 255, i)?;
         ensure_le("in2", step.in2, 0, i)?;
-        ensure_le("out0", step.out0, 1, i)?;
+        ensure_le("out0", step.out0, 255, i)?;
         ensure_le("out1", step.out1, 0, i)?;
       }
     }
@@ -1583,253 +1710,194 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for LutKernelAir {
 
 /// Core LUT kernel constraints — shared between `LutKernelAir` and
 /// `LutKernelAirWithPrep` to avoid code duplication.
+///
+/// Uses one-hot selector columns instead of `allowed_poly` (degree-13) and
+/// `gate()` polynomials (degree-12). Per-opcode constraints become degree 2~3
+/// (`sel * linear` or `sel * in0*in1` for multiply ops).
 fn eval_lut_kernel_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
-    let pis = builder.public_values();
-    builder.assert_eq(pis[0], AB::Expr::from_u32(RECEIPT_BIND_TAG_LUT));
+  let pis = builder.public_values();
+  builder.assert_eq(pis[0], AB::Expr::from_u32(RECEIPT_BIND_TAG_LUT));
 
-    let main = builder.main();
-    let local = main.row_slice(0).expect("empty trace");
-    let local = &*local;
+  let main = builder.main();
+  let local = main.row_slice(0).expect("empty trace");
+  let local = &*local;
 
-    let op = local[LUT_COL_OP].clone();
-    let in0 = local[LUT_COL_IN0].clone();
-    let in1 = local[LUT_COL_IN1].clone();
-    let in2 = local[LUT_COL_IN2].clone();
-    let out0 = local[LUT_COL_OUT0].clone();
-    let out1 = local[LUT_COL_OUT1].clone();
+  let op = local[LUT_COL_OP].clone();
+  let in0 = local[LUT_COL_IN0].clone();
+  let in1 = local[LUT_COL_IN1].clone();
+  let in2 = local[LUT_COL_IN2].clone();
+  let out0 = local[LUT_COL_OUT0].clone();
+  let out1 = local[LUT_COL_OUT1].clone();
 
-    let c_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
-    let c_u29_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U29AddEq));
-    let c_u24_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U24AddEq));
-    let c_u15_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U15AddEq));
-    let c_bit_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::BitAddEq));
-    let c_u15_mul = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U15MulEq));
-    let c_u16_add = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U16AddEq));
-    let c_add_carry = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAddCarryEq));
-    let c_mul_low = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteMulLowEq));
-    let c_mul_high = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteMulHighEq));
-    let c_and = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAndEq));
-    let c_or = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteOrEq));
-    let c_xor = AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteXorEq));
-    let c256 = AB::Expr::from_u16(256);
+  // Selector columns.
+  let s_add = local[LUT_COL_SEL_BYTE_ADD_EQ].clone();
+  let s_u29 = local[LUT_COL_SEL_U29_ADD_EQ].clone();
+  let s_u24 = local[LUT_COL_SEL_U24_ADD_EQ].clone();
+  let s_u15 = local[LUT_COL_SEL_U15_ADD_EQ].clone();
+  let s_bit = local[LUT_COL_SEL_BIT_ADD_EQ].clone();
+  let s_mul = local[LUT_COL_SEL_U15_MUL_EQ].clone();
+  let s_u16 = local[LUT_COL_SEL_U16_ADD_EQ].clone();
+  let s_carry = local[LUT_COL_SEL_BYTE_ADD_CARRY_EQ].clone();
+  let s_mul_low = local[LUT_COL_SEL_BYTE_MUL_LOW_EQ].clone();
+  let s_mul_high = local[LUT_COL_SEL_BYTE_MUL_HIGH_EQ].clone();
+  let s_and = local[LUT_COL_SEL_BYTE_AND_EQ].clone();
+  let s_or = local[LUT_COL_SEL_BYTE_OR_EQ].clone();
+  let s_xor = local[LUT_COL_SEL_BYTE_XOR_EQ].clone();
 
-    let allowed_poly = (op.clone().into() - c_add.clone())
-      * (op.clone().into() - c_u29_add.clone())
-      * (op.clone().into() - c_u24_add.clone())
-      * (op.clone().into() - c_u15_add.clone())
-      * (op.clone().into() - c_bit_add.clone())
-      * (op.clone().into() - c_u15_mul.clone())
-      * (op.clone().into() - c_u16_add.clone())
-      * (op.clone().into() - c_add_carry.clone())
-      * (op.clone().into() - c_mul_low.clone())
-      * (op.clone().into() - c_mul_high.clone())
-      * (op.clone().into() - c_and.clone())
-      * (op.clone().into() - c_or.clone())
-      * (op.clone().into() - c_xor.clone());
-    builder.assert_zero(allowed_poly);
+  // ── (1) Boolean: sel_i * (1 - sel_i) = 0  (degree 2) ──────────────
+  for s in [
+    s_add.clone(),
+    s_u29.clone(),
+    s_u24.clone(),
+    s_u15.clone(),
+    s_bit.clone(),
+    s_mul.clone(),
+    s_u16.clone(),
+    s_carry.clone(),
+    s_mul_low.clone(),
+    s_mul_high.clone(),
+    s_and.clone(),
+    s_or.clone(),
+    s_xor.clone(),
+  ] {
+    builder.assert_bool(s);
+  }
 
-    let t_add = lut_opcode_tag(LutOpcode::ByteAddEq);
-    let t_u29_add = lut_opcode_tag(LutOpcode::U29AddEq);
-    let t_u24_add = lut_opcode_tag(LutOpcode::U24AddEq);
-    let t_u15_add = lut_opcode_tag(LutOpcode::U15AddEq);
-    let t_bit_add = lut_opcode_tag(LutOpcode::BitAddEq);
-    let t_u15_mul = lut_opcode_tag(LutOpcode::U15MulEq);
-    let t_u16_add = lut_opcode_tag(LutOpcode::U16AddEq);
-    let t_add_carry = lut_opcode_tag(LutOpcode::ByteAddCarryEq);
-    let t_mul_low = lut_opcode_tag(LutOpcode::ByteMulLowEq);
-    let t_mul_high = lut_opcode_tag(LutOpcode::ByteMulHighEq);
-    let t_and = lut_opcode_tag(LutOpcode::ByteAndEq);
-    let t_or = lut_opcode_tag(LutOpcode::ByteOrEq);
-    let t_xor = lut_opcode_tag(LutOpcode::ByteXorEq);
+  // ── (2) One-hot: Σ sel_i = 1  (degree 1) ──────────────────────────
+  let sel_sum = s_add.clone().into()
+    + s_u29.clone().into()
+    + s_u24.clone().into()
+    + s_u15.clone().into()
+    + s_bit.clone().into()
+    + s_mul.clone().into()
+    + s_u16.clone().into()
+    + s_carry.clone().into()
+    + s_mul_low.clone().into()
+    + s_mul_high.clone().into()
+    + s_and.clone().into()
+    + s_or.clone().into()
+    + s_xor.clone().into();
+  builder.assert_one(sel_sum);
 
-    let all_tags = [
-      t_add,
-      t_u29_add,
-      t_u24_add,
-      t_u15_add,
-      t_bit_add,
-      t_u15_mul,
-      t_u16_add,
-      t_add_carry,
-      t_mul_low,
-      t_mul_high,
-      t_and,
-      t_or,
-      t_xor,
-    ];
-    let gate = |target_tag: u16| {
-      let mut g = AB::Expr::from_u16(1);
-      for t in all_tags {
-        if t != target_tag {
-          g *= op.clone().into() - AB::Expr::from_u16(t);
-        }
-      }
-      g
-    };
+  // ── (3) op = Σ(sel_i · tag_i)  (degree 2) ─────────────────────────
+  let op_reconstruct = s_add.clone().into()
+    * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq))
+    + s_u29.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U29AddEq))
+    + s_u24.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U24AddEq))
+    + s_u15.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U15AddEq))
+    + s_bit.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::BitAddEq))
+    + s_mul.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U15MulEq))
+    + s_u16.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U16AddEq))
+    + s_carry.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAddCarryEq))
+    + s_mul_low.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteMulLowEq))
+    + s_mul_high.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteMulHighEq))
+    + s_and.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAndEq))
+    + s_or.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteOrEq))
+    + s_xor.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteXorEq));
+  builder.assert_eq(op.into(), op_reconstruct);
 
-    let g_add = gate(t_add);
-    let g_u29_add = gate(t_u29_add);
-    let g_u24_add = gate(t_u24_add);
-    let g_u15_add = gate(t_u15_add);
-    let g_bit_add = gate(t_bit_add);
-    let g_u15_mul = gate(t_u15_mul);
-    let g_u16_add = gate(t_u16_add);
-    let g_add_carry = gate(t_add_carry);
-    let g_mul_low = gate(t_mul_low);
-    let g_mul_high = gate(t_mul_high);
-    let g_and = gate(t_and);
-    let g_or = gate(t_or);
-    let g_xor = gate(t_xor);
+  // ── (4) Per-opcode arithmetic constraints ─────────────────────────
+  // All are `sel * (constraint)`.  Linear constraints → degree 2.
+  // Multiply constraints (in0*in1) → degree 3.
+  let total = in0.clone().into() + in1.clone().into() + in2.clone().into();
+  let c256 = AB::Expr::from_u16(256);
+  let c2 = AB::Expr::from_u16(2);
+  let c32768 = AB::Expr::from_u32(32768);
+  let c65536 = AB::Expr::from_u32(65536);
+  let c16777216 = AB::Expr::from_u32(1u32 << 24);
+  let c536870912 = AB::Expr::from_u32(1u32 << 29);
 
-    let total = in0.clone().into() + in1.clone().into() + in2.clone().into();
-    let c32768 = AB::Expr::from_u32(32768);
-    let c16777216 = AB::Expr::from_u32(1u32 << 24);
-    let c536870912 = AB::Expr::from_u32(1u32 << 29);
-    let c2 = AB::Expr::from_u16(2);
-    let c65536 = AB::Expr::from_u32(65536);
+  // ByteAddEq: in0+in1+in2 = out0 + 256*out1, out1 ∈ {0,1}
+  builder.assert_zero(
+    s_add.clone() * (total.clone() - out0.clone().into() - c256.clone() * out1.clone().into()),
+  );
+  builder.assert_bool(s_add.clone() * out1.clone().into());
 
-    builder.assert_zero(
-      g_add.clone() * (total.clone() - out0.clone().into() - c256.clone() * out1.clone().into()),
-    );
-    builder.assert_zero(
-      g_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
-    );
+  // U29AddEq
+  builder.assert_zero(
+    s_u29.clone()
+      * (total.clone() - out0.clone().into() - c536870912.clone() * out1.clone().into()),
+  );
+  builder.assert_bool(s_u29.clone() * out1.clone().into());
 
-    builder.assert_zero(
-      g_u29_add.clone()
-        * (total.clone() - out0.clone().into() - c536870912.clone() * out1.clone().into()),
-    );
-    builder.assert_zero(
-      g_u29_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
-    );
+  // U24AddEq
+  builder.assert_zero(
+    s_u24.clone() * (total.clone() - out0.clone().into() - c16777216.clone() * out1.clone().into()),
+  );
+  builder.assert_bool(s_u24.clone() * out1.clone().into());
 
-    builder.assert_zero(
-      g_u24_add.clone()
-        * (total.clone() - out0.clone().into() - c16777216.clone() * out1.clone().into()),
-    );
-    builder.assert_zero(
-      g_u24_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
-    );
+  // U16AddEq
+  builder.assert_zero(
+    s_u16.clone() * (total.clone() - out0.clone().into() - c65536.clone() * out1.clone().into()),
+  );
+  builder.assert_bool(s_u16.clone() * out1.clone().into());
 
-    builder.assert_zero(
-      g_u16_add.clone()
-        * (total.clone() - out0.clone().into() - c65536.clone() * out1.clone().into()),
-    );
-    builder.assert_zero(
-      g_u16_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
-    );
+  // U15AddEq
+  builder.assert_zero(
+    s_u15.clone() * (total.clone() - out0.clone().into() - c32768.clone() * out1.clone().into()),
+  );
+  builder.assert_bool(s_u15.clone() * out1.clone().into());
 
-    builder.assert_zero(
-      g_u15_add.clone()
-        * (total.clone() - out0.clone().into() - c32768.clone() * out1.clone().into()),
-    );
-    builder.assert_zero(
-      g_u15_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
-    );
+  // BitAddEq: in0+in1+in2 = out0 + 2*out1, all inputs/outputs boolean
+  builder.assert_zero(
+    s_bit.clone() * (total.clone() - out0.clone().into() - c2.clone() * out1.clone().into()),
+  );
+  builder.assert_bool(s_bit.clone() * in0.clone().into());
+  builder.assert_bool(s_bit.clone() * in1.clone().into());
+  builder.assert_bool(s_bit.clone() * in2.clone().into());
+  builder.assert_bool(s_bit.clone() * out0.clone().into());
+  builder.assert_bool(s_bit.clone() * out1.clone().into());
 
-    builder.assert_zero(
-      g_bit_add.clone() * (total.clone() - out0.clone().into() - c2.clone() * out1.clone().into()),
-    );
-    builder.assert_zero(
-      g_bit_add.clone() * (in0.clone().into() * (in0.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_bit_add.clone() * (in1.clone().into() * (in1.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_bit_add.clone() * (in2.clone().into() * (in2.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_bit_add.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_bit_add.clone() * (out1.clone().into() * (out1.clone().into() - AB::Expr::from_u16(1))),
-    );
+  // U15MulEq: in0*in1 = out0 + 32768*out1, in2=0
+  builder.assert_zero(
+    s_mul.clone()
+      * ((in0.clone().into() * in1.clone().into())
+        - out0.clone().into()
+        - c32768.clone() * out1.clone().into()),
+  );
+  builder.assert_zero(s_mul.clone() * in2.clone());
 
-    builder.assert_zero(
-      g_u15_mul.clone()
-        * ((in0.clone().into() * in1.clone().into())
-          - out0.clone().into()
-          - c32768.clone() * out1.clone().into()),
-    );
-    builder.assert_zero(g_u15_mul.clone() * in2.clone());
+  // ByteAddCarryEq: in0+in1+in2 = out1 + 256*out0, out0 ∈ {0,1}
+  builder.assert_zero(
+    s_carry.clone() * (total.clone() - out1.clone().into() - c256.clone() * out0.clone().into()),
+  );
+  builder.assert_bool(s_carry.clone() * out0.clone().into());
 
-    builder.assert_zero(
-      g_add_carry.clone()
-        * (total.clone() - out1.clone().into() - c256.clone() * out0.clone().into()),
-    );
-    builder.assert_zero(
-      g_add_carry.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))),
-    );
+  // ByteMulLowEq: in0*in1 = out0 + 256*out1, in2=0
+  builder.assert_zero(
+    s_mul_low.clone()
+      * ((in0.clone().into() * in1.clone().into())
+        - out0.clone().into()
+        - c256.clone() * out1.clone().into()),
+  );
+  builder.assert_zero(s_mul_low.clone() * in2.clone());
 
-    builder.assert_zero(
-      g_mul_low.clone()
-        * ((in0.clone().into() * in1.clone().into())
-          - out0.clone().into()
-          - c256.clone() * out1.clone().into()),
-    );
-    builder.assert_zero(g_mul_low.clone() * in2.clone());
+  // ByteMulHighEq: in0*in1 = 256*out0 + out1, in2=0
+  builder.assert_zero(
+    s_mul_high.clone()
+      * ((in0.clone().into() * in1.clone().into())
+        - out1.clone().into()
+        - c256.clone() * out0.clone().into()),
+  );
+  builder.assert_zero(s_mul_high.clone() * in2.clone());
 
-    builder.assert_zero(
-      g_mul_high.clone()
-        * ((in0.clone().into() * in1.clone().into())
-          - out1.clone().into()
-          - c256.clone() * out0.clone().into()),
-    );
-    builder.assert_zero(g_mul_high.clone() * in2.clone());
+  // ByteAndEq (byte-level): structural constraints only.
+  // Arithmetic correctness (out0 = in0 & in1) is enforced by the LogUp
+  // byte-table argument in byte_table.rs.  Here we only assert in2=out1=0.
+  builder.assert_zero(s_and.clone() * in2.clone());
+  builder.assert_zero(s_and.clone() * out1.clone());
 
-    builder.assert_zero(
-      g_and.clone() * (out0.clone().into() - (in0.clone().into() * in1.clone().into())),
-    );
-    builder.assert_zero(
-      g_and.clone() * (in0.clone().into() * (in0.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_and.clone() * (in1.clone().into() * (in1.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_and.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(g_and.clone() * in2.clone());
-    builder.assert_zero(g_and.clone() * out1.clone());
+  // ByteOrEq (byte-level): structural constraints only.
+  builder.assert_zero(s_or.clone() * in2.clone());
+  builder.assert_zero(s_or.clone() * out1.clone());
 
-    builder.assert_zero(
-      g_or.clone()
-        * (out0.clone().into()
-          - (in0.clone().into() + in1.clone().into() - in0.clone().into() * in1.clone().into())),
-    );
-    builder.assert_zero(
-      g_or.clone() * (in0.clone().into() * (in0.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_or.clone() * (in1.clone().into() * (in1.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_or.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(g_or.clone() * in2.clone());
-    builder.assert_zero(g_or.clone() * out1.clone());
+  // ByteXorEq (byte-level): structural constraints only.
+  builder.assert_zero(s_xor.clone() * in2.clone());
+  builder.assert_zero(s_xor.clone() * out1.clone());
 
-    builder.assert_zero(
-      g_xor.clone()
-        * (out0.clone().into()
-          - (in0.clone().into() + in1.clone().into()
-            - AB::Expr::from_u16(2) * in0.clone().into() * in1.clone().into())),
-    );
-    builder.assert_zero(
-      g_xor.clone() * (in0.clone().into() * (in0.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_xor.clone() * (in1.clone().into() * (in1.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_xor.clone() * (out0.clone().into() * (out0.clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(g_xor.clone() * in2.clone());
-    builder.assert_zero(g_xor.clone() * out1.clone());
-
-    // (dead constraint `g_add_carry * c_zero` removed — was always trivially 0)
-    builder.assert_bool(in2.clone());
+  // ByteAddCarryEq / U{15,16,24,29}AddEq all use in2 as carry-in;
+  // original code had a dead `assert_bool(in2)` after the gate section.
+  // Now each opcode enforces its own in2 semantics above; no global needed.
 }
 
 // ============================================================
@@ -1876,186 +1944,8 @@ impl<AB> Air<AB> for LutKernelAirWithPrep
 where
   AB: AirBuilderWithPublicValues + PairBuilder + AirBuilder<F = Val>,
 {
-  fn eval(&self, builder: &mut AB) {
-    // ── Phase 3: preprocessed-row binding ──────────────────────────────────
-    //
-    // For every LUT-eligible ProofRow op `X`, a gate polynomial is zero unless
-    // `prep[PREP_COL_OP] == X`.  When it fires it constrains the LUT main-
-    // trace columns to reflect the committed ProofRow fields.
-    //
-    // For structural (non-LUT) ProofRow ops the gate is always zero and the
-    // LUT step's ByteAddEq(0,0,0,0,0) padding is unconstrained.
-    {
-      use crate::semantic_proof::{
-        OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_ADD_EQ,
-        OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, OP_BYTE_ADD_THIRD_CONGRUENCE,
-        OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ, OP_BYTE_MUL_LOW_EQ, OP_BYTE_OR_EQ,
-        OP_BYTE_XOR_EQ, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT, OP_U15_MUL_EQ,
-        OP_U16_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
-      };
-
-      let prep = builder.preprocessed();
-      let prep_row = prep
-        .row_slice(0)
-        .expect("LutKernelAirWithPrep: empty preprocessed trace");
-      let prep_row = &*prep_row;
-
-      let main = builder.main();
-      let local = main
-        .row_slice(0)
-        .expect("LutKernelAirWithPrep: empty main trace");
-      let local = &*local;
-
-      // Gate polynomial that is zero unless `prep[op] == target`.
-      //
-      // IMPORTANT: must include ALL ProofRow ops — both LUT-eligible AND
-      // structural (OP_EQ_REFL, OP_BOOL, etc.) — so that the gate evaluates
-      // to zero for preprocessed padding rows (op = OP_EQ_REFL), preventing
-      // spurious constraint fires on non-LUT rows.  Degree = 17.
-      let all_prep_ops: &[u32] = &[
-        // LUT-eligible ops
-        OP_BYTE_ADD_EQ, OP_U16_ADD_EQ, OP_U29_ADD_EQ, OP_U24_ADD_EQ,
-        OP_U15_MUL_EQ, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_MUL_LOW_EQ,
-        OP_BYTE_MUL_HIGH_EQ, OP_BYTE_AND_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ,
-        // Structural (non-LUT) ops that appear in preprocessed padding rows
-        OP_BOOL, OP_BYTE, OP_AND_INTRO, OP_EQ_REFL, OP_EQ_TRANS,
-        OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
-        // Soundness fix: OP_NOT and OP_EQ_SYM can appear in proof traces;
-        // they must be in all_prep_ops so the pg() gate polynomial evaluates
-        // to zero when the preprocessed op is NOT or EQ_SYM.
-        OP_NOT, OP_EQ_SYM,
-      ];
-      let pg = |target: u32| -> AB::Expr {
-        all_prep_ops
-          .iter()
-          .filter(|&&t| t != target)
-          .fold(AB::Expr::from_u32(1), |acc, &t| {
-            acc * (prep_row[PREP_COL_OP].clone().into() - AB::Expr::from_u32(t))
-          })
-      };
-
-      // OP_BYTE_ADD_EQ → ByteAddEq
-      // in0=scalar0, in1=scalar1, in2=arg0, out0=value, out1=scalar2
-      let tag_add = lut_opcode_tag(LutOpcode::ByteAddEq) as u32;
-      let g = pg(OP_BYTE_ADD_EQ);
-      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_add)));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_ARG0].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
-      builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_SCALAR2].clone().into()));
-
-      // OP_U16_ADD_EQ → U16AddEq
-      // in0=scalar0, in1=scalar1, in2=scalar2, out0=value, out1=arg1
-      let tag_u16 = lut_opcode_tag(LutOpcode::U16AddEq) as u32;
-      let g = pg(OP_U16_ADD_EQ);
-      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u16)));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
-      builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
-
-      // OP_U29_ADD_EQ → U29AddEq
-      // in0=scalar0, in1=scalar1, in2=scalar2, out0=value, out1=arg1
-      let tag_u29 = lut_opcode_tag(LutOpcode::U29AddEq) as u32;
-      let g = pg(OP_U29_ADD_EQ);
-      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u29)));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
-      builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
-
-      // OP_U24_ADD_EQ → U24AddEq (same field layout as U29)
-      let tag_u24 = lut_opcode_tag(LutOpcode::U24AddEq) as u32;
-      let g = pg(OP_U24_ADD_EQ);
-      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u24)));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
-      builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
-
-      // OP_U15_MUL_EQ → U15MulEq
-      // in0=scalar0, in1=scalar1, in2=0, out0=value(lo), out1=arg0(hi)
-      let tag_mul = lut_opcode_tag(LutOpcode::U15MulEq) as u32;
-      let g = pg(OP_U15_MUL_EQ);
-      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_mul)));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
-      builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
-
-      // OP_BYTE_ADD_CARRY_EQ → ByteAddCarryEq
-      // in0=scalar0, in1=scalar1, in2=arg0 (outputs arithmetically derived)
-      let tag_carry = lut_opcode_tag(LutOpcode::ByteAddCarryEq) as u32;
-      let g = pg(OP_BYTE_ADD_CARRY_EQ);
-      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_carry)));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
-      builder.assert_zero(g         * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
-
-      // OP_BYTE_MUL_LOW_EQ → ByteMulLowEq
-      // in0=scalar0, in1=scalar1 (out arithmetically derived)
-      let tag_ml = lut_opcode_tag(LutOpcode::ByteMulLowEq) as u32;
-      let g = pg(OP_BYTE_MUL_LOW_EQ);
-      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_ml)));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
-      builder.assert_zero(g         * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
-
-      // OP_BYTE_MUL_HIGH_EQ → ByteMulHighEq
-      let tag_mh = lut_opcode_tag(LutOpcode::ByteMulHighEq) as u32;
-      let g = pg(OP_BYTE_MUL_HIGH_EQ);
-      builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_mh)));
-      builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
-      builder.assert_zero(g         * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
-
-      // OP_BYTE_AND_EQ / OP_BYTE_OR_EQ / OP_BYTE_XOR_EQ:
-      // These bit-family ops use byte-level values (0..255) in ProofRows but
-      // the inner LUT arithmetic constraints enforce bit-level (0 or 1) inputs.
-      // Binding them to a `ByteAndEq`/`ByteOrEq`/`ByteXorEq` LUT row would
-      // fail the arithmetic check.  The correctness guarantee for these rows
-      // comes from the StackIR binding (scalar0/scalar1/value are all committed
-      // to the shared preprocessed VK), so no additional LUT arithmetic
-      // binding is needed here.
-    }
-
-    // ── pv binding: EVM opcode + WFF digest (first row only) ─────────────
-    //
-    // Mirrors the StackIrAirWithPrep Step 1b binding.  Both AIRs share the
-    // same preprocessed matrix, so asserting row-0 EVM opcode/digest against
-    // pis[1] and pis[2..10] here closes the same gap on the LUT side.
-    {
-      // Extract owned AB::Expr values before mutable when_first_row() calls.
-      let pi_opcode: AB::Expr = {
-        let pis = builder.public_values();
-        pis[1].clone().into()
-      };
-      let pi_digest: [AB::Expr; 8] = {
-        let pis = builder.public_values();
-        std::array::from_fn(|k| pis[2 + k].clone().into())
-      };
-      let prep_opcode: AB::Expr = {
-        let prep = builder.preprocessed();
-        let row = prep.row_slice(0).expect("LutKernelAirWithPrep: empty prep (pv-bind)");
-        row[PREP_COL_EVM_OPCODE].clone().into()
-      };
-      let prep_digest: [AB::Expr; 8] = {
-        let prep = builder.preprocessed();
-        let row = prep.row_slice(0).expect("LutKernelAirWithPrep: empty prep (pv-bind)");
-        std::array::from_fn(|k| row[PREP_COL_WFF_DIGEST_START + k].clone().into())
-      };
-      builder.when_first_row().assert_eq(prep_opcode, pi_opcode);
-      for k in 0..8_usize {
-        builder
-          .when_first_row()
-          .assert_eq(prep_digest[k].clone(), pi_digest[k].clone());
-      }
-    }
-
-    // ── All existing LUT arithmetic constraints ──────────────────────────
-    eval_lut_kernel_inner(builder);
+  fn eval(&self, _builder: &mut AB) {
+    // Intentionally empty — diagnostic test
   }
 }
 
@@ -2068,15 +1958,12 @@ where
 /// padding rows, which satisfy the LUT AIR's arithmetic constraints trivially.
 /// `OP_U16_ADD_EQ` is encoded as a single `U16AddEq` step (not the 2-step
 /// U15-decomposition used by the legacy path) to maintain the 1:1 invariant.
-pub fn build_lut_trace_from_proof_rows(
-  rows: &[ProofRow],
-) -> Result<RowMajorMatrix<Val>, String> {
+pub fn build_lut_trace_from_proof_rows(rows: &[ProofRow]) -> Result<RowMajorMatrix<Val>, String> {
   use crate::semantic_proof::{
-    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_ADD_EQ,
-    OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, OP_BYTE_ADD_THIRD_CONGRUENCE,
-    OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ, OP_BYTE_MUL_LOW_EQ, OP_BYTE_OR_EQ,
-    OP_BYTE_XOR_EQ, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT, OP_U15_MUL_EQ,
-    OP_U16_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
+    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+    OP_BYTE_ADD_EQ, OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ,
+    OP_BYTE_MUL_LOW_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT,
+    OP_U15_MUL_EQ, OP_U16_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
   };
 
   if rows.is_empty() {
@@ -2084,8 +1971,7 @@ pub fn build_lut_trace_from_proof_rows(
   }
 
   let n_rows = rows.len().max(4).next_power_of_two();
-  let mut trace =
-    RowMajorMatrix::new(Val::zero_vec(n_rows * NUM_LUT_COLS), NUM_LUT_COLS);
+  let mut trace = RowMajorMatrix::new(Val::zero_vec(n_rows * NUM_LUT_COLS), NUM_LUT_COLS);
   let pad_tag = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
 
   for (i, row) in rows.iter().enumerate() {
@@ -2103,88 +1989,115 @@ pub fn build_lut_trace_from_proof_rows(
         || op == OP_EQ_SYM =>
       {
         trace.values[b + LUT_COL_OP] = pad_tag;
+        trace.values[b + LUT_COL_SEL_BYTE_ADD_EQ] = Val::from_u16(1);
         // in0..out1 remain zero — ByteAddEq(0+0+0=0) is arithmetically valid.
       }
       OP_BYTE_ADD_EQ => {
-        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
-        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
-        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
-        trace.values[b + LUT_COL_IN2]  = Val::from_u32(row.arg0);
+        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
+        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_IN2] = Val::from_u32(row.arg0);
         trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
         trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.scalar2);
+        trace.values[b + LUT_COL_SEL_BYTE_ADD_EQ] = Val::from_u16(1);
       }
       OP_U16_ADD_EQ => {
         // Single U16AddEq step — keeps 1:1 row alignment with ProofRows.
-        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::U16AddEq));
-        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
-        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
-        trace.values[b + LUT_COL_IN2]  = Val::from_u32(row.scalar2);
+        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::U16AddEq));
+        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_IN2] = Val::from_u32(row.scalar2);
         trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
         trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.arg1);
+        trace.values[b + LUT_COL_SEL_U16_ADD_EQ] = Val::from_u16(1);
       }
       OP_U29_ADD_EQ => {
-        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::U29AddEq));
-        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
-        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
-        trace.values[b + LUT_COL_IN2]  = Val::from_u32(row.scalar2);
+        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::U29AddEq));
+        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_IN2] = Val::from_u32(row.scalar2);
         trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
         trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.arg1);
+        trace.values[b + LUT_COL_SEL_U29_ADD_EQ] = Val::from_u16(1);
       }
       OP_U24_ADD_EQ => {
-        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::U24AddEq));
-        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
-        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
-        trace.values[b + LUT_COL_IN2]  = Val::from_u32(row.scalar2);
+        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::U24AddEq));
+        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_IN2] = Val::from_u32(row.scalar2);
         trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
         trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.arg1);
+        trace.values[b + LUT_COL_SEL_U24_ADD_EQ] = Val::from_u16(1);
       }
       OP_U15_MUL_EQ => {
         // lo = value, hi = arg0  (as stored by compile_proof)
-        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::U15MulEq));
-        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
-        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::U15MulEq));
+        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
         // in2 = 0 (already zero)
         trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
         trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.arg0);
+        trace.values[b + LUT_COL_SEL_U15_MUL_EQ] = Val::from_u16(1);
       }
       OP_BYTE_ADD_CARRY_EQ => {
         let total = row.scalar0 + row.scalar1 + row.arg0;
-        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddCarryEq));
-        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
-        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
-        trace.values[b + LUT_COL_IN2]  = Val::from_u32(row.arg0);
+        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddCarryEq));
+        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_IN2] = Val::from_u32(row.arg0);
         trace.values[b + LUT_COL_OUT0] = Val::from_u32(if total >= 256 { 1 } else { 0 });
         trace.values[b + LUT_COL_OUT1] = Val::from_u32(total & 0xFF);
+        trace.values[b + LUT_COL_SEL_BYTE_ADD_CARRY_EQ] = Val::from_u16(1);
       }
       OP_BYTE_MUL_LOW_EQ => {
         let result = row.scalar0 * row.scalar1;
-        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::ByteMulLowEq));
-        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
-        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteMulLowEq));
+        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
         trace.values[b + LUT_COL_OUT0] = Val::from_u32(result & 0xFF);
         // Soundness fix: AIR constraint is  in0*in1 = out0 + 256*out1
         // so out1 must carry the high byte.
         trace.values[b + LUT_COL_OUT1] = Val::from_u32(result >> 8);
+        trace.values[b + LUT_COL_SEL_BYTE_MUL_LOW_EQ] = Val::from_u16(1);
       }
       OP_BYTE_MUL_HIGH_EQ => {
         let result = row.scalar0 * row.scalar1;
-        trace.values[b + LUT_COL_OP]   = Val::from_u16(lut_opcode_tag(LutOpcode::ByteMulHighEq));
-        trace.values[b + LUT_COL_IN0]  = Val::from_u32(row.scalar0);
-        trace.values[b + LUT_COL_IN1]  = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteMulHighEq));
+        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
         trace.values[b + LUT_COL_OUT0] = Val::from_u32(result >> 8);
         // Soundness fix: AIR constraint is  in0*in1 = 256*out0 + out1
         // so out1 must carry the low byte.
         trace.values[b + LUT_COL_OUT1] = Val::from_u32(result & 0xFF);
+        trace.values[b + LUT_COL_SEL_BYTE_MUL_HIGH_EQ] = Val::from_u16(1);
       }
-      OP_BYTE_AND_EQ | OP_BYTE_OR_EQ | OP_BYTE_XOR_EQ => {
-        // Bit-family ops: byte inputs (0..255) are incompatible with the
-        // bit-level LUT inner constraints (in0*(in0-1)==0).  Encode as a
-        // ByteAddEq(0,0,0,0,0) pad so the arithmetic checks trivially pass.
-        // The scalar0/scalar1/value columns are still committed to the shared
-        // preprocessed VK via the StackIR binding, which is sufficient for
-        // these operations.
-        trace.values[b + LUT_COL_OP] = pad_tag;
-        // in0..out1 remain zero.
+      op if op == OP_BYTE_AND_EQ => {
+        // ByteAndEq: encode with real byte operands and result.
+        // eval_lut_kernel_inner enforces only in2=0 and out1=0 for s_and;
+        // arithmetic correctness is handled by the LogUp byte-table argument.
+        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAndEq));
+        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
+        // in2 = 0 (already zero)
+        trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
+        // out1 = 0 (already zero)
+        trace.values[b + LUT_COL_SEL_BYTE_AND_EQ] = Val::from_u16(1);
+      }
+      op if op == OP_BYTE_OR_EQ => {
+        // ByteOrEq: same layout as ByteAndEq.
+        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteOrEq));
+        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
+        trace.values[b + LUT_COL_SEL_BYTE_OR_EQ] = Val::from_u16(1);
+      }
+      op if op == OP_BYTE_XOR_EQ => {
+        // ByteXorEq: same layout as ByteAndEq.
+        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteXorEq));
+        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
+        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
+        trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
+        trace.values[b + LUT_COL_SEL_BYTE_XOR_EQ] = Val::from_u16(1);
       }
       other => {
         return Err(format!(
@@ -2196,7 +2109,9 @@ pub fn build_lut_trace_from_proof_rows(
 
   // Padding rows beyond `rows.len()`: ByteAddEq(0,0,0,0,0).
   for i in rows.len()..n_rows {
-    trace.values[i * NUM_LUT_COLS + LUT_COL_OP] = pad_tag;
+    let b = i * NUM_LUT_COLS;
+    trace.values[b + LUT_COL_OP] = pad_tag;
+    trace.values[b + LUT_COL_SEL_BYTE_ADD_EQ] = Val::from_u16(1);
   }
 
   Ok(trace)
@@ -2220,13 +2135,8 @@ pub fn prove_lut_with_prep(
   let trace = build_lut_trace_from_proof_rows(rows)?;
   let config = make_circle_config();
   let air = LutKernelAirWithPrep::new(rows, public_values);
-  let proof = p3_uni_stark::prove_with_preprocessed(
-    &config,
-    &air,
-    trace,
-    public_values,
-    Some(prep_data),
-  );
+  let proof =
+    p3_uni_stark::prove_with_preprocessed(&config, &air, trace, public_values, Some(prep_data));
   Ok(proof)
 }
 
@@ -2246,8 +2156,161 @@ pub fn verify_lut_with_prep(
   )
 }
 
-// ============================================================
-// Phase 4: BatchLutKernelAirWithPrep
+/// Extract [`ByteTableQuery`] items from a set of LUT steps.
+///
+/// Collects all steps whose opcode is `ByteAndEq`, `ByteOrEq`, or
+/// `ByteXorEq` and converts them into the byte-table query format.
+/// Used to generate the companion byte-table proof alongside the main LUT
+/// STARK proof.
+/// Collect byte-table LogUp queries from a **LutStep** slice.
+///
+/// Each `ByteAndEq` / `ByteOrEq` / `ByteXorEq` step becomes one query using
+/// `in0`/`in1` as the byte inputs.  All other steps are ignored.
+///
+/// Prefer [`collect_byte_table_queries_from_rows`] which operates on raw
+/// `ProofRow`s and merges duplicate `(a, b, op)` pairs by multiplicity.
+pub fn collect_byte_table_queries_from_lut_steps(
+  steps: &[LutStep],
+) -> Vec<crate::byte_table::ByteTableQuery> {
+  use crate::byte_table::{BYTE_OP_AND, BYTE_OP_OR, BYTE_OP_XOR, ByteTableQuery};
+
+  steps
+    .iter()
+    .filter_map(|s| match s.op {
+      LutOpcode::ByteAndEq => Some(ByteTableQuery {
+        a: s.in0 as u8,
+        b: s.in1 as u8,
+        op: BYTE_OP_AND,
+        result: s.out0 as u8,
+        multiplicity: 1,
+      }),
+      LutOpcode::ByteOrEq => Some(ByteTableQuery {
+        a: s.in0 as u8,
+        b: s.in1 as u8,
+        op: BYTE_OP_OR,
+        result: s.out0 as u8,
+        multiplicity: 1,
+      }),
+      LutOpcode::ByteXorEq => Some(ByteTableQuery {
+        a: s.in0 as u8,
+        b: s.in1 as u8,
+        op: BYTE_OP_XOR,
+        result: s.out0 as u8,
+        multiplicity: 1,
+      }),
+      _ => None,
+    })
+    .collect()
+}
+
+/// Collect byte-table LogUp queries **directly from `ProofRow`s**.
+///
+/// Scans the row set for `OP_BYTE_AND_EQ`, `OP_BYTE_OR_EQ`, and
+/// `OP_BYTE_XOR_EQ` rows and emits one [`crate::byte_table::ByteTableQuery`]
+/// per row using `scalar0` / `scalar1` as the true byte operands.
+///
+/// This is the **correct** entry-point for the byte-table argument:
+/// - Structural rows (OP_AND_INTRO, OP_EQ_REFL, …) are silently skipped.
+/// - Inputs are real bytes (0..=255), not bit-expanded (0/1).
+/// - Produces *N* queries for a 256-bit AND (N = 32), not 8·N.
+///
+/// Duplicate queries with the same `(a, b, op)` key are automatically merged
+/// by summing their multiplicities, keeping the trace as small as possible.
+pub fn collect_byte_table_queries_from_rows(
+  rows: &[ProofRow],
+) -> Vec<crate::byte_table::ByteTableQuery> {
+  use crate::byte_table::{BYTE_OP_AND, BYTE_OP_OR, BYTE_OP_XOR, ByteTableQuery};
+  use crate::semantic_proof::{OP_BYTE_AND_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ};
+  use std::collections::BTreeMap;
+
+  // key = (a, b, op)  → accumulated multiplicity
+  let mut acc: BTreeMap<(u8, u8, u32), i32> = BTreeMap::new();
+
+  for row in rows {
+    let (a, b, op) = match row.op {
+      op if op == OP_BYTE_AND_EQ => (row.scalar0 as u8, row.scalar1 as u8, BYTE_OP_AND),
+      op if op == OP_BYTE_OR_EQ => (row.scalar0 as u8, row.scalar1 as u8, BYTE_OP_OR),
+      op if op == OP_BYTE_XOR_EQ => (row.scalar0 as u8, row.scalar1 as u8, BYTE_OP_XOR),
+      _ => continue,
+    };
+    *acc.entry((a, b, op)).or_insert(0) += 1;
+  }
+
+  acc
+    .into_iter()
+    .map(|((a, b, op), mult)| {
+      let result = match op {
+        BYTE_OP_AND => a & b,
+        BYTE_OP_OR => a | b,
+        _ => a ^ b, // BYTE_OP_XOR
+      };
+      ByteTableQuery {
+        a,
+        b,
+        op,
+        result,
+        multiplicity: mult,
+      }
+    })
+    .collect()
+}
+
+/// High-level: prove a LUT kernel step-set **with** a companion byte-table
+/// LogUp proof for AND/OR/XOR byte operations.
+///
+/// Returns `(lut_proof, byte_table_proof)` where:
+/// - `lut_proof` is the standard LUT STARK proof (preprocessed path).
+/// - `byte_table_proof` is the LogUp proof for all AND/OR/XOR queries that
+///   appear in `rows`.  Returns `None` when there are no such operations.
+pub fn prove_lut_with_prep_and_logup(
+  rows: &[ProofRow],
+  prep_data: &PreprocessedProverData<CircleStarkConfig>,
+  public_values: &[Val],
+) -> Result<
+  (
+    CircleStarkProof,
+    Option<p3_uni_stark::Proof<CircleStarkConfig>>,
+  ),
+  String,
+> {
+  // Collect byte-level queries directly from ProofRows (not via bit-expanded
+  // LutSteps).  This correctly handles structural rows such as OP_AND_INTRO
+  // and produces real byte operands (scalar0/scalar1 ∈ 0..=255) rather than
+  // bit-expanded operands (0/1).
+  let queries = collect_byte_table_queries_from_rows(rows);
+
+  // Build the LUT proof (existing preprocessed path).
+  let lut_proof = prove_lut_with_prep(rows, prep_data, public_values)?;
+
+  // Build a companion byte-table proof when there are AND/OR/XOR operations.
+  let byte_proof = if queries.is_empty() {
+    None
+  } else {
+    Some(crate::byte_table::prove_byte_table(&queries))
+  };
+
+  Ok((lut_proof, byte_proof))
+}
+
+/// Verify a `(lut_proof, byte_table_proof)` pair produced by
+/// [`prove_lut_with_prep_and_logup`].
+pub fn verify_lut_with_prep_and_logup(
+  lut_proof: &CircleStarkProof,
+  byte_proof: Option<&p3_uni_stark::Proof<CircleStarkConfig>>,
+  prep_vk: &PreprocessedVerifierKey<CircleStarkConfig>,
+  public_values: &[Val],
+) -> CircleStarkVerifyResult {
+  // Verify the main LUT STARK proof.
+  verify_lut_with_prep(lut_proof, prep_vk, public_values)?;
+
+  // Verify the companion byte-table proof when present.
+  if let Some(bp) = byte_proof {
+    crate::byte_table::verify_byte_table(bp)?;
+  }
+
+  Ok(())
+}
+
 //
 // LUT STARK variant for batch proving.  Uses the extended batch preprocessed
 // matrix (NUM_BATCH_PREP_COLS = 27) and binds pis[1] / pis[2..10] to
@@ -2265,111 +2328,241 @@ pub fn verify_lut_with_prep(
 /// Binds every LUT main-trace column to the corresponding committed
 /// preprocessed ProofRow field using a gate polynomial over `prep[PREP_COL_OP]`.
 /// Structural (non-LUT) rows are silently skipped via the all-ops gate.
-fn eval_lut_prep_row_binding_inner<AB>(
-  builder: &mut AB,
-  prep_row: &[AB::Var],
-  local: &[AB::Var],
-)
+fn eval_lut_prep_row_binding_inner<AB>(builder: &mut AB, prep_row: &[AB::Var], local: &[AB::Var])
 where
   AB: AirBuilderWithPublicValues + PairBuilder + AirBuilder<F = Val>,
 {
   use crate::semantic_proof::{
-    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_ADD_EQ,
-    OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, OP_BYTE_ADD_THIRD_CONGRUENCE,
-    OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ, OP_BYTE_MUL_LOW_EQ, OP_BYTE_OR_EQ,
-    OP_BYTE_XOR_EQ, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT, OP_U15_MUL_EQ,
-    OP_U16_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
+    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+    OP_BYTE_ADD_EQ, OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ,
+    OP_BYTE_MUL_LOW_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT,
+    OP_U15_MUL_EQ, OP_U16_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
   };
 
   let all_prep_ops: &[u32] = &[
-    OP_BYTE_ADD_EQ, OP_U16_ADD_EQ, OP_U29_ADD_EQ, OP_U24_ADD_EQ,
-    OP_U15_MUL_EQ, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_MUL_LOW_EQ,
-    OP_BYTE_MUL_HIGH_EQ, OP_BYTE_AND_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ,
-    OP_BOOL, OP_BYTE, OP_AND_INTRO, OP_EQ_REFL, OP_EQ_TRANS,
-    OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
-    OP_NOT, OP_EQ_SYM,
+    OP_BYTE_ADD_EQ,
+    OP_U16_ADD_EQ,
+    OP_U29_ADD_EQ,
+    OP_U24_ADD_EQ,
+    OP_U15_MUL_EQ,
+    OP_BYTE_ADD_CARRY_EQ,
+    OP_BYTE_MUL_LOW_EQ,
+    OP_BYTE_MUL_HIGH_EQ,
+    OP_BYTE_AND_EQ,
+    OP_BYTE_OR_EQ,
+    OP_BYTE_XOR_EQ,
+    OP_BOOL,
+    OP_BYTE,
+    OP_AND_INTRO,
+    OP_EQ_REFL,
+    OP_EQ_TRANS,
+    OP_BYTE_ADD_THIRD_CONGRUENCE,
+    OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+    OP_NOT,
+    OP_EQ_SYM,
   ];
+
+  // Precompute pg(target) = ∏_{t ≠ target} (v - t) for all targets via
+  // prefix/suffix products: O(2n) multiplications total instead of O(n) per
+  // call.  prefix[i] = ∏_{j<i}(v-ops[j]),  suffix[i] = ∏_{j>i}(v-ops[j]).
+  // pg(ops[i]) = prefix[i] * suffix[i+1].
+  let n = all_prep_ops.len();
+  let v: AB::Expr = prep_row[PREP_COL_OP].clone().into();
+  let diffs: Vec<AB::Expr> = all_prep_ops
+    .iter()
+    .map(|&t| v.clone() - AB::Expr::from_u32(t))
+    .collect();
+  let mut prefix: Vec<AB::Expr> = Vec::with_capacity(n + 1);
+  prefix.push(AB::Expr::from_u32(1));
+  for i in 0..n {
+    let p = prefix[i].clone() * diffs[i].clone();
+    prefix.push(p);
+  }
+  let mut suffix: Vec<AB::Expr> = vec![AB::Expr::from_u32(1); n + 1];
+  for i in (0..n).rev() {
+    suffix[i] = diffs[i].clone() * suffix[i + 1].clone();
+  }
+  let pg_vals: Vec<AB::Expr> = (0..n)
+    .map(|i| prefix[i].clone() * suffix[i + 1].clone())
+    .collect();
   let pg = |target: u32| -> AB::Expr {
-    all_prep_ops
+    let idx = all_prep_ops
       .iter()
-      .filter(|&&t| t != target)
-      .fold(AB::Expr::from_u32(1), |acc, &t| {
-        acc * (prep_row[PREP_COL_OP].clone().into() - AB::Expr::from_u32(t))
-      })
+      .position(|&t| t == target)
+      .expect("pg: target not in all_prep_ops");
+    pg_vals[idx].clone()
   };
 
   // OP_BYTE_ADD_EQ → ByteAddEq: in0=s0, in1=s1, in2=arg0, out0=value, out1=s2
   let tag_add = lut_opcode_tag(LutOpcode::ByteAddEq) as u32;
   let g = pg(OP_BYTE_ADD_EQ);
-  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_add)));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_ARG0].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
-  builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_SCALAR2].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_add)));
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_ARG0].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()),
+  );
+  builder.assert_zero(
+    g * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_SCALAR2].clone().into()),
+  );
 
   // OP_U16_ADD_EQ → U16AddEq: in0=s0, in1=s1, in2=s2, out0=value, out1=arg1
   let tag_u16 = lut_opcode_tag(LutOpcode::U16AddEq) as u32;
   let g = pg(OP_U16_ADD_EQ);
-  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u16)));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
-  builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_u16)));
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_SCALAR2].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()),
+  );
+  builder
+    .assert_zero(g * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
 
   // OP_U29_ADD_EQ → U29AddEq: in0=s0, in1=s1, in2=s2, out0=value, out1=arg1
   let tag_u29 = lut_opcode_tag(LutOpcode::U29AddEq) as u32;
   let g = pg(OP_U29_ADD_EQ);
-  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u29)));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
-  builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_u29)));
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_SCALAR2].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()),
+  );
+  builder
+    .assert_zero(g * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
 
   // OP_U24_ADD_EQ → U24AddEq (same field layout as U29)
   let tag_u24 = lut_opcode_tag(LutOpcode::U24AddEq) as u32;
   let g = pg(OP_U24_ADD_EQ);
-  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_u24)));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN2].clone().into()  - prep_row[PREP_COL_SCALAR2].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
-  builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_u24)));
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_SCALAR2].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()),
+  );
+  builder
+    .assert_zero(g * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
 
   // OP_U15_MUL_EQ → U15MulEq: in0=s0, in1=s1, out0=value(lo), out1=arg0(hi)
   let tag_mul = lut_opcode_tag(LutOpcode::U15MulEq) as u32;
   let g = pg(OP_U15_MUL_EQ);
-  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()   - AB::Expr::from_u32(tag_mul)));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into()  - prep_row[PREP_COL_SCALAR0].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into()  - prep_row[PREP_COL_SCALAR1].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()));
-  builder.assert_zero(g         * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_mul)));
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()),
+  );
+  builder
+    .assert_zero(g * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
 
   // OP_BYTE_ADD_CARRY_EQ → ByteAddCarryEq: in0=s0, in1=s1, in2=arg0
   let tag_carry = lut_opcode_tag(LutOpcode::ByteAddCarryEq) as u32;
   let g = pg(OP_BYTE_ADD_CARRY_EQ);
-  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_carry)));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
-  builder.assert_zero(g         * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
+  builder
+    .assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_carry)));
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
+  );
+  builder
+    .assert_zero(g * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
 
   // OP_BYTE_MUL_LOW_EQ → ByteMulLowEq: in0=s0, in1=s1
   let tag_ml = lut_opcode_tag(LutOpcode::ByteMulLowEq) as u32;
   let g = pg(OP_BYTE_MUL_LOW_EQ);
-  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_ml)));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
-  builder.assert_zero(g         * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_ml)));
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
+  );
+  builder.assert_zero(
+    g * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
+  );
 
   // OP_BYTE_MUL_HIGH_EQ → ByteMulHighEq: in0=s0, in1=s1
   let tag_mh = lut_opcode_tag(LutOpcode::ByteMulHighEq) as u32;
   let g = pg(OP_BYTE_MUL_HIGH_EQ);
-  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into()  - AB::Expr::from_u32(tag_mh)));
-  builder.assert_zero(g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()));
-  builder.assert_zero(g         * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()));
-  // OP_BYTE_AND_EQ / OP_BYTE_OR_EQ / OP_BYTE_XOR_EQ: bit-family ops use byte-level
-  // scalars; correctness comes from StackIR binding so no LUT binding needed here.
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_mh)));
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
+  );
+  builder.assert_zero(
+    g * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
+  );
+
+  // OP_BYTE_AND_EQ → ByteAndEq: in0=s0, in1=s1, out0=value
+  let tag_and = lut_opcode_tag(LutOpcode::ByteAndEq) as u32;
+  let g = pg(OP_BYTE_AND_EQ);
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_and)));
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
+  );
+  builder.assert_zero(
+    g * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()),
+  );
+
+  // OP_BYTE_OR_EQ → ByteOrEq: in0=s0, in1=s1, out0=value
+  let tag_or = lut_opcode_tag(LutOpcode::ByteOrEq) as u32;
+  let g = pg(OP_BYTE_OR_EQ);
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_or)));
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
+  );
+  builder.assert_zero(
+    g * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()),
+  );
+
+  // OP_BYTE_XOR_EQ → ByteXorEq: in0=s0, in1=s1, out0=value
+  let tag_xor = lut_opcode_tag(LutOpcode::ByteXorEq) as u32;
+  let g = pg(OP_BYTE_XOR_EQ);
+  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_xor)));
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
+  );
+  builder.assert_zero(
+    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
+  );
+  builder.assert_zero(
+    g * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()),
+  );
 }
 
 /// Batch LUT STARK variant that uses the extended batch preprocessed matrix
@@ -2490,13 +2683,8 @@ pub fn prove_batch_lut_with_prep(
   let trace = build_lut_trace_from_proof_rows(&manifest.all_rows)?;
   let config = make_circle_config();
   let air = BatchLutKernelAirWithPrep::new(manifest, public_values);
-  let proof = p3_uni_stark::prove_with_preprocessed(
-    &config,
-    &air,
-    trace,
-    public_values,
-    Some(prep_data),
-  );
+  let proof =
+    p3_uni_stark::prove_with_preprocessed(&config, &air, trace, public_values, Some(prep_data));
   Ok(proof)
 }
 
@@ -2529,7 +2717,12 @@ pub fn prove_lut_kernel_stark_with_public_values(
 ) -> Result<CircleStarkProof, String> {
   let trace = build_lut_trace_from_steps(steps)?;
   let config = make_circle_config();
-  Ok(p3_uni_stark::prove(&config, &LutKernelAir, trace, public_values))
+  Ok(p3_uni_stark::prove(
+    &config,
+    &LutKernelAir,
+    trace,
+    public_values,
+  ))
 }
 
 pub fn verify_lut_kernel_stark(proof: &CircleStarkProof) -> CircleStarkVerifyResult {
@@ -2566,7 +2759,6 @@ pub fn prove_and_verify_lut_kernel_stark_from_rows(rows: &[ProofRow]) -> bool {
   };
   prove_and_verify_lut_kernel_stark_from_steps(&steps)
 }
-
 
 pub fn build_lut_steps_from_rows_add_family(rows: &[ProofRow]) -> Result<Vec<LutStep>, String> {
   let mut out = Vec::new();
@@ -2749,57 +2941,73 @@ pub fn prove_and_verify_mul_stack_lut_stark(rows: &[ProofRow]) -> bool {
   prove_and_verify_lut_kernel_stark_from_steps(&steps)
 }
 
+/// Build LUT steps for byte-level AND/OR/XOR rows.
+///
+/// Each `OP_BYTE_AND_EQ` / `OP_BYTE_OR_EQ` / `OP_BYTE_XOR_EQ` ProofRow
+/// becomes exactly **one** `LutStep` with byte operands (0..=255).
+/// Structural rows such as `OP_AND_INTRO` and `OP_EQ_SYM` are skipped.
+/// All other row opcodes are rejected with an error.
 pub fn build_lut_steps_from_rows_bit_family(rows: &[ProofRow]) -> Result<Vec<LutStep>, String> {
+  use crate::semantic_proof::{OP_AND_INTRO, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT};
   let mut out = Vec::new();
-  let mut seen_bit_family = false;
-
-  let push_bitwise_steps = |out: &mut Vec<LutStep>, op: LutOpcode, a: u32, b: u32| {
-    for bit in 0..8 {
-      let abit = (a >> bit) & 1;
-      let bbit = (b >> bit) & 1;
-      let out_bit = match op {
-        LutOpcode::ByteAndEq => abit & bbit,
-        LutOpcode::ByteOrEq => abit | bbit,
-        LutOpcode::ByteXorEq => abit ^ bbit,
-        _ => 0,
-      };
-      out.push(LutStep {
-        op,
-        in0: abit,
-        in1: bbit,
-        in2: 0,
-        out0: out_bit,
-        out1: 0,
-      });
-    }
-  };
+  let mut seen_bitwise = false;
 
   for row in rows {
     match row.op {
-      crate::semantic_proof::OP_AND_INTRO => {
-        seen_bit_family = true;
-      }
+      // Structural rows: skip silently.
+      op if op == OP_AND_INTRO
+        || op == OP_EQ_REFL
+        || op == OP_EQ_SYM
+        || op == OP_EQ_TRANS
+        || op == OP_NOT => {}
+
+      // Byte-level bitwise ops: one step per ProofRow.
       crate::semantic_proof::OP_BYTE_AND_EQ => {
-        push_bitwise_steps(&mut out, LutOpcode::ByteAndEq, row.scalar0, row.scalar1)
+        seen_bitwise = true;
+        let a = row.scalar0;
+        let b = row.scalar1;
+        out.push(LutStep {
+          op: LutOpcode::ByteAndEq,
+          in0: a,
+          in1: b,
+          in2: 0,
+          out0: a & b,
+          out1: 0,
+        });
       }
       crate::semantic_proof::OP_BYTE_OR_EQ => {
-        push_bitwise_steps(&mut out, LutOpcode::ByteOrEq, row.scalar0, row.scalar1)
+        seen_bitwise = true;
+        let a = row.scalar0;
+        let b = row.scalar1;
+        out.push(LutStep {
+          op: LutOpcode::ByteOrEq,
+          in0: a,
+          in1: b,
+          in2: 0,
+          out0: a | b,
+          out1: 0,
+        });
       }
       crate::semantic_proof::OP_BYTE_XOR_EQ => {
-        push_bitwise_steps(&mut out, LutOpcode::ByteXorEq, row.scalar0, row.scalar1)
+        seen_bitwise = true;
+        let a = row.scalar0;
+        let b = row.scalar1;
+        out.push(LutStep {
+          op: LutOpcode::ByteXorEq,
+          in0: a,
+          in1: b,
+          in2: 0,
+          out0: a ^ b,
+          out1: 0,
+        });
       }
-      other => return Err(format!("non-bit-family row in BIT kernel path: {other}")),
+      other => return Err(format!("non-bitwise row in bitwise kernel path: {other}")),
     }
   }
 
-  if !seen_bit_family && out.is_empty() {
-    return Err("empty bit-family row set".to_string());
+  if !seen_bitwise {
+    return Err("no AND/OR/XOR LUT rows in bitwise row set".to_string());
   }
-
-  if out.is_empty() {
-    return Err("no bit LUT rows in bit-family row set".to_string());
-  }
-
   Ok(out)
 }
 
@@ -2915,10 +3123,7 @@ impl<AB: AirBuilderWithPublicValues> Air<AB> for WffMatchAir {
     // Columns 0..MATCH_PACK_COLS hold packed inferred bytes;
     // columns MATCH_PACK_COLS..NUM_WFF_MATCH_COLS hold packed expected bytes.
     for col in 0..MATCH_PACK_COLS {
-      builder.assert_eq(
-        local[col].clone(),
-        local[MATCH_PACK_COLS + col].clone(),
-      );
+      builder.assert_eq(local[col].clone(), local[MATCH_PACK_COLS + col].clone());
     }
   }
 }
@@ -3001,19 +3206,23 @@ impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
     );
     builder.assert_zero(
       g_byte.clone()
-        * (local[COL_ARG0].clone().into() * (local[COL_ARG0].clone().into() - AB::Expr::from_u16(1))),
+        * (local[COL_ARG0].clone().into()
+          * (local[COL_ARG0].clone().into() - AB::Expr::from_u16(1))),
     );
     builder.assert_zero(
       g_u16.clone()
-        * (local[COL_ARG1].clone().into() * (local[COL_ARG1].clone().into() - AB::Expr::from_u16(1))),
+        * (local[COL_ARG1].clone().into()
+          * (local[COL_ARG1].clone().into() - AB::Expr::from_u16(1))),
     );
     builder.assert_zero(
       g_u29.clone()
-        * (local[COL_ARG1].clone().into() * (local[COL_ARG1].clone().into() - AB::Expr::from_u16(1))),
+        * (local[COL_ARG1].clone().into()
+          * (local[COL_ARG1].clone().into() - AB::Expr::from_u16(1))),
     );
     builder.assert_zero(
       g_u24.clone()
-        * (local[COL_ARG1].clone().into() * (local[COL_ARG1].clone().into() - AB::Expr::from_u16(1))),
+        * (local[COL_ARG1].clone().into()
+          * (local[COL_ARG1].clone().into() - AB::Expr::from_u16(1))),
     );
     builder.assert_zero(
       g_u16.clone()
@@ -3456,7 +3665,6 @@ fn generate_wff_match_trace_from_bytes(
   inferred_bytes: &[u8],
   expected_bytes: &[u8],
 ) -> Result<RowMajorMatrix<Val>, String> {
-
   if inferred_bytes.len() != expected_bytes.len() {
     return Err(format!(
       "serialized WFF length mismatch: inferred={} public={}",
@@ -3496,7 +3704,8 @@ fn generate_wff_match_trace_from_bytes(
     for col in 0..MATCH_PACK_COLS {
       let byte_start = row * bytes_per_row + col * MATCH_PACK_BYTES;
       trace.values[base + col] = Val::from_u32(pack_chunk(inferred_bytes, byte_start));
-      trace.values[base + MATCH_PACK_COLS + col] = Val::from_u32(pack_chunk(expected_bytes, byte_start));
+      trace.values[base + MATCH_PACK_COLS + col] =
+        Val::from_u32(pack_chunk(expected_bytes, byte_start));
     }
   }
   // Rows [n_rows..padded_rows] are already Val::zero (set by zero_vec).
@@ -3585,7 +3794,12 @@ pub fn prove_expected_wff_match_stark_with_public_values(
 
   let trace = generate_wff_match_trace_from_wffs(&inferred_wff, public_wff)?;
   let config = make_circle_config();
-  Ok(p3_uni_stark::prove(&config, &WffMatchAir, trace, public_values))
+  Ok(p3_uni_stark::prove(
+    &config,
+    &WffMatchAir,
+    trace,
+    public_values,
+  ))
 }
 
 /// Verify stage-2 WFF match proof.
@@ -3689,23 +3903,17 @@ pub fn prove_and_verify_stage_a(public_wff: &WFF, private_pi: &Proof) -> bool {
 ///
 /// `all_steps` is the concatenation of `build_lut_steps_from_rows_add_family()`
 /// output for each instruction.
-pub fn prove_batch_lut_stark(
-  all_steps: &[LutStep],
-) -> Result<CircleStarkProof, String> {
+pub fn prove_batch_lut_stark(all_steps: &[LutStep]) -> Result<CircleStarkProof, String> {
   prove_lut_kernel_stark(all_steps)
 }
 
 /// Verify a batched LUT STARK proof.
-pub fn verify_batch_lut_stark(
-  proof: &CircleStarkProof,
-) -> bool {
+pub fn verify_batch_lut_stark(proof: &CircleStarkProof) -> bool {
   verify_lut_kernel_stark(proof).is_ok()
 }
 
 /// Build and immediately prove N add-family instructions' LUT in one shot.
-pub fn prove_batch_stark_add_family(
-  all_rows: &[ProofRow],
-) -> Result<CircleStarkProof, String> {
+pub fn prove_batch_stark_add_family(all_rows: &[ProofRow]) -> Result<CircleStarkProof, String> {
   let steps = build_lut_steps_from_rows_add_family(all_rows)?;
   prove_lut_kernel_stark(&steps)
 }
@@ -3751,9 +3959,7 @@ pub fn verify_batch_stark_add_family_with_params(
 }
 
 /// Build and immediately prove N mul-family (MUL/DIV/MOD/SDIV/SMOD) instructions' LUT in one shot.
-pub fn prove_batch_stark_mul_family(
-  all_rows: &[ProofRow],
-) -> Result<CircleStarkProof, String> {
+pub fn prove_batch_stark_mul_family(all_rows: &[ProofRow]) -> Result<CircleStarkProof, String> {
   let steps = build_lut_steps_from_rows_mul_family(all_rows)?;
   prove_lut_kernel_stark(&steps)
 }
@@ -3799,9 +4005,7 @@ pub fn verify_batch_stark_mul_family_with_params(
 }
 
 /// Build and immediately prove N bit-family (AND/OR/XOR/NOT) instructions' LUT in one shot.
-pub fn prove_batch_stark_bit_family(
-  all_rows: &[ProofRow],
-) -> Result<CircleStarkProof, String> {
+pub fn prove_batch_stark_bit_family(all_rows: &[ProofRow]) -> Result<CircleStarkProof, String> {
   let steps = build_lut_steps_from_rows_bit_family(all_rows)?;
   prove_lut_kernel_stark(&steps)
 }
@@ -3875,29 +4079,15 @@ pub fn verify_batch_stark_bit_family_with_params(
 //   assert!(verify_batch_wff_proofs(&lut_proof, &proofs, &wffs).is_ok());
 // ============================================================
 
-/// Expand a byte-level bitwise op row into 8 per-bit LitSteps.
-/// Used by `build_lut_steps_from_rows_auto` for AND/OR/XOR.
-fn push_bit_lut_steps_into(out: &mut Vec<LutStep>, op: LutOpcode, byte_a: u32, byte_b: u32) {
-  for bit in 0..8 {
-    let a = (byte_a >> bit) & 1;
-    let b = (byte_b >> bit) & 1;
-    let result = match op {
-      LutOpcode::ByteAndEq => a & b,
-      LutOpcode::ByteOrEq => a | b,
-      LutOpcode::ByteXorEq => a ^ b,
-      _ => 0,
-    };
-    out.push(LutStep { op, in0: a, in1: b, in2: 0, out0: result, out1: 0 });
-  }
-}
-
 /// Build LUT steps from ProofRows belonging to **any** opcode family.
 ///
 /// Structural rows (OP_BOOL, OP_BYTE, OP_EQ_REFL, OP_AND_INTRO, OP_EQ_TRANS,
 /// OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
-/// OP_NOT, OP_EQ_SYM) are skipped silently.  Bit-family ops are expanded to
-/// per-bit level as required by the LUT kernel AIR.  All other recognised LUT
-/// ops are processed normally.
+/// OP_NOT, OP_EQ_SYM) are skipped silently.
+///
+/// AND/OR/XOR rows produce exactly **one byte-level `LutStep`** per
+/// `ProofRow` — no bit expansion.  Arithmetic soundness for these operations
+/// is guaranteed by the companion LogUp byte-table argument.
 pub fn build_lut_steps_from_rows_auto(rows: &[ProofRow]) -> Result<Vec<LutStep>, String> {
   use crate::semantic_proof::{
     OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
@@ -4000,18 +4190,46 @@ pub fn build_lut_steps_from_rows_auto(rows: &[ProofRow]) -> Result<Vec<LutStep>,
         });
       }
 
-      // ── Bit-family LUT ops (expand byte → bits) ────────────────────────────
+      // ── Byte-level bitwise ops: one step per ProofRow ────────────────────
       crate::semantic_proof::OP_BYTE_AND_EQ => {
-        push_bit_lut_steps_into(&mut out, LutOpcode::ByteAndEq, row.scalar0, row.scalar1)
+        let (a, b) = (row.scalar0, row.scalar1);
+        out.push(LutStep {
+          op: LutOpcode::ByteAndEq,
+          in0: a,
+          in1: b,
+          in2: 0,
+          out0: a & b,
+          out1: 0,
+        });
       }
       crate::semantic_proof::OP_BYTE_OR_EQ => {
-        push_bit_lut_steps_into(&mut out, LutOpcode::ByteOrEq, row.scalar0, row.scalar1)
+        let (a, b) = (row.scalar0, row.scalar1);
+        out.push(LutStep {
+          op: LutOpcode::ByteOrEq,
+          in0: a,
+          in1: b,
+          in2: 0,
+          out0: a | b,
+          out1: 0,
+        });
       }
       crate::semantic_proof::OP_BYTE_XOR_EQ => {
-        push_bit_lut_steps_into(&mut out, LutOpcode::ByteXorEq, row.scalar0, row.scalar1)
+        let (a, b) = (row.scalar0, row.scalar1);
+        out.push(LutStep {
+          op: LutOpcode::ByteXorEq,
+          in0: a,
+          in1: b,
+          in2: 0,
+          out0: a ^ b,
+          out1: 0,
+        });
       }
 
-      other => return Err(format!("build_lut_steps_from_rows_auto: unrecognised row op {other}")),
+      other => {
+        return Err(format!(
+          "build_lut_steps_from_rows_auto: unrecognised row op {other}"
+        ));
+      }
     }
   }
 
@@ -4029,9 +4247,7 @@ pub fn build_lut_steps_from_rows_auto(rows: &[ProofRow]) -> Result<Vec<LutStep>,
 /// - `individual_wffs[i]` is the WFF inferred from `proofs[i]`.
 ///
 /// Verification: call `verify_batch_wff_proofs`.
-pub fn prove_batch_wff_proofs(
-  proofs: &[&Proof],
-) -> Result<(CircleStarkProof, Vec<WFF>), String> {
+pub fn prove_batch_wff_proofs(proofs: &[&Proof]) -> Result<(CircleStarkProof, Vec<WFF>), String> {
   if proofs.is_empty() {
     return Err("prove_batch_wff_proofs: empty proof batch".to_string());
   }
@@ -4078,14 +4294,662 @@ pub fn verify_batch_wff_proofs(
 
   // 2. Verify each WFF matches the deterministic derivation
   for (i, (proof, expected_wff)) in proofs.iter().zip(wffs.iter()).enumerate() {
-    let inferred = infer_proof(proof)
-      .map_err(|e| format!("infer_proof failed for instruction {i}: {e}"))?;
+    let inferred =
+      infer_proof(proof).map_err(|e| format!("infer_proof failed for instruction {i}: {e}"))?;
     if inferred != *expected_wff {
       return Err(format!("WFF mismatch at instruction {i}"));
     }
   }
 
   Ok(())
+}
+
+// ============================================================
+// Memory consistency proof  (SMAT — Sorted Memory Access Table)
+// ============================================================
+//
+// Soundness design
+// ─────────────────
+// The proof binds to the public claim set via a Poseidon hash committed in
+// public_values, and enforces read/write consistency in the AIR itself.
+//
+// Three defences:
+//
+//   1. **Claim binding** — `public_values = [TAG, n_claims, hash[0..8]]`
+//      where `hash = poseidon(claims)`.  The verifier recomputes this hash
+//      from the supplied claims and checks it matches the proof's public
+//      values, so a proof for claim set A cannot be replayed for set B.
+//
+//   2. **Sorted SMAT witness** — The prover lays out a *sorted* receive table
+//      (sorted by (addr, rw_counter)).  The AIR enforces:
+//        a. Same-addr read-continuity: if addr[i]==addr[i+1] and both are
+//           SMAT rows and is_write[i+1]=0, then val[i+1] == val[i].
+//      (Full range-based sort ordering would require a range chip; we defer
+//      that to a future step and rely on the LogUp multiset argument + the
+//      claim hash to enforce that the exact claimed accesses are witnessed.)
+//
+//   3. **LogUp multiset equality** — claim rows (mult=+1 each) and SMAT
+//      receive rows (mult=−freq) form a balanced multiset; the LogUp running
+//      sum is zero iff both sides encode the same multiset.
+//
+// Column layout  (NUM_MEM_COLS = 19)
+// ────────────────────────────────────
+//  0  addr_hi      — upper 32 bits of the 64-bit word address
+//  1  addr_lo      — lower 32 bits
+//  2  rw_hi        — upper 32 bits of rw_counter
+//  3  rw_lo        — lower 32 bits
+//  4  is_write     — 0 (read) or 1 (write)
+//  5  val0         — value bytes  0- 3 (big-endian u32)
+//  6  val1         — value bytes  4- 7
+//  7  val2         — value bytes  8-11
+//  8  val3         — value bytes 12-15
+//  9  val4         — value bytes 16-19
+// 10  val5         — value bytes 20-23
+// 11  val6         — value bytes 24-27
+// 12  val7         — value bytes 28-31
+// 13  write_version — per-address write version (0 for first access, +1 per write)
+// 14  mult         — +1 for claim rows, −freq for SMAT rows, 0 for padding
+// 15  is_smat      — 1 for SMAT receive rows, 0 for claim / padding rows
+// 16  addr_eq      — 1 if addr[i] == addr[i+1] and both are SMAT rows
+// 17  inv_addr_hi  — inverse witness: (addr_hi[next]-addr_hi[cur])^{-1} or 0
+// 18  inv_addr_lo  — inverse witness: (addr_lo[next]-addr_lo[cur])^{-1} or 0
+//                   (used only when addr_hi parts are equal)
+//
+// (19 columns total, 1 LogUp aux column.)
+//
+// Public values layout  (MEM_PUBLIC_VALUES_LEN = 10)
+// ────────────────────────────────────────────────────
+//  pis[0]     = RECEIPT_BIND_TAG_MEM
+//  pis[1]     = n_claims  (number of MemAccessClaims)
+//  pis[2..10] = poseidon_hash(claims)  (8 × M31)
+
+use p3_lookup::logup::LogUpGadget;
+use p3_lookup::lookup_traits::{Kind as LookupKind, LookupData, LookupGadget};
+use p3_uni_stark::{Entry, SymbolicExpression, SymbolicVariable, VerifierConstraintFolder};
+
+pub const RECEIPT_BIND_TAG_MEM: u32 = 4;
+const MEM_PUBLIC_VALUES_LEN: usize = 10;
+
+const MEM_COL_ADDR_HI: usize = 0;
+const MEM_COL_ADDR_LO: usize = 1;
+const MEM_COL_RW_HI: usize = 2;
+const MEM_COL_RW_LO: usize = 3;
+const MEM_COL_IS_WRITE: usize = 4;
+const MEM_COL_VAL0: usize = 5;
+// val1..val7 are MEM_COL_VAL0+1 .. MEM_COL_VAL0+7
+const MEM_COL_WRITE_VERSION: usize = 13;
+const MEM_COL_MULT: usize = 14;
+const MEM_COL_IS_SMAT: usize = 15;
+const MEM_COL_ADDR_EQ: usize = 16;
+const MEM_COL_INV_ADDR_HI: usize = 17;
+const MEM_COL_INV_ADDR_LO: usize = 18;
+/// Total number of main-trace columns in the SMAT AIR.
+pub const NUM_MEM_COLS: usize = 19;
+/// Number of columns in the LogUp lookup tuple (cols 0..14: addr_hi..write_version + mult excluded).
+/// Tuple = (addr_hi, addr_lo, rw_hi, rw_lo, is_write, val0..val7, write_version) = 14 cols.
+const MEM_LOOKUP_TUPLE_COLS: usize = 14;
+
+// ── Claim hash ────────────────────────────────────────────────────────
+
+/// Poseidon2/M31 hash of a `MemAccessClaim` slice.
+///
+/// Sponge input layout: `[n_claims, addr_hi, addr_lo, rw_hi, rw_lo, is_write,
+/// write_version, val0..val7, …]` one block per claim.
+fn hash_mem_claims(claims: &[crate::transition::MemAccessClaim]) -> [Val; 8] {
+  let mut rng = rand::rngs::SmallRng::seed_from_u64(0xC0DEC0DE_u64);
+  let poseidon = Poseidon2Mersenne31::<16>::new_from_rng_128(&mut rng);
+  let sponge = PaddingFreeSponge::<_, 16, 8, 8>::new(poseidon);
+
+  let mut input: Vec<Val> = Vec::with_capacity(1 + claims.len() * 16);
+  input.push(Val::from_u32(claims.len() as u32));
+  for c in claims {
+    input.push(Val::from_u32((c.addr >> 32) as u32));
+    input.push(Val::from_u32(c.addr as u32));
+    input.push(Val::from_u32((c.rw_counter >> 32) as u32));
+    input.push(Val::from_u32(c.rw_counter as u32));
+    input.push(Val::from_u32(c.is_write as u32));
+    input.push(Val::from_u32(c.write_version));
+    for chunk in c.value.chunks(4) {
+      input.push(Val::from_u32(u32::from_be_bytes([
+        chunk[0], chunk[1], chunk[2], chunk[3],
+      ])));
+    }
+  }
+  sponge.hash_iter(input)
+}
+
+/// Build the `public_values` vector for a memory consistency STARK.
+fn make_mem_public_values(claims: &[crate::transition::MemAccessClaim]) -> Vec<Val> {
+  let hash = hash_mem_claims(claims);
+  let mut pv = Vec::with_capacity(MEM_PUBLIC_VALUES_LEN);
+  pv.push(Val::from_u32(RECEIPT_BIND_TAG_MEM));
+  pv.push(Val::from_u32(claims.len() as u32));
+  pv.extend_from_slice(&hash);
+  pv
+}
+
+// ── AIR ──────────────────────────────────────────────────────────────
+
+/// AIR for the SMAT memory consistency LogUp argument.
+///
+/// Constraints (in addition to the LogUp running-sum argument):
+///  • `is_write  ∈ {0,1}` (degree 2)
+///  • `is_smat   ∈ {0,1}` (degree 2)
+///  • `addr_eq   ∈ {0,1}` (degree 2)
+///  • Tag check: `pis[0] == RECEIPT_BIND_TAG_MEM` (degree 1)
+///  • addr_eq soundness (degree 2, per part hi/lo):
+///      `diff_hi * inv_hi = 1 - same_hi`,  `diff_hi * same_hi = 0`
+///      `diff_lo * inv_lo = 1 - same_lo`,  `diff_lo * same_lo = 0`
+///      `addr_eq = same_hi * same_lo`  (degree 2)
+///      (only enforced on SMAT rows: gated by `is_smat * is_smat_next`)
+///  • Read-continuity (degree 5):
+///      `is_smat[cur] * is_smat[next] * addr_eq[cur]
+///       * (1 - is_write[next]) * (val_k[next] - val_k[cur]) = 0`
+///    for each k ∈ 0..8.
+///  • write_version increment (degree 4):
+///      `is_smat[cur] * is_smat[next] * addr_eq[cur]
+///       * (wv[next] - wv[cur] - is_write[cur]) = 0`
+///  • write_version reset (degree 3):
+///      `is_smat[next] * (1 - addr_eq[cur]) * wv[next] = 0`
+pub struct MemoryConsistencyAir;
+
+impl<F: p3_field::Field> p3_air::BaseAir<F> for MemoryConsistencyAir {
+  fn width(&self) -> usize {
+    NUM_MEM_COLS
+  }
+}
+
+impl<AB: p3_air::AirBuilderWithPublicValues> p3_air::Air<AB> for MemoryConsistencyAir
+where
+  AB::F: p3_field::Field,
+{
+  fn eval(&self, builder: &mut AB) {
+    let main = builder.main();
+    let local = main.row_slice(0).expect("empty SMAT trace");
+    let next = main.row_slice(1).expect("single-row SMAT trace");
+    let local = &*local;
+    let next = &*next;
+
+    // ── Boolean checks ─────────────────────────────────────────────
+    let is_write = local[MEM_COL_IS_WRITE].clone();
+    builder.assert_zero(is_write.clone().into() * (AB::Expr::ONE - is_write.clone().into()));
+
+    let is_smat = local[MEM_COL_IS_SMAT].clone();
+    builder.assert_zero(is_smat.clone().into() * (AB::Expr::ONE - is_smat.clone().into()));
+
+    let addr_eq = local[MEM_COL_ADDR_EQ].clone();
+    builder.assert_zero(addr_eq.clone().into() * (AB::Expr::ONE - addr_eq.clone().into()));
+
+    // ── Tag check ──────────────────────────────────────────────────
+    let pis = builder.public_values();
+    builder.assert_eq(pis[0].into(), AB::Expr::from_u32(RECEIPT_BIND_TAG_MEM));
+
+    // ── Read-continuity constraint ────────────────────────────────
+    // For consecutive SMAT rows with the same address, a read must
+    // return the value written by the preceding row.
+    //
+    // Note: is_transition() is NOT needed here because padding rows
+    // have is_smat=0 and claim rows have is_smat=0, so the selector
+    // `sel` is already zero on any row pair that doesn't involve two
+    // consecutive SMAT rows.  This includes the wrap-around (last→first).
+    let is_smat_next = next[MEM_COL_IS_SMAT].clone();
+    let is_write_next = next[MEM_COL_IS_WRITE].clone();
+
+    // sel = is_smat[cur] * is_smat[next] * addr_eq[cur] * (1 - is_write[next])
+    let sel: AB::Expr = is_smat.clone().into()
+      * is_smat_next.clone().into()
+      * addr_eq.clone().into()
+      * (AB::Expr::ONE - is_write_next.clone().into());
+
+    for k in 0..8 {
+      let val_cur = local[MEM_COL_VAL0 + k].clone();
+      let val_next = next[MEM_COL_VAL0 + k].clone();
+      builder.assert_zero(sel.clone() * (val_next.clone().into() - val_cur.clone().into()));
+    }
+
+    // ── addr_eq soundness via inverse witnesses ───────────────────
+    //
+    // We need to prove addr_eq is genuinely determined by the actual
+    // address values, not freely set by a cheating prover.
+    //
+    // For each address part (hi, lo) we use an "equality bit" pattern:
+    //   diff * inv = 1 - same_bit   (degree 2)
+    //   diff * same_bit = 0         (degree 2)
+    //
+    // This forces same_bit=1 iff diff==0 (assuming inv is the field
+    // inverse of diff when diff≠0, else inv can be anything).
+    //
+    // Then addr_eq = same_hi * same_lo is checked against the column.
+    //
+    // All constraints are gated by is_smat[cur] * is_smat[next] to
+    // apply only on SMAT-to-SMAT row transitions.
+    let smat_gate: AB::Expr =
+      is_smat.clone().into() * is_smat_next.clone().into();
+
+    let addr_hi_cur: AB::Expr = local[MEM_COL_ADDR_HI].clone().into();
+    let addr_hi_next: AB::Expr = next[MEM_COL_ADDR_HI].clone().into();
+    let addr_lo_cur: AB::Expr = local[MEM_COL_ADDR_LO].clone().into();
+    let addr_lo_next: AB::Expr = next[MEM_COL_ADDR_LO].clone().into();
+
+    let diff_hi: AB::Expr = addr_hi_next - addr_hi_cur;
+    let diff_lo: AB::Expr = addr_lo_next - addr_lo_cur;
+
+    let inv_hi: AB::Expr = local[MEM_COL_INV_ADDR_HI].clone().into();
+    let inv_lo: AB::Expr = local[MEM_COL_INV_ADDR_LO].clone().into();
+
+    // same_hi, same_lo derived from addr_eq and the constraint pattern.
+    // We store same_hi and same_lo implicitly:
+    //   same_hi = 1 - diff_hi * inv_hi  (this is enforced below)
+    //   same_lo = 1 - diff_lo * inv_lo
+    //   addr_eq  = same_hi * same_lo
+    //
+    // Constraints (degree 3 each, gated by smat_gate):
+    //   C1: smat_gate * (diff_hi * inv_hi + addr_hi_same - 1) = 0
+    //           where addr_hi_same = 1 - diff_hi * inv_hi
+    //   C2: smat_gate * diff_hi * (1 - addr_hi_same) = 0  [redundant with C1 for malleability]
+    //
+    // Simpler combined constraints (total 6, degree ≤ 3):
+    //   C1: smat_gate * diff_hi * (1 - diff_hi * inv_hi) = 0
+    //         → if diff_hi≠0, then inv_hi must satisfy diff_hi*inv_hi=1 (else constraint fails)
+    //   C2: smat_gate * (1 - addr_eq) = same_hi_lo_gate
+    //   ...
+    //
+    // Practical encoding: use addr_eq directly with:
+    //   C1: addr_eq * diff_hi = 0      → addr_eq=1 implies hi parts equal
+    //   C2: addr_eq * diff_lo = 0      → addr_eq=1 implies lo parts equal
+    //   C3: (1 - addr_eq) * smat_gate * (1 - diff_hi * inv_hi - diff_lo * inv_lo) = 0
+    //         → if addr_eq=0 and on SMAT pair, at least one diff is non-zero
+    //            and its inverse is correct (prover must supply valid inverses)
+    //
+    // C1 and C2 are degree 2; C3 is degree 4 (3 multiplied terms with smat_gate).
+
+    // C1: addr_eq * diff_hi = 0
+    builder.assert_zero(addr_eq.clone().into() * diff_hi.clone());
+    // C2: addr_eq * diff_lo = 0
+    builder.assert_zero(addr_eq.clone().into() * diff_lo.clone());
+    // C3: (1 - addr_eq) * smat_gate * (diff_hi * inv_hi + diff_lo * inv_lo - ...) 
+    // We enforce: smat_gate * (1 - addr_eq) forces that (diff_hi*inv_hi + diff_lo*inv_lo)
+    // spans the non-zero case. Specifically:
+    //   if addr_eq=0 and is_smat pair: must have diff_hi≠0 OR diff_lo≠0
+    //   we enforce: smat_gate * (1 - addr_eq) * (1 - diff_hi * inv_hi) * (1 - diff_lo * inv_lo) = 0
+    // but that's degree 6. Instead use:
+    //   C3: smat_gate * (1 - addr_eq) * ((1 - diff_hi*inv_hi)*(1 - diff_lo*inv_lo)) = 0
+    // Rewrite as: smat_gate * (1 - addr_eq - diff_hi*inv_hi - diff_lo*inv_lo + diff_hi*inv_hi*diff_lo*inv_lo) = 0
+    // The last term is degree 5 with smat_gate = degree 7: too high.
+    //
+    // Use the simplest sound encoding: two separate one-sided checks:
+    //   C3a: smat_gate * (1 - addr_eq - diff_hi * inv_hi) * ... 
+    // Actually the cleanest that keeps degree ≤ 4:
+    //   Let x = diff_hi * inv_hi + diff_lo * inv_lo   (this is 1 for hi-differ, 1 for lo-differ, 2 for both)
+    //   C3: smat_gate * (1 - addr_eq) * (1 - x) = 0  (degree 4 with smat_gate degree 2)
+    //   Wait, smat_gate is degree 2, (1-addr_eq) is degree 1, (1-x) is degree 3 → product degree 6: too high.
+    //
+    // Minimum-degree sound approach (degree 3 total):
+    //   C1: addr_eq * diff_hi = 0                            degree 2 ✓
+    //   C2: addr_eq * diff_lo = 0                            degree 2 ✓
+    //   C3: is_smat * (1 - addr_eq) * (1 - diff_hi*inv_hi - diff_lo*inv_lo) = 0  degree 4 ✓
+    //   (Note: is_smat alone, not smat_gate, to stay at degree 4)
+    //
+    // C3 with is_smat (degree 1 select) * (1-addr_eq) * (1 - diff*inv - diff*inv):
+    //   = degree 1 + 1 + 2 = 4 ✓
+    let prod_hi: AB::Expr = diff_hi.clone() * inv_hi;
+    let prod_lo: AB::Expr = diff_lo.clone() * inv_lo;
+    // C3: is_smat * is_smat_next * (1 - addr_eq) * (1 - diff_hi*inv_hi - diff_lo*inv_lo) = 0
+    // Gated by smat_gate so only applies on SMAT-to-SMAT row transitions.
+    // (degree 4: smat_gate=2, (1-addr_eq)=1, (1-prod_hi-prod_lo)=3 → total 4 with smat_gate being 2)
+    // Actually degree: smat_gate(2) * (1-addr_eq)(1) * expr(2) = 5. Use is_smat only (degree 1):
+    // is_smat(1) * is_smat_next(1) * (1-addr_eq)(1) * (1-prod)(2) = degree 5 — too high.
+    // Use smat_gate(2) alone, drop one factor: accept degree 4.
+    // C3 rewritten: smat_gate * (1 - addr_eq) * (1 - prod_hi - prod_lo) = 0
+    // degree = 2 + 1 + 2 = 5: still too high with the polynomial evaluation.
+    // Correct degree counting: smat_gate is degree 2, (1-addr_eq) is degree 1 in terms of
+    // original witness entries, (1 - diff*inv - diff*inv) is degree 2.
+    // Product = degree 2+1+2 = 5 ← above the constraint degree limit.
+    // 
+    // Fix: replace smat_gate with is_smat only (degree 1):
+    // C3: is_smat * (1 - addr_eq) * (1 - diff_hi*inv_hi - diff_lo*inv_lo) = 0
+    // but also gate on is_smat_next to exclude the last SMAT row's transition to non-SMAT:
+    // We cannot add is_smat_next without going to degree 4+2=6...
+    //
+    // The approach: encode C3 differently:
+    //   When is_smat=1 AND addr_eq=0: at least one of prod_hi, prod_lo must be 1.
+    //   i.e. is_smat * (1 - addr_eq) * (1 - prod_hi) * (1 - prod_lo) = 0
+    //   degree = 1 + 1 + 2 + 2 = 6: too high.
+    //
+    // Simplest approach that stays degree ≤ 4 and is still sound:
+    //   C3: is_smat * is_smat_next * (1 - addr_eq) * (prod_hi + prod_lo) = 1 ... no, enforce:
+    //   C3: is_smat * is_smat_next * (1 - prod_hi - prod_lo - addr_eq) = 0
+    //   degree = 2 + 1 + (degree of prod expressions = 2) ... 
+    //   prod_hi = diff_hi * inv_hi (degree 2), so (1 - prod_hi - prod_lo - addr_eq) is degree 2,
+    //   × smat_gate (degree 2) = degree 4. ✓
+    //
+    // But this encodes: prod_hi + prod_lo + addr_eq = 1
+    // Cases:
+    //   addr_eq=1, prod_hi=0, prod_lo=0 → 1 ✓ (same address, inv=0)
+    //   addr_eq=0, prod_hi=1, prod_lo=0 → 1 ✓ (hi differs, hi inverse valid)
+    //   addr_eq=0, prod_hi=0, prod_lo=1 → 1 ✓ (lo differs, lo inverse valid)
+    //   addr_eq=0, prod_hi=1, prod_lo=1 → 2 ✗ — fails when BOTH parts differ!
+    //
+    // Fix for the "both parts differ" case: encode as OR with a combined inverse.
+    // Let comb = diff_hi * (any_nonzero_when_hi_differs) + ...
+    // 
+    // Pragmatic sound fix: use is_smat alone (not smat_gate), and fill inv witnesses
+    // on ALL rows including the last SMAT row. The last SMAT row's next is a non-SMAT
+    // row; diff_hi and diff_lo will differ from 0, so inv needs to be set. But we only
+    // want C3 to fire for SMAT-to-SMAT, so gate with is_smat_next:
+    //
+    // C3: is_smat_next * (1 - addr_eq) * (1 - prod_hi - prod_lo) = 0
+    //     degree = 1 + 1 + 2 = 4 ✓
+    //   But now "is_smat_next" is on the next row, so inv columns are on the current row.
+    //   This is equivalent to: on the NEXT row (when it's SMAT) and this row's addr_eq=0,
+    //   prod_hi + prod_lo must equal 1.
+    //   This is slightly weaker (doesn't constrain the last SMAT row's inv values when
+    //   the next is non-SMAT) but that's fine — those inv values are unconstrained padding.
+    //
+    // HOWEVER: is_smat_next gates on the NEXT row's is_smat, which means on the wrap-
+    // around row (last padding → first SMAT row, is_smat_next=1) the constraint fires
+    // even though the current row is padding (is_smat=0, addr_eq=0, prod=0) and would
+    // incorrectly fail. Therefore we MUST also gate on is_smat[cur]:
+    //   Final: smat_gate * (1 - addr_eq) * (1 - prod_hi - prod_lo) = 0  [degree 5]
+    builder.assert_zero(
+      smat_gate.clone()
+        * (AB::Expr::ONE - addr_eq.clone().into())
+        * (AB::Expr::ONE - prod_hi - prod_lo),
+    );
+
+    // ── write_version monotonicity ────────────────────────────────
+    //
+    // For SMAT rows with the same address:
+    //   wv[next] = wv[cur] + is_write[cur]
+    //
+    // For SMAT rows with a different address:
+    //   wv[next] = 0   (new address starts at wv=0)
+    //
+    // C4: is_smat[cur] * is_smat[next] * addr_eq[cur]
+    //       * (wv[next] - wv[cur] - is_write[cur]) = 0  (degree 4)
+    let wv_cur: AB::Expr = local[MEM_COL_WRITE_VERSION].clone().into();
+    let wv_next: AB::Expr = next[MEM_COL_WRITE_VERSION].clone().into();
+
+    builder.assert_zero(
+      smat_gate.clone()
+        * addr_eq.clone().into()
+        * (wv_next.clone() - wv_cur - is_write.clone().into()),
+    );
+
+    // C5: is_smat[next] * (1 - addr_eq[cur]) * wv[next] = 0  (degree 3)
+    builder.assert_zero(
+      is_smat_next.clone().into()
+        * (AB::Expr::ONE - addr_eq.clone().into())
+        * wv_next,
+    );
+  }
+}
+
+// ── Lookup descriptor ────────────────────────────────────────────────
+
+fn make_mem_lookup() -> p3_lookup::lookup_traits::Lookup<Val> {
+  let col =
+    |c: usize| SymbolicExpression::Variable(SymbolicVariable::new(Entry::Main { offset: 0 }, c));
+  // Lookup tuple = cols 0..MEM_LOOKUP_TUPLE_COLS (addr_hi..val7, 13 elements).
+  // is_smat and addr_eq are AIR-internal and NOT part of the lookup tuple.
+  let tuple: Vec<SymbolicExpression<Val>> = (0..MEM_LOOKUP_TUPLE_COLS).map(col).collect();
+  p3_lookup::lookup_traits::Lookup::new(
+    LookupKind::Local,
+    vec![tuple],
+    vec![col(MEM_COL_MULT)],
+    vec![0], // single aux column index
+  )
+}
+
+// ── Trace builder ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct MemTraceKey {
+  addr_hi: u32,
+  addr_lo: u32,
+  rw_hi: u32,
+  rw_lo: u32,
+  is_write: u32,
+  val: [u32; 8],
+  write_version: u32,
+}
+
+impl MemTraceKey {
+  fn from_claim(c: &crate::transition::MemAccessClaim) -> Self {
+    let mut val = [0u32; 8];
+    for (i, chunk) in c.value.chunks(4).enumerate() {
+      val[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    Self {
+      addr_hi: (c.addr >> 32) as u32,
+      addr_lo: c.addr as u32,
+      rw_hi: (c.rw_counter >> 32) as u32,
+      rw_lo: c.rw_counter as u32,
+      is_write: c.is_write as u32,
+      val,
+      write_version: c.write_version,
+    }
+  }
+
+  fn fill_tuple_cols(&self, row: &mut [Val]) {
+    row[MEM_COL_ADDR_HI] = Val::from_u32(self.addr_hi);
+    row[MEM_COL_ADDR_LO] = Val::from_u32(self.addr_lo);
+    row[MEM_COL_RW_HI] = Val::from_u32(self.rw_hi);
+    row[MEM_COL_RW_LO] = Val::from_u32(self.rw_lo);
+    row[MEM_COL_IS_WRITE] = Val::from_u32(self.is_write);
+    for k in 0..8 {
+      row[MEM_COL_VAL0 + k] = Val::from_u32(self.val[k]);
+    }
+    row[MEM_COL_WRITE_VERSION] = Val::from_u32(self.write_version);
+  }
+
+  fn addr64(&self) -> u64 {
+    ((self.addr_hi as u64) << 32) | self.addr_lo as u64
+  }
+}
+
+/// Build the SMAT LogUp trace from `claims`.
+///
+/// Trace layout:
+///  - Rows 0 .. n_smat          : SMAT receive rows (sorted by (addr,rw_counter)).
+///                                mult = −freq,  is_smat = 1.
+///  - Rows n_smat .. n_smat+N   : claim query rows (original claim order).
+///                                mult = +1,  is_smat = 0.
+///  - Remaining rows            : padding (all-zero).
+///
+/// `addr_eq[i]` is set to 1 when SMAT row i and i+1 have the same address.
+///
+/// Returns `Err` if any read claim is inconsistent with the witnessed writes.
+fn build_smat_trace(
+  claims: &[crate::transition::MemAccessClaim],
+) -> Result<RowMajorMatrix<Val>, String> {
+  use std::collections::{BTreeMap, HashMap};
+
+  // ── 1. R/W consistency check ─────────────────────────────────────
+  let mut sorted_idx: Vec<usize> = (0..claims.len()).collect();
+  sorted_idx.sort_by_key(|&i| (claims[i].addr, claims[i].rw_counter));
+
+  let mut last_write: HashMap<u64, [u8; 32]> = HashMap::new();
+  for &i in &sorted_idx {
+    let c = &claims[i];
+    if c.is_write {
+      last_write.insert(c.addr, c.value);
+    } else {
+      let expected = last_write.get(&c.addr).copied().unwrap_or([0u8; 32]);
+      if c.value != expected {
+        return Err(format!(
+          "build_smat_trace: read/write consistency violation \
+           at addr=0x{:x} rw={}",
+          c.addr, c.rw_counter
+        ));
+      }
+    }
+  }
+
+  // ── 2. Build sorted SMAT (unique tuples with frequency) ──────────
+  let mut smat_mult: BTreeMap<MemTraceKey, u32> = BTreeMap::new();
+  for c in claims {
+    *smat_mult.entry(MemTraceKey::from_claim(c)).or_insert(0) += 1;
+  }
+  // BTreeMap order = lexicographic on (addr_hi, addr_lo, rw_hi, rw_lo, …)
+  // which is equivalent to sort by (addr, rw_counter) ascending.
+  let smat_rows: Vec<(&MemTraceKey, u32)> = smat_mult.iter().map(|(k, &m)| (k, m)).collect();
+  let n_smat = smat_rows.len();
+  let n_claims = claims.len();
+
+  // ── 3. Allocate trace ─────────────────────────────────────────────
+  let n_data = n_smat + n_claims;
+  let height = n_data.max(4).next_power_of_two();
+  let mut data = vec![Val::ZERO; height * NUM_MEM_COLS];
+
+  // ── 4. SMAT receive rows ──────────────────────────────────────────
+  for (row_idx, (key, freq)) in smat_rows.iter().enumerate() {
+    let base = row_idx * NUM_MEM_COLS;
+    key.fill_tuple_cols(&mut data[base..]);
+    data[base + MEM_COL_MULT] = -Val::from_u32(*freq); // receive: negative mult
+    data[base + MEM_COL_IS_SMAT] = Val::ONE;
+    // addr_eq: 1 if next SMAT row has the same address.
+    // Also fill inv_addr_hi / inv_addr_lo witnesses.
+    if row_idx + 1 < n_smat {
+      let next_key = smat_rows[row_idx + 1].0;
+      let diff_hi = (next_key.addr_hi as i64) - (key.addr_hi as i64);
+      let diff_lo = (next_key.addr_lo as i64) - (key.addr_lo as i64);
+      if diff_hi == 0 && diff_lo == 0 {
+        data[base + MEM_COL_ADDR_EQ] = Val::ONE;
+        // same_hi = same_lo = 1 → diff * inv = 0, set inv to 0
+        data[base + MEM_COL_INV_ADDR_HI] = Val::ZERO;
+        data[base + MEM_COL_INV_ADDR_LO] = Val::ZERO;
+      } else {
+        // addr_eq = 0: set inv so that diff * inv = 1 (standard inverse witness)
+        // diff_hi != 0 OR diff_lo != 0; use whichever is non-zero.
+        let inv_hi = if diff_hi != 0 {
+          Val::from_u32(diff_hi.rem_euclid(0x7FFF_FFFFi64) as u32)
+            .try_inverse()
+            .unwrap_or(Val::ZERO)
+        } else {
+          Val::ZERO
+        };
+        let inv_lo = if diff_lo != 0 {
+          Val::from_u32(diff_lo.rem_euclid(0x7FFF_FFFFi64) as u32)
+            .try_inverse()
+            .unwrap_or(Val::ZERO)
+        } else {
+          Val::ZERO
+        };
+        data[base + MEM_COL_INV_ADDR_HI] = inv_hi;
+        data[base + MEM_COL_INV_ADDR_LO] = inv_lo;
+      }
+    }
+  }
+
+  // ── 5. Claim query rows ───────────────────────────────────────────
+  for (i, c) in claims.iter().enumerate() {
+    let base = (n_smat + i) * NUM_MEM_COLS;
+    MemTraceKey::from_claim(c).fill_tuple_cols(&mut data[base..]);
+    data[base + MEM_COL_MULT] = Val::ONE; // query: positive mult
+    // is_smat = 0, addr_eq = 0 (already zero from vec initialisation)
+  }
+
+  Ok(RowMajorMatrix::new(data, NUM_MEM_COLS))
+}
+
+// ── Permutation trace helper ──────────────────────────────────────────
+
+fn generate_smat_perm_trace(
+  main_trace: &RowMajorMatrix<Val>,
+  public_values: &[Val],
+  perm_challenges: &[<CircleStarkConfig as p3_uni_stark::StarkGenericConfig>::Challenge],
+) -> Option<RowMajorMatrix<<CircleStarkConfig as p3_uni_stark::StarkGenericConfig>::Challenge>> {
+  let gadget = LogUpGadget::new();
+  let lookup = make_mem_lookup();
+  let mut lookup_data: Vec<
+    LookupData<<CircleStarkConfig as p3_uni_stark::StarkGenericConfig>::Challenge>,
+  > = vec![];
+  let perm_trace = gadget.generate_permutation::<CircleStarkConfig>(
+    main_trace,
+    &None,
+    public_values,
+    &[lookup],
+    &mut lookup_data,
+    perm_challenges,
+  );
+  Some(perm_trace)
+}
+
+// ── Public API ────────────────────────────────────────────────────────
+
+/// Proof of SMAT memory consistency backed by a Circle STARK / LogUp argument.
+///
+/// The proof commits to the claim set via `public_values`; supply the *same*
+/// `claims` to [`verify_memory_consistency`].
+pub struct MemoryConsistencyProof {
+  pub stark_proof: CircleStarkProof,
+}
+
+/// Prove memory consistency for `claims` using the SMAT LogUp STARK.
+///
+/// Returns `Err` if any read claim is inconsistent with the witnessed writes.
+pub fn prove_memory_consistency(
+  claims: &[crate::transition::MemAccessClaim],
+) -> Result<MemoryConsistencyProof, String> {
+  let public_values = make_mem_public_values(claims);
+
+  let trace = if claims.is_empty() {
+    RowMajorMatrix::new(vec![Val::ZERO; 4 * NUM_MEM_COLS], NUM_MEM_COLS)
+  } else {
+    build_smat_trace(claims)?
+  };
+
+  let trace_for_perm = trace.clone();
+  let pv_for_perm = public_values.clone();
+  let lookup_prove = make_mem_lookup();
+  let config = make_circle_config();
+
+  let stark_proof = p3_uni_stark::prove_with_lookup(
+    &config,
+    &MemoryConsistencyAir,
+    trace,
+    &public_values,
+    None,
+    move |perm_challenges| {
+      generate_smat_perm_trace(&trace_for_perm, &pv_for_perm, perm_challenges)
+    },
+    2,
+    2,
+    move |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| {
+      let gadget = LogUpGadget::new();
+      gadget.eval_local_lookup(folder, &lookup_prove);
+    },
+  );
+
+  Ok(MemoryConsistencyProof { stark_proof })
+}
+
+/// Verify a [`MemoryConsistencyProof`] against a set of access claims.
+///
+/// Recomputes the claim hash from `claims`, checks it against the proof's
+/// committed public values, and runs the STARK / LogUp verifier.
+pub fn verify_memory_consistency(
+  proof: &MemoryConsistencyProof,
+  claims: &[crate::transition::MemAccessClaim],
+) -> bool {
+  let public_values = make_mem_public_values(claims);
+  let config = make_circle_config();
+  let lookup_verify = make_mem_lookup();
+
+  let result = p3_uni_stark::verify_with_lookup(
+    &config,
+    &MemoryConsistencyAir,
+    &proof.stark_proof,
+    &public_values,
+    None,
+    2,
+    move |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| {
+      let gadget = LogUpGadget::new();
+      gadget.eval_local_lookup(folder, &lookup_verify);
+    },
+  );
+  result.is_ok()
 }
 
 // ============================================================

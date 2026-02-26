@@ -2,9 +2,9 @@
 
 #[cfg(test)]
 mod tests {
-  use zprove_core::semantic_proof::{infer_proof, prove_add, Proof, Term};
-  use zprove_core::transition::*;
   use revm::bytecode::opcode;
+  use zprove_core::semantic_proof::{Proof, Term, infer_proof, prove_add};
+  use zprove_core::transition::*;
 
   fn u256_bytes(val: u128) -> [u8; 32] {
     let mut b = [0u8; 32];
@@ -32,6 +32,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -46,6 +47,7 @@ mod tests {
       stack_inputs: vec![],
       stack_outputs: vec![u256_bytes(1)],
       semantic_proof: None,
+      memory_claims: vec![],
     };
     assert!(!verify_proof_with_zkp(&itp));
   }
@@ -64,6 +66,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(forged),
+      memory_claims: vec![],
     };
 
     assert!(!verify_proof(&itp));
@@ -85,6 +88,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(forged),
+      memory_claims: vec![],
     };
 
     assert!(!verify_proof(&itp));
@@ -178,6 +182,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
+      memory_claims: vec![],
     };
 
     let statement = InstructionTransitionStatement {
@@ -216,6 +221,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
+      memory_claims: vec![],
     };
 
     let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
@@ -257,6 +263,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(forged),
+      memory_claims: vec![],
     };
 
     assert!(prove_instruction_zk_receipt(&itp).is_err());
@@ -275,6 +282,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
+      memory_claims: vec![],
     };
 
     let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
@@ -316,6 +324,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
+      memory_claims: vec![],
     };
 
     let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
@@ -357,6 +366,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
+      memory_claims: vec![],
     };
 
     let statement = InstructionTransitionStatement {
@@ -399,6 +409,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
+      memory_claims: vec![],
     };
 
     let statement = InstructionTransitionStatement {
@@ -445,6 +456,7 @@ mod tests {
       stack_inputs: vec![a1, b1],
       stack_outputs: vec![c1],
       semantic_proof: Some(semantic1),
+      memory_claims: vec![],
     };
     let itp2 = InstructionTransitionProof {
       opcode: opcode::ADD,
@@ -452,6 +464,7 @@ mod tests {
       stack_inputs: vec![a2, b2],
       stack_outputs: vec![c2],
       semantic_proof: Some(semantic2),
+      memory_claims: vec![],
     };
 
     let statement1 = InstructionTransitionStatement {
@@ -498,6 +511,7 @@ mod tests {
       stack_inputs: vec![a1, b1],
       stack_outputs: vec![c1],
       semantic_proof: Some(semantic1),
+      memory_claims: vec![],
     };
     let itp2 = InstructionTransitionProof {
       opcode: opcode::ADD,
@@ -505,6 +519,7 @@ mod tests {
       stack_inputs: vec![a2, b2],
       stack_outputs: vec![c2],
       semantic_proof: Some(semantic2),
+      memory_claims: vec![],
     };
 
     let statement1 = InstructionTransitionStatement {
@@ -528,7 +543,10 @@ mod tests {
 
     let mut receipt1 = prove_instruction_zk_receipt(&itp1).expect("receipt proving should succeed");
     let mut receipt2 = prove_instruction_zk_receipt(&itp2).expect("receipt proving should succeed");
-    std::mem::swap(&mut receipt1.lut_kernel_proof, &mut receipt2.lut_kernel_proof);
+    std::mem::swap(
+      &mut receipt1.lut_kernel_proof,
+      &mut receipt2.lut_kernel_proof,
+    );
 
     assert!(!verify_instruction_zk_receipt(&statement1, &receipt1));
   }
@@ -551,6 +569,7 @@ mod tests {
       stack_inputs: vec![a1, b1],
       stack_outputs: vec![c1],
       semantic_proof: Some(semantic1),
+      memory_claims: vec![],
     };
     let itp2 = InstructionTransitionProof {
       opcode: opcode::ADD,
@@ -558,6 +577,7 @@ mod tests {
       stack_inputs: vec![a2, b2],
       stack_outputs: vec![c2],
       semantic_proof: Some(semantic2),
+      memory_claims: vec![],
     };
 
     let statement1 = InstructionTransitionStatement {
@@ -710,6 +730,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong_c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -729,6 +750,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -748,6 +770,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -767,6 +790,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![q],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -786,6 +810,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong_q],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -805,6 +830,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![r],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -824,6 +850,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong_r],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -843,6 +870,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![z],
       semantic_proof: Some(div_proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&div_itp));
     assert!(verify_proof_with_zkp(&div_itp));
@@ -854,6 +882,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![z],
       semantic_proof: Some(mod_proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&mod_itp));
     assert!(verify_proof_with_zkp(&mod_itp));
@@ -872,6 +901,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![q],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -891,6 +921,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong_q],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -910,6 +941,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![r],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -929,6 +961,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong_r],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -948,6 +981,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![z],
       semantic_proof: Some(sdiv_proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&sdiv_itp));
     assert!(verify_proof_with_zkp(&sdiv_itp));
@@ -959,6 +993,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![z],
       semantic_proof: Some(smod_proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&smod_itp));
     assert!(verify_proof_with_zkp(&smod_itp));
@@ -979,6 +1014,7 @@ mod tests {
       stack_inputs: vec![int_min, neg_one],
       stack_outputs: vec![expected],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1000,6 +1036,7 @@ mod tests {
       stack_inputs: vec![int_min, neg_one],
       stack_outputs: vec![zero],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1019,6 +1056,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1038,6 +1076,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1057,6 +1096,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1075,6 +1115,7 @@ mod tests {
       stack_inputs: vec![a],
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1093,6 +1134,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong],
       semantic_proof: prove_instruction(opcode::AND, &[a, b], &[wrong]),
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&and_itp));
     assert!(!verify_proof_with_rows(&and_itp));
@@ -1104,6 +1146,7 @@ mod tests {
       stack_inputs: vec![a],
       stack_outputs: vec![wrong],
       semantic_proof: prove_instruction(opcode::NOT, &[a], &[wrong]),
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&not_itp));
     assert!(!verify_proof_with_rows(&not_itp));
@@ -1122,6 +1165,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
   }
@@ -1138,6 +1182,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -1156,6 +1201,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
   }
@@ -1174,6 +1220,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
   }
@@ -1193,6 +1240,7 @@ mod tests {
           stack_inputs: vec![a, b],
           stack_outputs: vec![wrong],
           semantic_proof: proof,
+          memory_claims: vec![],
         };
         !verify_proof(&itp)
       }
@@ -1207,6 +1255,7 @@ mod tests {
       stack_inputs: vec![u256_bytes(42)],
       stack_outputs: vec![],
       semantic_proof: None,
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
   }
@@ -1219,6 +1268,7 @@ mod tests {
       stack_inputs: vec![],
       stack_outputs: vec![u256_bytes(42)],
       semantic_proof: None,
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
   }
@@ -1231,6 +1281,7 @@ mod tests {
       stack_inputs: vec![],
       stack_outputs: vec![],
       semantic_proof: None,
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&itp));
   }
@@ -1243,6 +1294,7 @@ mod tests {
       stack_inputs: vec![u256_bytes(1)],
       stack_outputs: vec![u256_bytes(42)],
       semantic_proof: None,
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&itp));
   }
@@ -1269,6 +1321,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
 
     assert!(verify_proof_with_rows(&itp));
@@ -1288,6 +1341,7 @@ mod tests {
         stack_inputs: vec![a, b],
         stack_outputs: vec![wrong],
         semantic_proof: Some(proof),
+        memory_claims: vec![],
       };
       assert!(!verify_proof_with_rows(&itp));
     }
@@ -1309,6 +1363,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
       semantic_proof: Some(p1),
+      memory_claims: vec![],
     };
 
     // Step 2: ADD(300, 50) = 350
@@ -1319,6 +1374,7 @@ mod tests {
       stack_inputs: vec![c, d],
       stack_outputs: vec![e],
       semantic_proof: Some(p2),
+      memory_claims: vec![],
     };
 
     let tx = TransactionProof {
@@ -1349,6 +1405,7 @@ mod tests {
       stack_inputs: vec![a, a],
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1365,6 +1422,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1381,6 +1439,7 @@ mod tests {
       stack_inputs: vec![a, a],
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&itp));
   }
@@ -1395,6 +1454,7 @@ mod tests {
       stack_inputs: vec![zero],
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1410,6 +1470,7 @@ mod tests {
       stack_inputs: vec![val],
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1426,6 +1487,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1442,6 +1504,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1457,6 +1520,7 @@ mod tests {
       stack_inputs: vec![a, a],
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
   }
@@ -1473,6 +1537,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(!verify_proof(&itp));
   }
@@ -1488,6 +1553,7 @@ mod tests {
       stack_inputs: vec![a, b],
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1504,6 +1570,7 @@ mod tests {
       stack_inputs: vec![neg, pos],
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1520,6 +1587,7 @@ mod tests {
       stack_inputs: vec![pos, neg],
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1536,6 +1604,7 @@ mod tests {
       stack_inputs: vec![pos, neg],
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
+      memory_claims: vec![],
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1550,18 +1619,18 @@ mod tests {
     let zero = u256_bytes(0);
 
     let cases: &[(u8, Vec<[u8; 32]>, [u8; 32])] = &[
-      (opcode::EQ,     vec![small, small], bool_word(true)),
-      (opcode::EQ,     vec![small, large], bool_word(false)),
-      (opcode::ISZERO, vec![zero],         bool_word(true)),
-      (opcode::ISZERO, vec![small],        bool_word(false)),
-      (opcode::LT,     vec![small, large], bool_word(true)),
-      (opcode::LT,     vec![large, small], bool_word(false)),
-      (opcode::GT,     vec![large, small], bool_word(true)),
-      (opcode::GT,     vec![small, large], bool_word(false)),
-      (opcode::SLT,    vec![neg, small],   bool_word(true)),
-      (opcode::SLT,    vec![small, neg],   bool_word(false)),
-      (opcode::SGT,    vec![small, neg],   bool_word(true)),
-      (opcode::SGT,    vec![neg, small],   bool_word(false)),
+      (opcode::EQ, vec![small, small], bool_word(true)),
+      (opcode::EQ, vec![small, large], bool_word(false)),
+      (opcode::ISZERO, vec![zero], bool_word(true)),
+      (opcode::ISZERO, vec![small], bool_word(false)),
+      (opcode::LT, vec![small, large], bool_word(true)),
+      (opcode::LT, vec![large, small], bool_word(false)),
+      (opcode::GT, vec![large, small], bool_word(true)),
+      (opcode::GT, vec![small, large], bool_word(false)),
+      (opcode::SLT, vec![neg, small], bool_word(true)),
+      (opcode::SLT, vec![small, neg], bool_word(false)),
+      (opcode::SGT, vec![small, neg], bool_word(true)),
+      (opcode::SGT, vec![neg, small], bool_word(false)),
     ];
 
     for (op, inputs, output) in cases {
@@ -1571,10 +1640,7 @@ mod tests {
         .unwrap_or_else(|e| panic!("infer_proof failed for opcode 0x{op:02x}: {e}"));
       let expected = wff_instruction(*op, inputs, &[*output])
         .unwrap_or_else(|| panic!("wff_instruction returned None for opcode 0x{op:02x}"));
-      assert_eq!(
-        inferred, expected,
-        "WFF mismatch for opcode 0x{op:02x}"
-      );
+      assert_eq!(inferred, expected, "WFF mismatch for opcode 0x{op:02x}");
     }
   }
 
@@ -1589,18 +1655,18 @@ mod tests {
     let zero = u256_bytes(0);
 
     let cases: &[(u8, Vec<[u8; 32]>, [u8; 32])] = &[
-      (opcode::LT,     vec![small, large], bool_word(true)),
-      (opcode::LT,     vec![large, small], bool_word(false)),
-      (opcode::GT,     vec![large, small], bool_word(true)),
-      (opcode::GT,     vec![small, large], bool_word(false)),
-      (opcode::SLT,    vec![neg,   small], bool_word(true)),
-      (opcode::SLT,    vec![small, neg  ], bool_word(false)),
-      (opcode::SGT,    vec![small, neg  ], bool_word(true)),
-      (opcode::SGT,    vec![neg,   small], bool_word(false)),
-      (opcode::EQ,     vec![small, small], bool_word(true)),
-      (opcode::EQ,     vec![small, large], bool_word(false)),
-      (opcode::ISZERO, vec![zero],         bool_word(true)),
-      (opcode::ISZERO, vec![small],        bool_word(false)),
+      (opcode::LT, vec![small, large], bool_word(true)),
+      (opcode::LT, vec![large, small], bool_word(false)),
+      (opcode::GT, vec![large, small], bool_word(true)),
+      (opcode::GT, vec![small, large], bool_word(false)),
+      (opcode::SLT, vec![neg, small], bool_word(true)),
+      (opcode::SLT, vec![small, neg], bool_word(false)),
+      (opcode::SGT, vec![small, neg], bool_word(true)),
+      (opcode::SGT, vec![neg, small], bool_word(false)),
+      (opcode::EQ, vec![small, small], bool_word(true)),
+      (opcode::EQ, vec![small, large], bool_word(false)),
+      (opcode::ISZERO, vec![zero], bool_word(true)),
+      (opcode::ISZERO, vec![small], bool_word(false)),
     ];
 
     for (op, inputs, output) in cases {
@@ -1612,6 +1678,7 @@ mod tests {
         stack_inputs: inputs.clone(),
         stack_outputs: vec![*output],
         semantic_proof: Some(proof),
+        memory_claims: vec![],
       };
       assert!(
         verify_proof(&itp),
@@ -1626,5 +1693,431 @@ mod tests {
         "verify_proof_with_zkp (ZK receipt) failed for opcode 0x{op:02x}"
       );
     }
+  }
+}
+
+#[test]
+fn test_and_debug_internals() {
+  use revm::bytecode::opcode;
+  use zprove_core::semantic_proof::compile_proof;
+  use zprove_core::transition::{prove_instruction, wff_instruction};
+  use zprove_core::zk_proof::{
+    LutKernelAir, RECEIPT_BIND_TAG_LUT, RECEIPT_BIND_TAG_STACK,
+    build_lut_steps_from_rows_bit_family, build_lut_trace_from_proof_rows, make_circle_config,
+    make_receipt_binding_public_values, prove_lut_kernel_stark_with_public_values,
+    prove_lut_with_prep_and_logup, prove_stack_ir_with_prep, setup_proof_rows_preprocessed,
+    verify_lut_kernel_stark_with_public_values, verify_lut_with_prep,
+    verify_lut_with_prep_and_logup, verify_stack_ir_with_prep,
+  };
+
+  // ── VERY EARLY byte_table fresh proof (before ANY other STARK calls) ────
+  {
+    use zprove_core::byte_table::{
+      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
+    };
+    let queries = vec![ByteTableQuery {
+      a: 0xAA,
+      b: 0x55,
+      op: BYTE_OP_AND,
+      result: 0x00,
+      multiplicity: 1,
+    }];
+    let fresh_proof_early = prove_byte_table(&queries);
+    let fresh_result_early = verify_byte_table(&fresh_proof_early);
+    eprintln!(
+      "VERY EARLY fresh byte_table proof verify: {:?}",
+      fresh_result_early.is_ok()
+    );
+  }
+
+  let a = [0xAAu8; 32];
+  let b = [0x55u8; 32];
+  let c = [0x00u8; 32];
+
+  let proof = prove_instruction(opcode::AND, &[a, b], &[c]).unwrap();
+  let rows = compile_proof(&proof);
+  eprintln!("rows.len() = {}", rows.len());
+
+  let expected_wff = wff_instruction(opcode::AND, &[a, b], &[c]).unwrap();
+  let stack_bind_pv =
+    make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, opcode::AND, &expected_wff);
+  let lut_bind_pv =
+    make_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, opcode::AND, &expected_wff);
+
+  // OLD path: bit-family steps => standalone LUT
+  let lut_steps = build_lut_steps_from_rows_bit_family(&rows).unwrap();
+  eprintln!("lut_steps.len() = {}", lut_steps.len());
+  let old_lut_proof = prove_lut_kernel_stark_with_public_values(&lut_steps, &lut_bind_pv).unwrap();
+  let old_lut_result = verify_lut_kernel_stark_with_public_values(&old_lut_proof, &lut_bind_pv);
+  eprintln!("OLD LUT verify: {:?}", old_lut_result.is_ok());
+  assert!(
+    old_lut_result.is_ok(),
+    "OLD LUT verify failed: {:?}",
+    old_lut_result.err()
+  );
+
+  // ── byte_table fresh proof AFTER old LUT prove ────
+  {
+    use zprove_core::byte_table::{
+      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
+    };
+    let queries = vec![ByteTableQuery {
+      a: 0xAA,
+      b: 0x55,
+      op: BYTE_OP_AND,
+      result: 0x00,
+      multiplicity: 1,
+    }];
+    let fresh_proof = prove_byte_table(&queries);
+    eprintln!(
+      "After OLD LUT prove: fresh byte_table verify: {:?}",
+      verify_byte_table(&fresh_proof).is_ok()
+    );
+  }
+
+  let (prep_data, prep_vk) = setup_proof_rows_preprocessed(&rows, &stack_bind_pv).unwrap();
+
+  // ── byte_table fresh proof AFTER setup_prep ────
+  {
+    use zprove_core::byte_table::{
+      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
+    };
+    let queries = vec![ByteTableQuery {
+      a: 0xAA,
+      b: 0x55,
+      op: BYTE_OP_AND,
+      result: 0x00,
+      multiplicity: 1,
+    }];
+    let fresh_proof = prove_byte_table(&queries);
+    eprintln!(
+      "After setup_prep: fresh byte_table verify: {:?}",
+      verify_byte_table(&fresh_proof).is_ok()
+    );
+  }
+
+  let stack_proof = prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv).unwrap();
+  let stack_result = verify_stack_ir_with_prep(&stack_proof, &prep_vk, &stack_bind_pv);
+  eprintln!("Stack IR verify: {:?}", stack_result.is_ok());
+  assert!(
+    stack_result.is_ok(),
+    "stack IR verify failed: {:?}",
+    stack_result.err()
+  );
+
+  // ── byte_table fresh proof AFTER stack IR prove ────
+  {
+    use zprove_core::byte_table::{
+      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
+    };
+    let queries = vec![ByteTableQuery {
+      a: 0xAA,
+      b: 0x55,
+      op: BYTE_OP_AND,
+      result: 0x00,
+      multiplicity: 1,
+    }];
+    let fresh_proof = prove_byte_table(&queries);
+    eprintln!(
+      "After stack IR prove: fresh byte_table verify: {:?}",
+      verify_byte_table(&fresh_proof).is_ok()
+    );
+  }
+
+  // DIAGNOSTIC: LutKernelAir + build_lut_trace_from_proof_rows + prove/verify (no prep)
+  // NOTE: This runs AFTER setup_prep and stack IR prove to test isolation
+  let diag_proof_for_lut = {
+    let trace = build_lut_trace_from_proof_rows(&rows).unwrap();
+    let config = make_circle_config();
+    let diag_proof = p3_uni_stark::prove(&config, &LutKernelAir, trace, &lut_bind_pv);
+    let diag_result = p3_uni_stark::verify(&config, &LutKernelAir, &diag_proof, &lut_bind_pv);
+    eprintln!(
+      "DIAG LUT verify (after stack prove, old air + new trace): {:?}",
+      diag_result.is_ok()
+    );
+    diag_proof
+  };
+
+  // ── byte_table fresh proof AFTER DIAG prove ────
+  {
+    use zprove_core::byte_table::{
+      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
+    };
+    let queries = vec![ByteTableQuery {
+      a: 0xAA,
+      b: 0x55,
+      op: BYTE_OP_AND,
+      result: 0x00,
+      multiplicity: 1,
+    }];
+    let fresh_proof = prove_byte_table(&queries);
+    eprintln!(
+      "After DIAG prove: fresh byte_table verify: {:?}",
+      verify_byte_table(&fresh_proof).is_ok()
+    );
+  }
+
+  let (lut_proof, byte_table_proof) =
+    prove_lut_with_prep_and_logup(&rows, &prep_data, &lut_bind_pv).unwrap();
+
+  // ── byte_table fresh proof AFTER prove_lut_with_prep_and_logup ────
+  {
+    use zprove_core::byte_table::{
+      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
+    };
+    let queries = vec![ByteTableQuery {
+      a: 0xAA,
+      b: 0x55,
+      op: BYTE_OP_AND,
+      result: 0x00,
+      multiplicity: 1,
+    }];
+    let fresh_proof = prove_byte_table(&queries);
+    eprintln!(
+      "After prove_lut: fresh byte_table verify: {:?}",
+      verify_byte_table(&fresh_proof).is_ok()
+    );
+  }
+
+  // Compare proofs
+  eprintln!(
+    "diag_proof.degree_bits = {}",
+    diag_proof_for_lut.degree_bits
+  );
+  eprintln!("lut_proof.degree_bits  = {}", lut_proof.degree_bits);
+  eprintln!(
+    "diag trace_local len = {}",
+    diag_proof_for_lut.opened_values.trace_local.len()
+  );
+  eprintln!(
+    "lut  trace_local len = {}",
+    lut_proof.opened_values.trace_local.len()
+  );
+
+  // Try verifying DIAG proof with LUT verifier
+  let config = make_circle_config();
+  let diag_as_lut = p3_uni_stark::verify_with_preprocessed(
+    &config,
+    &LutKernelAir,
+    &diag_proof_for_lut,
+    &lut_bind_pv,
+    None,
+  );
+  eprintln!(
+    "DIAG proof verified with LUT verifier (after stack): {:?}",
+    diag_as_lut.is_ok()
+  );
+
+  // Try verifying LUT proof with p3_uni_stark::verify directly
+  let config2 = make_circle_config();
+  let lut_direct = p3_uni_stark::verify(&config2, &LutKernelAir, &lut_proof, &lut_bind_pv);
+  eprintln!(
+    "LUT proof verified with p3::verify directly: {:?}",
+    lut_direct.is_ok()
+  );
+
+  // Try verifying LUT proof with verify_lut_with_prep (which uses same args)
+  let lut_prep_result = verify_lut_with_prep(&lut_proof, &prep_vk, &lut_bind_pv);
+  eprintln!(
+    "LUT proof verify_lut_with_prep: {:?}",
+    lut_prep_result.is_ok()
+  );
+
+  // Directly test byte_table verify
+  eprintln!("byte_table_proof is Some: {:?}", byte_table_proof.is_some());
+  if let Some(ref bp) = byte_table_proof {
+    // Rebuild queries from rows and re-prove independently (BEFORE bt_result)
+    use zprove_core::zk_proof::collect_byte_table_queries_from_rows;
+    let queries = collect_byte_table_queries_from_rows(&rows);
+    eprintln!("queries count: {}", queries.len());
+    let fresh_proof_before = zprove_core::byte_table::prove_byte_table(&queries);
+    let fresh_result_before = zprove_core::byte_table::verify_byte_table(&fresh_proof_before);
+    eprintln!(
+      "fresh byte_table proof verify BEFORE bt_result: {:?}",
+      fresh_result_before.is_ok()
+    );
+
+    let bt_result = zprove_core::byte_table::verify_byte_table(bp);
+    eprintln!("byte_table verify directly: {:?}", bt_result.is_ok());
+    eprintln!("byte_table verify err: {:?}", bt_result.err());
+
+    let fresh_proof = zprove_core::byte_table::prove_byte_table(&queries);
+    let fresh_result = zprove_core::byte_table::verify_byte_table(&fresh_proof);
+    eprintln!(
+      "fresh byte_table proof verify AFTER bt_result: {:?}",
+      fresh_result.is_ok()
+    );
+  }
+
+  let lut_result = verify_lut_with_prep_and_logup(
+    &lut_proof,
+    byte_table_proof.as_ref(),
+    &prep_vk,
+    &lut_bind_pv,
+  );
+  eprintln!("LUT verify: {:?}", lut_result.is_ok());
+  assert!(
+    lut_result.is_ok(),
+    "LUT verify failed: {:?}",
+    lut_result.err()
+  );
+}
+
+// ============================================================
+// Memory consistency proof tests
+// ============================================================
+
+#[cfg(test)]
+mod memory_consistency_tests {
+  use std::collections::HashMap;
+  use zprove_core::transition::MemAccessClaim;
+  use zprove_core::zk_proof::{prove_memory_consistency, verify_memory_consistency};
+
+  /// Compute correct `write_version` values for a sequence of claims.
+  ///
+  /// Each claim's wv = number of writes to the same address *before* this
+  /// claim in the sequence (i.e. zero-indexed write count so far).
+  fn assign_write_versions(claims: &mut Vec<MemAccessClaim>) {
+    let mut wv_map: HashMap<u64, u32> = HashMap::new();
+    for c in claims.iter_mut() {
+      let wv = *wv_map.get(&c.addr).unwrap_or(&0);
+      c.write_version = wv;
+      if c.is_write {
+        *wv_map.entry(c.addr).or_insert(0) += 1;
+      }
+    }
+  }
+
+  fn mwrite(addr: u64, rw: u64, val: u8) -> MemAccessClaim {
+    let mut value = [0u8; 32];
+    value[31] = val;
+    MemAccessClaim {
+      rw_counter: rw,
+      addr,
+      is_write: true,
+      value,
+      write_version: 0,
+    }
+  }
+
+  fn mread(addr: u64, rw: u64, val: u8) -> MemAccessClaim {
+    let mut value = [0u8; 32];
+    value[31] = val;
+    MemAccessClaim {
+      rw_counter: rw,
+      addr,
+      is_write: false,
+      value,
+      write_version: 0,
+    }
+  }
+
+  #[test]
+  fn test_memory_consistency_single_write() {
+    let mut claims = vec![mwrite(0, 1, 42)];
+    assign_write_versions(&mut claims);
+    let proof = prove_memory_consistency(&claims).expect("prove failed");
+    assert!(verify_memory_consistency(&proof, &claims));
+  }
+
+  #[test]
+  fn test_memory_consistency_write_then_read_same_value() {
+    let mut claims = vec![mwrite(0, 1, 99), mread(0, 2, 99)];
+    assign_write_versions(&mut claims);
+    let proof = prove_memory_consistency(&claims).expect("prove failed");
+    assert!(verify_memory_consistency(&proof, &claims));
+  }
+
+  #[test]
+  fn test_memory_consistency_read_uninitialized_zero() {
+    // Reading an address never written: value must be 0.
+    let mut claims = vec![mread(64, 1, 0)];
+    assign_write_versions(&mut claims);
+    let proof = prove_memory_consistency(&claims).expect("prove failed");
+    assert!(verify_memory_consistency(&proof, &claims));
+  }
+
+  #[test]
+  fn test_memory_consistency_multiple_addresses() {
+    let mut claims = vec![
+      mwrite(0, 1, 11),
+      mwrite(32, 2, 22),
+      mread(0, 3, 11),
+      mread(32, 4, 22),
+    ];
+    assign_write_versions(&mut claims);
+    let proof = prove_memory_consistency(&claims).expect("prove failed");
+    assert!(verify_memory_consistency(&proof, &claims));
+  }
+
+  #[test]
+  fn test_memory_consistency_overwrite_same_address() {
+    let mut claims = vec![
+      mwrite(0, 1, 10),
+      mwrite(0, 2, 20),
+      mread(0, 3, 20), // reads the overwritten value
+    ];
+    assign_write_versions(&mut claims);
+    let proof = prove_memory_consistency(&claims).expect("prove failed");
+    assert!(verify_memory_consistency(&proof, &claims));
+  }
+
+  #[test]
+  fn test_memory_consistency_proof_fails_bad_read() {
+    // Read reports wrong value for an unwritten address.
+    let mut claims = vec![mread(0, 1, 7)]; // 7 != 0 (uninitialised)
+    assign_write_versions(&mut claims);
+    let result = prove_memory_consistency(&claims);
+    assert!(
+      result.is_err(),
+      "expected prove to fail for inconsistent read"
+    );
+  }
+
+  #[test]
+  fn test_memory_consistency_proof_fails_stale_read() {
+    // Read after newer overwrite sees old value — should fail.
+    let mut claims = vec![
+      mwrite(0, 1, 10),
+      mwrite(0, 2, 20),
+      mread(0, 3, 10), // stale: should read 20
+    ];
+    assign_write_versions(&mut claims);
+    let result = prove_memory_consistency(&claims);
+    assert!(result.is_err(), "expected prove to fail for stale read");
+  }
+
+  #[test]
+  fn test_memory_consistency_proof_fails_wrong_read_after_write() {
+    // Write 5, then read 6 (wrong).
+    let mut claims = vec![mwrite(0, 1, 5), mread(0, 2, 6)];
+    assign_write_versions(&mut claims);
+    let result = prove_memory_consistency(&claims);
+    assert!(
+      result.is_err(),
+      "expected prove to fail for wrong read value"
+    );
+  }
+
+  #[test]
+  fn test_memory_consistency_proof_roundtrip_larger() {
+    // Prove → verify roundtrip with several addresses and values.
+    let mut claims = vec![
+      mwrite(0, 1, 1),
+      mwrite(32, 2, 2),
+      mwrite(0, 3, 3), // overwrite addr 0
+      mread(0, 4, 3),  // reads overwritten value
+      mread(32, 5, 2),
+    ];
+    assign_write_versions(&mut claims);
+    let proof = prove_memory_consistency(&claims).expect("prove failed");
+    assert!(verify_memory_consistency(&proof, &claims));
+  }
+
+  #[test]
+  fn test_memory_consistency_empty_claims() {
+    let claims: Vec<MemAccessClaim> = vec![];
+    let proof = prove_memory_consistency(&claims).expect("prove failed");
+    assert!(verify_memory_consistency(&proof, &claims));
   }
 }

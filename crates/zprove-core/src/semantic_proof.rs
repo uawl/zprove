@@ -89,14 +89,6 @@ pub enum Proof {
   EqTrans(Box<Proof>, Box<Proof>),
 
   // ======== Byte axioms (lookup-table verifiable) ========
-  /// `ByteAdd(Byte(a), Byte(b), Bool(c)) = Byte((a+b+c) mod 256)`.
-  ByteAddEq(u8, u8, bool),
-  /// `ByteAddCarry(Byte(a), Byte(b), Bool(c)) = Bool((a+b+c) >= 256)`.
-  ByteAddCarryEq(u8, u8, bool),
-  /// `ByteMulLow(Byte(a), Byte(b)) = Byte((a*b) mod 256)`.
-  ByteMulLowEq(u8, u8),
-  /// `ByteMulHigh(Byte(a), Byte(b)) = Byte((a*b) / 256)`.
-  ByteMulHighEq(u8, u8),
   /// `ByteAnd(Byte(a), Byte(b)) = Byte(a & b)`.
   ByteAndEq(u8, u8),
   /// `ByteOr(Byte(a), Byte(b)) = Byte(a | b)`.
@@ -354,44 +346,6 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
         })
       }
     }
-    Proof::ByteAddEq(a, b, c) => {
-      let cv = *c as u16;
-      let total = *a as u16 + *b as u16 + cv;
-      Ok(WFF::Equal(
-        Box::new(Term::ByteAdd(
-          Box::new(Term::Byte(*a)),
-          Box::new(Term::Byte(*b)),
-          Box::new(Term::Bool(*c)),
-        )),
-        Box::new(Term::Byte((total & 0xFF) as u8)),
-      ))
-    }
-    Proof::ByteAddCarryEq(a, b, c) => {
-      let cv = *c as u16;
-      let total = *a as u16 + *b as u16 + cv;
-      Ok(WFF::Equal(
-        Box::new(Term::ByteAddCarry(
-          Box::new(Term::Byte(*a)),
-          Box::new(Term::Byte(*b)),
-          Box::new(Term::Bool(*c)),
-        )),
-        Box::new(Term::Bool(total >= 256)),
-      ))
-    }
-    Proof::ByteMulLowEq(a, b) => Ok(WFF::Equal(
-      Box::new(Term::ByteMulLow(
-        Box::new(Term::Byte(*a)),
-        Box::new(Term::Byte(*b)),
-      )),
-      Box::new(Term::Byte(((*a as u16 * *b as u16) & 0xFF) as u8)),
-    )),
-    Proof::ByteMulHighEq(a, b) => Ok(WFF::Equal(
-      Box::new(Term::ByteMulHigh(
-        Box::new(Term::Byte(*a)),
-        Box::new(Term::Byte(*b)),
-      )),
-      Box::new(Term::Byte(((*a as u16 * *b as u16) >> 8) as u8)),
-    )),
     Proof::ByteAndEq(a, b) => Ok(WFF::Equal(
       Box::new(Term::ByteAnd(
         Box::new(Term::Byte(*a)),
@@ -1500,7 +1454,11 @@ pub fn wff_eq(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
   for i in 0..32 {
     xor_result[i] = a[i] ^ b[i];
   }
-  let expected_c = if xor_result == ZERO_WORD { ONE_WORD } else { ZERO_WORD };
+  let expected_c = if xor_result == ZERO_WORD {
+    ONE_WORD
+  } else {
+    ZERO_WORD
+  };
   WFF::And(
     Box::new(wff_xor(a, b, &xor_result)),
     Box::new(wff_xor(c, &expected_c, &ZERO_WORD)),
@@ -1774,7 +1732,11 @@ pub fn prove_eq(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
   for i in 0..32 {
     xor_result[i] = a[i] ^ b[i];
   }
-  let expected_c = if xor_result == ZERO_WORD { ONE_WORD } else { ZERO_WORD };
+  let expected_c = if xor_result == ZERO_WORD {
+    ONE_WORD
+  } else {
+    ZERO_WORD
+  };
   let p_xor = prove_xor(a, b, &xor_result);
   let p_output = prove_xor(c, &expected_c, &ZERO_WORD);
   Proof::AndIntro(Box::new(p_xor), Box::new(p_output))
@@ -2104,59 +2066,6 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
       });
       idx
     }
-    Proof::ByteAddEq(a, b, c) => {
-      let carry_in = *c as u32;
-      let total = *a as u32 + *b as u32 + carry_in;
-      let sum = total & 0xFF;
-      let carry_out = if total >= 256 { 1 } else { 0 };
-      let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_ADD_EQ,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        scalar2: carry_out,
-        arg0: carry_in,
-        arg1: sum,
-        value: sum,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
-      idx
-    }
-    Proof::ByteAddCarryEq(a, b, c) => {
-      let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_ADD_CARRY_EQ,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        arg0: *c as u32,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
-      idx
-    }
-    Proof::ByteMulLowEq(a, b) => {
-      let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_MUL_LOW_EQ,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
-      idx
-    }
-    Proof::ByteMulHighEq(a, b) => {
-      let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_MUL_HIGH_EQ,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
-      idx
-    }
     Proof::ByteAndEq(a, b) => {
       let idx = rows.len() as u32;
       rows.push(ProofRow {
@@ -2444,22 +2353,6 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
       OP_BYTE_XOR => {
         let (a, b) = (arg(row.arg0)?, arg(row.arg1)?);
         if row.value != (a.value ^ b.value) {
-          return Err(VerifyError::ByteDecideFailed);
-        }
-      }
-      // ── Proof: byte-add axiom ──
-      OP_BYTE_ADD_EQ => {
-        if row.scalar0 > 255 || row.scalar1 > 255 || row.arg0 > 1 {
-          return Err(VerifyError::ByteDecideFailed);
-        }
-      }
-      OP_BYTE_ADD_CARRY_EQ => {
-        if row.scalar0 > 255 || row.scalar1 > 255 || row.arg0 > 1 {
-          return Err(VerifyError::ByteDecideFailed);
-        }
-      }
-      OP_BYTE_MUL_LOW_EQ | OP_BYTE_MUL_HIGH_EQ => {
-        if row.scalar0 > 255 || row.scalar1 > 255 {
           return Err(VerifyError::ByteDecideFailed);
         }
       }
