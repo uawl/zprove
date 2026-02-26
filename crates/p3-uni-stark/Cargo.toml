@@ -1,0 +1,24 @@
+[package]
+name = "p3-uni-stark"
+version = "0.4.2"
+edition = "2024"
+description = "A minimal univariate STARK framework with lookup argument support (patched for zprove)."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+p3-air = "0.4"
+p3-challenger = "0.4"
+p3-commit = "0.4"
+p3-dft = "0.4"
+p3-field = "0.4"
+p3-matrix = "0.4"
+p3-maybe-rayon = "0.4"
+p3-util = "0.4"
+
+itertools = "0.14"
+serde = { version = "1", features = ["derive", "alloc"], default-features = false }
+thiserror = "2"
+tracing = { version = "0.1", default-features = false, features = ["attributes"] }
+
+[dev-dependencies]
+p3-baby-bear = "0.4"
