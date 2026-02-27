@@ -3,12 +3,13 @@
 //! Building blocks for the commitment-chain recursive prover described in
 //! `plans/recursive-proving.md §4`.
 //!
-//! Current status: **skeleton only** — AIR constraints are complete, but the
-//! prover functions are stubs (`todo!()`) until `commit_vm_state` is wired up.
+//! Current status: **complete** — AIR constraints, `commit_vm_state` (Poseidon2
+//! hash of stack + memory root), and `prove_link_stark` / `verify_link_stark` are
+//! fully implemented and tested (see `phase2_chain_tests.rs`).
 //!
 //! ```text
 //! Layer 1 (done):   SubCall inner_proof depth field (transition.rs)
-//! Layer 2 (here):   LinkAir — segment boundary commitment chain
+//! Layer 2 (done):   LinkAir — segment boundary commitment chain
 //! Layer 3 (future): StarkVerifierAir — full in-circuit STARK recursion
 //! ```
 
@@ -20,8 +21,8 @@ use p3_symmetric::CryptographicHasher;
 
 use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir};
 use p3_field::PrimeCharacteristicRing;
-use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_matrix::dense::RowMajorMatrix;
 
 // ── Column layout (NUM_LINK_COLS = 36) ────────────────────────────────
 //
@@ -44,12 +45,12 @@ const LINK_PUBLIC_VALUES_LEN: usize = 36;
 
 const LCOL_L_PC: usize = 0;
 const LCOL_L_SP: usize = 1;
-const LCOL_L_STACK: usize = 2;  // [2, 10)
-const LCOL_L_MEM: usize = 10;   // [10, 18)
+const LCOL_L_STACK: usize = 2; // [2, 10)
+const LCOL_L_MEM: usize = 10; // [10, 18)
 const LCOL_R_PC: usize = 18;
 const LCOL_R_SP: usize = 19;
 const LCOL_R_STACK: usize = 20; // [20, 28)
-const LCOL_R_MEM: usize = 28;   // [28, 36)
+const LCOL_R_MEM: usize = 28; // [28, 36)
 
 // ── StateCommitment ───────────────────────────────────────────────────
 
@@ -72,8 +73,8 @@ pub struct StateCommitment {
 
 impl StateCommitment {
   /// Serialize into 18 field elements for use in a trace row or public-values vector.
-  fn to_fields(&self) -> [Val; 18] {
-    let mut out = [Val::ZERO; 18];
+  pub fn to_fields(&self) -> [Val; 18] {
+    let mut out = [Val::new(0); 18];
     out[0] = Val::from_u32(self.pc);
     out[1] = Val::from_u32(self.sp);
     out[2..10].copy_from_slice(&self.stack_hash);
@@ -99,7 +100,7 @@ pub fn commit_vm_state(state: &VmState) -> StateCommitment {
 
   // Domain-separation tags. Keep as runtime values to avoid const-fn limitations.
   let domain_stack = Val::from_u32(0x53544B5F); // "STK_"
-  let domain_mem   = Val::from_u32(0x4D454D5F); // "MEM_"
+  let domain_mem = Val::from_u32(0x4D454D5F); // "MEM_"
 
   // stack_hash: Poseidon2([domain_stack, sp, stack[0..sp] as 8×u32 per word])
   let mut stack_input: Vec<Val> = Vec::with_capacity(2 + state.sp * 8);
@@ -157,7 +158,7 @@ pub fn link_public_values(s_in: &StateCommitment, s_out: &StateCommitment) -> Ve
 /// can re-derive them from the block header independently.
 pub struct LinkAir;
 
-impl<F: p3_field::Field> BaseAir<F> for LinkAir {
+impl<F> BaseAir<F> for LinkAir {
   fn width(&self) -> usize {
     NUM_LINK_COLS
   }
@@ -165,7 +166,7 @@ impl<F: p3_field::Field> BaseAir<F> for LinkAir {
 
 impl<AB: AirBuilderWithPublicValues> Air<AB> for LinkAir
 where
-  AB::F: p3_field::Field,
+  AB::F: PrimeCharacteristicRing,
 {
   fn eval(&self, builder: &mut AB) {
     // Collect public values into owned expressions first to avoid
@@ -185,11 +186,11 @@ where
         row[LCOL_L_PC].clone(),
         row[LCOL_L_SP].clone(),
         std::array::from_fn::<_, 8, _>(|i| row[LCOL_L_STACK + i].clone()),
-        std::array::from_fn::<_, 8, _>(|i| row[LCOL_L_MEM   + i].clone()),
+        std::array::from_fn::<_, 8, _>(|i| row[LCOL_L_MEM + i].clone()),
         row[LCOL_R_PC].clone(),
         row[LCOL_R_SP].clone(),
         std::array::from_fn::<_, 8, _>(|i| row[LCOL_R_STACK + i].clone()),
-        std::array::from_fn::<_, 8, _>(|i| row[LCOL_R_MEM   + i].clone()),
+        std::array::from_fn::<_, 8, _>(|i| row[LCOL_R_MEM + i].clone()),
       )
     };
 
@@ -209,17 +210,33 @@ where
     // re-derive them from the block header.  All other rows are padding and
     // must not be constrained against the public values.
     // pv layout: [l_pc, l_sp, l_stack[8], l_mem[8], r_pc, r_sp, r_stack[8], r_mem[8]]
-    builder.when_first_row().assert_eq(pv[0].clone(), l_pc.into());
-    builder.when_first_row().assert_eq(pv[1].clone(), l_sp.into());
+    builder
+      .when_first_row()
+      .assert_eq(pv[0].clone(), l_pc.into());
+    builder
+      .when_first_row()
+      .assert_eq(pv[1].clone(), l_sp.into());
     for i in 0..8 {
-      builder.when_first_row().assert_eq(pv[2  + i].clone(), l_stack[i].clone().into());
-      builder.when_first_row().assert_eq(pv[10 + i].clone(), l_mem[i].clone().into());
+      builder
+        .when_first_row()
+        .assert_eq(pv[2 + i].clone(), l_stack[i].clone().into());
+      builder
+        .when_first_row()
+        .assert_eq(pv[10 + i].clone(), l_mem[i].clone().into());
     }
-    builder.when_first_row().assert_eq(pv[18].clone(), r_pc.into());
-    builder.when_first_row().assert_eq(pv[19].clone(), r_sp.into());
+    builder
+      .when_first_row()
+      .assert_eq(pv[18].clone(), r_pc.into());
+    builder
+      .when_first_row()
+      .assert_eq(pv[19].clone(), r_sp.into());
     for i in 0..8 {
-      builder.when_first_row().assert_eq(pv[20 + i].clone(), r_stack[i].clone().into());
-      builder.when_first_row().assert_eq(pv[28 + i].clone(), r_mem[i].clone().into());
+      builder
+        .when_first_row()
+        .assert_eq(pv[20 + i].clone(), r_stack[i].clone().into());
+      builder
+        .when_first_row()
+        .assert_eq(pv[28 + i].clone(), r_mem[i].clone().into());
     }
   }
 }
@@ -228,7 +245,7 @@ where
 
 fn build_link_trace(links: &[(StateCommitment, StateCommitment)]) -> RowMajorMatrix<Val> {
   let height = links.len().max(4).next_power_of_two();
-  let mut data = vec![Val::ZERO; height * NUM_LINK_COLS];
+  let mut data = vec![Val::new(0); height * NUM_LINK_COLS];
   for (i, (left_out, right_in)) in links.iter().enumerate() {
     let base = i * NUM_LINK_COLS;
     let lf = left_out.to_fields();

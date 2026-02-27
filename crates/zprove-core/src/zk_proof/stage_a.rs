@@ -9,8 +9,8 @@ use super::types::{
 };
 
 use crate::semantic_proof::{
-  NUM_PROOF_COLS, Proof, ProofRow, RET_WFF_AND, RET_WFF_EQ, Term, WFF,
-  compile_proof, infer_proof, verify_compiled,
+  NUM_PROOF_COLS, Proof, ProofRow, RET_WFF_AND, WFF, compile_proof, infer_proof,
+  verify_compiled,
 };
 
 use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir};
@@ -57,8 +57,7 @@ pub struct StageAProof {
 fn route_stage_a_row_op(op: u32) -> Result<(), String> {
   use crate::semantic_proof::{
     OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
-    OP_BYTE_ADD_THIRD_CONGRUENCE, OP_EQ_REFL, OP_EQ_TRANS, OP_U24_ADD_EQ,
-    OP_U29_ADD_EQ,
+    OP_BYTE_ADD_THIRD_CONGRUENCE, OP_EQ_REFL, OP_EQ_TRANS, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
   };
   match op {
     OP_U29_ADD_EQ
@@ -209,14 +208,8 @@ impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
     let next_cin_u29 = next[COL_SCALAR2].clone().into();
     let next_cin_u24 = next[COL_SCALAR2].clone().into();
 
-    let local_cases = [
-      (g_u29, local_cout_u29),
-      (g_u24, local_cout_u24),
-    ];
-    let next_cases = [
-      (ng_u29, next_cin_u29),
-      (ng_u24, next_cin_u24),
-    ];
+    let local_cases = [(g_u29, local_cout_u29), (g_u24, local_cout_u24)];
+    let next_cases = [(ng_u29, next_cin_u29), (ng_u24, next_cin_u24)];
 
     for (lg, lcout) in local_cases.iter() {
       for (ng, ncin) in next_cases.iter() {
@@ -317,8 +310,9 @@ pub fn generate_stage_a_semantic_trace(rows: &[ProofRow]) -> Result<RowMajorMatr
     let mut carry_in = semantic_rows
       .last()
       .map(|row| match row.op {
-        crate::semantic_proof::OP_U29_ADD_EQ
-        | crate::semantic_proof::OP_U24_ADD_EQ => row.arg1 as u16,
+        crate::semantic_proof::OP_U29_ADD_EQ | crate::semantic_proof::OP_U24_ADD_EQ => {
+          row.arg1 as u16
+        }
         _ => 0,
       })
       .unwrap_or(0);
@@ -372,7 +366,7 @@ fn generate_wff_match_trace_from_bytes(
   }
 
   let bytes_per_row = MATCH_PACK_COLS * MATCH_PACK_BYTES;
-  let n_rows = (inferred_bytes.len() + bytes_per_row - 1) / bytes_per_row;
+  let n_rows = inferred_bytes.len().div_ceil(bytes_per_row);
   let padded_rows = n_rows.next_power_of_two();
 
   let pack_chunk = |bytes: &[u8], byte_start: usize| -> u32 {

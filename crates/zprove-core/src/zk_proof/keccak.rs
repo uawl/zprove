@@ -1,7 +1,7 @@
 //! Keccak256 consistency proof (preimage membership argument).
 
-use super::types::{CircleStarkProof, Val, default_poseidon_sponge, make_circle_config};
 use super::memory::MemLogEntry;
+use super::types::{CircleStarkProof, Val, default_poseidon_sponge, make_circle_config};
 
 use p3_field::PrimeCharacteristicRing;
 use p3_keccak::Keccak256Hash;
@@ -84,11 +84,14 @@ pub fn keccak256_bytes(input: &[u8]) -> [u8; 32] {
 pub struct KeccakConsistencyAir;
 
 impl<F: p3_field::Field> p3_air::BaseAir<F> for KeccakConsistencyAir {
-  fn width(&self) -> usize { NUM_KECCAK_COLS }
+  fn width(&self) -> usize {
+    NUM_KECCAK_COLS
+  }
 }
 
 impl<AB: p3_air::AirBuilderWithPublicValues> p3_air::Air<AB> for KeccakConsistencyAir
-where AB::F: p3_field::Field,
+where
+  AB::F: p3_field::Field,
 {
   fn eval(&self, builder: &mut AB) {
     let pis = builder.public_values();
@@ -120,6 +123,7 @@ fn build_keccak_log_trace(log: &[KeccakLogEntry]) -> RowMajorMatrix<Val> {
 
 // ── Public API ─────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct KeccakConsistencyProof {
   pub stark_proof: CircleStarkProof,
   pub log: Vec<KeccakLogEntry>,

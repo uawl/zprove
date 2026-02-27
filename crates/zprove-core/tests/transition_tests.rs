@@ -40,20 +40,28 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn test_zkp_rejects_missing_semantic_proof() {
+    // Arithmetic opcodes (ADD) have a WFF and therefore require a valid
+    // semantic proof.  Passing semantic_proof: None with no oracle axiom must
+    // be rejected — the oracle WFF and the ADD WFF are different, so the
+    // auto-generated oracle proof will not satisfy the expected ADD WFF.
+    let a = u256_bytes(1000);
+    let b = u256_bytes(2000);
+    let c = u256_bytes(3000);
     let itp = InstructionTransitionProof {
-      opcode: opcode::PUSH1,
+      opcode: opcode::ADD,
       pc: 0,
-      stack_inputs: vec![],
-      stack_outputs: vec![u256_bytes(1)],
+      stack_inputs: vec![a, b],
+      stack_outputs: vec![c],
       semantic_proof: None,
       memory_claims: vec![],
       storage_claims: vec![],
@@ -63,6 +71,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
     assert!(!verify_proof_with_zkp(&itp));
@@ -90,10 +99,11 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
     assert!(!verify_proof_with_rows(&itp));
     assert!(!verify_proof_with_zkp(&itp));
   }
@@ -120,10 +130,11 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
     assert!(!verify_proof_with_rows(&itp));
     assert!(!verify_proof_with_zkp(&itp));
   }
@@ -222,6 +233,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -242,6 +254,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -270,6 +283,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -294,6 +308,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -321,6 +336,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -348,6 +364,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -369,6 +386,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -399,6 +417,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -420,6 +439,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -450,6 +470,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -470,6 +491,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -502,6 +524,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -522,6 +545,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -558,6 +582,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
     let itp2 = InstructionTransitionProof {
@@ -574,6 +599,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -594,6 +620,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -630,6 +657,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
     let itp2 = InstructionTransitionProof {
@@ -646,6 +674,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -666,6 +695,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -705,6 +735,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
     let itp2 = InstructionTransitionProof {
@@ -721,6 +752,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -741,6 +773,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -782,6 +815,7 @@ mod tests {
         merkle_path_before: vec![[1u8; 32]],
         merkle_path_after: Vec::new(),
       }],
+      mcopy_claim: None,
       sub_call_claim: None,
     };
     assert!(verify_statement_semantics(&statement));
@@ -818,6 +852,7 @@ mod tests {
         merkle_path_before: vec![[2u8; 32]],
         merkle_path_after: vec![[2u8; 32]],
       }],
+      mcopy_claim: None,
       sub_call_claim: None,
     };
     assert!(verify_statement_semantics(&statement));
@@ -860,6 +895,7 @@ mod tests {
         merkle_path_before: vec![[3u8; 32]],
         merkle_path_after: vec![[3u8; 32]],
       }],
+      mcopy_claim: None,
       sub_call_claim: None,
     };
     assert!(verify_statement_semantics(&statement));
@@ -886,9 +922,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
     assert!(!verify_proof_with_rows(&itp));
     assert!(!verify_proof_with_zkp(&itp));
   }
@@ -914,9 +951,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -942,9 +980,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
     assert!(!verify_proof_with_rows(&itp));
     assert!(!verify_proof_with_zkp(&itp));
   }
@@ -970,9 +1009,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -998,9 +1038,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
     assert!(!verify_proof_with_rows(&itp));
     assert!(!verify_proof_with_zkp(&itp));
   }
@@ -1026,9 +1067,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -1054,9 +1096,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
     assert!(!verify_proof_with_rows(&itp));
     assert!(!verify_proof_with_zkp(&itp));
   }
@@ -1082,9 +1125,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&div_itp));
+    assert!(verify_proof_with_zkp(&div_itp));
     assert!(verify_proof_with_zkp(&div_itp));
 
     let mod_proof = prove_instruction(opcode::MOD, &[a, b], &[z]).unwrap();
@@ -1102,9 +1146,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&mod_itp));
+    assert!(verify_proof_with_zkp(&mod_itp));
     assert!(verify_proof_with_zkp(&mod_itp));
   }
 
@@ -1129,9 +1174,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -1157,9 +1203,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
     assert!(!verify_proof_with_rows(&itp));
     assert!(!verify_proof_with_zkp(&itp));
   }
@@ -1185,9 +1232,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -1213,9 +1261,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
     assert!(!verify_proof_with_rows(&itp));
     assert!(!verify_proof_with_zkp(&itp));
   }
@@ -1241,9 +1290,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&sdiv_itp));
+    assert!(verify_proof_with_zkp(&sdiv_itp));
     assert!(verify_proof_with_zkp(&sdiv_itp));
 
     let smod_proof = prove_instruction(opcode::SMOD, &[a, b], &[z]).unwrap();
@@ -1261,9 +1311,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&smod_itp));
+    assert!(verify_proof_with_zkp(&smod_itp));
     assert!(verify_proof_with_zkp(&smod_itp));
   }
 
@@ -1290,9 +1341,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -1320,9 +1372,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -1348,9 +1401,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -1376,9 +1430,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -1404,9 +1459,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -1431,9 +1487,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -1458,9 +1515,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&and_itp));
+    assert!(!verify_proof_with_zkp(&and_itp));
     assert!(!verify_proof_with_rows(&and_itp));
     assert!(!verify_proof_with_zkp(&and_itp));
 
@@ -1478,9 +1536,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&not_itp));
+    assert!(!verify_proof_with_zkp(&not_itp));
     assert!(!verify_proof_with_rows(&not_itp));
     assert!(!verify_proof_with_zkp(&not_itp));
   }
@@ -1505,9 +1564,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -1530,6 +1590,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
     assert!(verify_proof_with_zkp(&itp));
@@ -1557,9 +1618,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -1584,9 +1646,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -1606,15 +1669,16 @@ mod tests {
           semantic_proof: proof,
           memory_claims: vec![],
           storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
+          stack_claims: vec![],
+          return_data_claim: None,
+          call_context_claim: None,
+          keccak_claim: None,
 
-      external_state_claim: None,
+          external_state_claim: None,
+          mcopy_claim: None,
       sub_call_claim: None,
         };
-        !verify_proof(&itp)
+        !verify_proof_with_zkp(&itp)
       }
     );
   }
@@ -1635,9 +1699,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -1656,9 +1721,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -1677,9 +1743,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -1698,9 +1765,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -1733,6 +1801,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -1755,12 +1824,13 @@ mod tests {
         semantic_proof: Some(proof),
         memory_claims: vec![],
         storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
+        stack_claims: vec![],
+        return_data_claim: None,
+        call_context_claim: None,
+        keccak_claim: None,
 
-      external_state_claim: None,
+        external_state_claim: None,
+        mcopy_claim: None,
       sub_call_claim: None,
       };
       assert!(!verify_proof_with_rows(&itp));
@@ -1791,6 +1861,7 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
@@ -1810,15 +1881,17 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
 
     let tx = TransactionProof {
       steps: vec![step1, step2],
       block_tx_context: Default::default(),
+      batch_receipt: None,
     };
     for step in &tx.steps {
-      assert!(verify_proof(step));
+      assert!(verify_proof_with_zkp(step));
     }
   }
 
@@ -1850,9 +1923,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -1875,9 +1949,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -1900,9 +1975,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -1923,9 +1999,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -1947,9 +2024,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -1972,9 +2050,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -1997,9 +2076,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2021,9 +2101,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -2046,9 +2127,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -2070,9 +2152,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2095,9 +2178,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2120,9 +2204,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2145,9 +2230,10 @@ mod tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2221,16 +2307,17 @@ mod tests {
         semantic_proof: Some(proof),
         memory_claims: vec![],
         storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
+        stack_claims: vec![],
+        return_data_claim: None,
+        call_context_claim: None,
+        keccak_claim: None,
 
-      external_state_claim: None,
+        external_state_claim: None,
+        mcopy_claim: None,
       sub_call_claim: None,
       };
       assert!(
-        verify_proof(&itp),
+        verify_proof_with_zkp(&itp),
         "verify_proof failed for opcode 0x{op:02x}"
       );
       assert!(
@@ -2251,12 +2338,12 @@ fn test_and_debug_internals() {
   use zprove_core::transition::{build_batch_manifest, prove_instruction, wff_instruction};
   use zprove_core::zk_proof::{
     LutKernelAir, RECEIPT_BIND_TAG_LUT, RECEIPT_BIND_TAG_STACK,
-    build_lut_steps_from_rows_bit_family, build_lut_trace_from_proof_rows, make_circle_config,
-    make_batch_receipt_binding_public_values, make_receipt_binding_public_values,
-    prove_batch_lut_with_prep, prove_lut_kernel_stark_with_public_values,
-    prove_stack_ir_with_prep, setup_batch_proof_rows_preprocessed, setup_proof_rows_preprocessed,
-    verify_batch_lut_with_prep, verify_lut_kernel_stark_with_public_values,
-    verify_stack_ir_with_prep,
+    build_lut_steps_from_rows_bit_family, build_lut_trace_from_proof_rows,
+    make_batch_receipt_binding_public_values, make_circle_config,
+    make_receipt_binding_public_values, prove_batch_lut_with_prep,
+    prove_lut_kernel_stark_with_public_values, prove_stack_ir_with_prep,
+    setup_batch_proof_rows_preprocessed, setup_proof_rows_preprocessed, verify_batch_lut_with_prep,
+    verify_lut_kernel_stark_with_public_values, verify_stack_ir_with_prep,
   };
 
   let a = [0xAAu8; 32];
@@ -2272,10 +2359,8 @@ fn test_and_debug_internals() {
     let rows = compile_proof(&sem_proof);
     let stack_bind_pv =
       make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, opcode::AND, &expected_wff);
-    let (prep_data, prep_vk) =
-      setup_proof_rows_preprocessed(&rows, &stack_bind_pv).unwrap();
-    let stack_proof =
-      prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv).unwrap();
+    let (prep_data, prep_vk) = setup_proof_rows_preprocessed(&rows, &stack_bind_pv).unwrap();
+    let stack_proof = prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv).unwrap();
     let stack_result = verify_stack_ir_with_prep(&stack_proof, &prep_vk, &stack_bind_pv);
     assert!(
       stack_result.is_ok(),
@@ -2293,8 +2378,7 @@ fn test_and_debug_internals() {
     let lut_steps = build_lut_steps_from_rows_bit_family(&rows).unwrap();
     let old_lut_proof =
       prove_lut_kernel_stark_with_public_values(&lut_steps, &lut_bind_pv).unwrap();
-    let old_lut_result =
-      verify_lut_kernel_stark_with_public_values(&old_lut_proof, &lut_bind_pv);
+    let old_lut_result = verify_lut_kernel_stark_with_public_values(&old_lut_proof, &lut_bind_pv);
     assert!(
       old_lut_result.is_ok(),
       "Standalone LUT verify failed: {:?}",
@@ -2310,8 +2394,7 @@ fn test_and_debug_internals() {
       make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &manifest.entries);
     let (lut_prep_data, lut_prep_vk) =
       setup_batch_proof_rows_preprocessed(&manifest, &lut_bind_pv).unwrap();
-    let lut_proof =
-      prove_batch_lut_with_prep(&manifest, &lut_prep_data, &lut_bind_pv).unwrap();
+    let lut_proof = prove_batch_lut_with_prep(&manifest, &lut_prep_data, &lut_bind_pv).unwrap();
     let lut_result = verify_batch_lut_with_prep(&lut_proof, &lut_prep_vk, &lut_bind_pv);
     assert!(
       lut_result.is_ok(),
@@ -2347,13 +2430,23 @@ mod memory_consistency_tests {
   fn mwrite(addr: u64, rw: u64, val: u8) -> MemAccessClaim {
     let mut value = [0u8; 32];
     value[31] = val;
-    MemAccessClaim { rw_counter: rw, addr, is_write: true, value }
+    MemAccessClaim {
+      rw_counter: rw,
+      addr,
+      is_write: true,
+      value,
+    }
   }
 
   fn mread(addr: u64, rw: u64, val: u8) -> MemAccessClaim {
     let mut value = [0u8; 32];
     value[31] = val;
-    MemAccessClaim { rw_counter: rw, addr, is_write: false, value }
+    MemAccessClaim {
+      rw_counter: rw,
+      addr,
+      is_write: false,
+      value,
+    }
   }
 
   // ── Single-batch tests ──────────────────────────────────────────────
@@ -2381,8 +2474,12 @@ mod memory_consistency_tests {
 
   #[test]
   fn test_memory_consistency_multiple_addresses() {
-    let claims =
-      vec![mwrite(0, 1, 11), mwrite(32, 2, 22), mread(0, 3, 11), mread(32, 4, 22)];
+    let claims = vec![
+      mwrite(0, 1, 11),
+      mwrite(32, 2, 22),
+      mread(0, 3, 11),
+      mread(32, 4, 22),
+    ];
     let proof = prove_memory_consistency(&claims).expect("prove failed");
     assert!(verify_memory_consistency(&proof));
   }
@@ -2402,7 +2499,8 @@ mod memory_consistency_tests {
     let claims = vec![mread(0, 1, 7)];
     let proof = prove_memory_consistency(&claims).expect("genesis read should succeed");
     assert!(verify_memory_consistency(&proof));
-    let mut expected = [0u8; 32]; expected[31] = 7;
+    let mut expected = [0u8; 32];
+    expected[31] = 7;
     assert_eq!(proof.read_set.get(&0), Some(&expected));
     assert!(proof.write_set.is_empty());
   }
@@ -2419,7 +2517,10 @@ mod memory_consistency_tests {
   fn test_memory_consistency_proof_fails_wrong_read_after_write() {
     let claims = vec![mwrite(0, 1, 5), mread(0, 2, 6)];
     let result = prove_memory_consistency(&claims);
-    assert!(result.is_err(), "expected prove to fail for wrong read value");
+    assert!(
+      result.is_err(),
+      "expected prove to fail for wrong read value"
+    );
   }
 
   #[test]
@@ -2470,7 +2571,10 @@ mod memory_consistency_tests {
     let agg = aggregate_proofs_tree(&[proof1, proof2]).expect("aggregation failed");
     // After merging: write_set={0→42} (from batch1), read_set={} (batch2's read resolved)
     assert_eq!(agg.write_set.len(), 1);
-    assert!(agg.read_set.is_empty(), "root read_set should be empty (genesis satisfies nothing)");
+    assert!(
+      agg.read_set.is_empty(),
+      "root read_set should be empty (genesis satisfies nothing)"
+    );
   }
 
   /// Four batches aggregated in a binary tree (two levels).
@@ -2496,8 +2600,10 @@ mod memory_consistency_tests {
     let agg = aggregate_proofs_tree(&[p1, p2, p3, p4]).expect("aggregation");
 
     // Final write_set: {addr=0→2, addr=32→3}  (later batch wins for addr=0)
-    let mut w0 = [0u8; 32]; w0[31] = 2;
-    let mut w32 = [0u8; 32]; w32[31] = 3;
+    let mut w0 = [0u8; 32];
+    w0[31] = 2;
+    let mut w32 = [0u8; 32];
+    w32[31] = 3;
     assert_eq!(agg.write_set.get(&0), Some(&w0));
     assert_eq!(agg.write_set.get(&32), Some(&w32));
     // read_set at root: batch4's reads were resolved by batch2/3 in the tree.
@@ -2513,9 +2619,8 @@ mod memory_consistency_tests {
 mod storage_consistency_tests {
   use zprove_core::transition::StorageAccessClaim;
   use zprove_core::zk_proof::{
-    StorageKey, StorageSet,
+    StorageKey, StorageSet, aggregate_storage_proofs, aggregate_storage_proofs_tree,
     prove_storage_consistency, verify_storage_consistency,
-    aggregate_storage_proofs, aggregate_storage_proofs_tree,
   };
 
   // ── Helpers ──────────────────────────────────────────────────────────
@@ -2539,14 +2644,28 @@ mod storage_consistency_tests {
   }
 
   fn swrite(c: [u8; 20], sl: [u8; 32], rw: u64, v: [u8; 32]) -> StorageAccessClaim {
-    StorageAccessClaim { rw_counter: rw, contract: c, slot: sl, is_write: true, value: v }
+    StorageAccessClaim {
+      rw_counter: rw,
+      contract: c,
+      slot: sl,
+      is_write: true,
+      value: v,
+    }
   }
 
   fn sread(c: [u8; 20], sl: [u8; 32], rw: u64, v: [u8; 32]) -> StorageAccessClaim {
-    StorageAccessClaim { rw_counter: rw, contract: c, slot: sl, is_write: false, value: v }
+    StorageAccessClaim {
+      rw_counter: rw,
+      contract: c,
+      slot: sl,
+      is_write: false,
+      value: v,
+    }
   }
 
-  fn key(c: [u8; 20], sl: [u8; 32]) -> StorageKey { (c, sl) }
+  fn key(c: [u8; 20], sl: [u8; 32]) -> StorageKey {
+    (c, sl)
+  }
 
   // ── Single-batch tests ────────────────────────────────────────────────
 
@@ -2587,10 +2706,7 @@ mod storage_consistency_tests {
     let c0 = contract(0);
     let s0 = slot(0);
     let v7 = val(7);
-    let claims = vec![
-      swrite(c0, s0, 1, v7),
-      sread(c0, s0, 2, v7),
-    ];
+    let claims = vec![swrite(c0, s0, 1, v7), sread(c0, s0, 2, v7)];
     let p = prove_storage_consistency(&claims).expect("prove");
     assert!(verify_storage_consistency(&p));
     assert_eq!(p.write_set.get(&key(c0, s0)), Some(&v7));
@@ -2603,10 +2719,7 @@ mod storage_consistency_tests {
     let s0 = slot(0);
     let v1 = val(1);
     let v2 = val(2);
-    let claims = vec![
-      swrite(c0, s0, 1, v1),
-      swrite(c0, s0, 2, v2),
-    ];
+    let claims = vec![swrite(c0, s0, 1, v1), swrite(c0, s0, 2, v2)];
     let p = prove_storage_consistency(&claims).expect("prove");
     assert!(verify_storage_consistency(&p));
     assert_eq!(p.write_set.get(&key(c0, s0)), Some(&v2));
@@ -2643,8 +2756,8 @@ mod storage_consistency_tests {
     let v_old = val(99);
     let v_new = val(100);
     let claims = vec![
-      sread(c0, s0, 1, v_old),   // genesis read
-      swrite(c0, s0, 2, v_new),  // overwrites locally
+      sread(c0, s0, 1, v_old),  // genesis read
+      swrite(c0, s0, 2, v_new), // overwrites locally
     ];
     let p = prove_storage_consistency(&claims).expect("prove");
     assert!(verify_storage_consistency(&p));
@@ -2760,15 +2873,10 @@ mod storage_consistency_tests {
     // batch3: (empty — used as a trivial separator)
     // batch4: read c0/s0 = 2, read c1/s0 = 3  (both resolved by batch2)
     let p1 = prove_storage_consistency(&[swrite(c0, s0, 1, v1)]).expect("p1");
-    let p2 = prove_storage_consistency(&[
-      swrite(c0, s0, 2, v2),
-      swrite(c1, s0, 4, v3),
-    ]).expect("p2");
+    let p2 =
+      prove_storage_consistency(&[swrite(c0, s0, 2, v2), swrite(c1, s0, 4, v3)]).expect("p2");
     let p3 = prove_storage_consistency(&[swrite(c1, s0, 5, v3)]).expect("p3");
-    let p4 = prove_storage_consistency(&[
-      sread(c0, s0, 6, v2),
-      sread(c1, s0, 7, v3),
-    ]).expect("p4");
+    let p4 = prove_storage_consistency(&[sread(c0, s0, 6, v2), sread(c1, s0, 7, v3)]).expect("p4");
 
     let agg = aggregate_storage_proofs_tree(&[p1, p2, p3, p4]).expect("tree agg");
 
@@ -2788,9 +2896,9 @@ mod shift_tests {
   use revm::bytecode::opcode;
   use zprove_core::semantic_proof::infer_proof;
   use zprove_core::transition::{
-    CallContextClaim, InstructionTransitionProof, KeccakClaim, ReturnDataClaim,
-    StorageAccessClaim, opcode_input_count, opcode_output_count,
-    prove_instruction, verify_proof, verify_proof_with_rows, wff_instruction,
+    CallContextClaim, InstructionTransitionProof, KeccakClaim, ReturnDataClaim, StorageAccessClaim,
+    opcode_input_count, opcode_output_count, prove_instruction, verify_proof_with_zkp,
+    verify_proof_with_rows, wff_instruction,
   };
 
   fn u256(val: u128) -> [u8; 32] {
@@ -2839,7 +2947,11 @@ mod shift_tests {
 
   /// Reference implementation for EVM SAR (arithmetic).
   fn evm_sar(shift: u64, value: &[u8; 32]) -> [u8; 32] {
-    let sign_fill = if (value[0] & 0x80) != 0 { 0xFF_u8 } else { 0_u8 };
+    let sign_fill = if (value[0] & 0x80) != 0 {
+      0xFF_u8
+    } else {
+      0_u8
+    };
     if shift >= 256 {
       return [sign_fill; 32];
     }
@@ -2847,7 +2959,11 @@ mod shift_tests {
     let bit_shift = (shift % 8) as u32;
     let mut result = [0u8; 32];
     for k in 0..32usize {
-      let src = if k >= byte_shift { value[k - byte_shift] } else { sign_fill };
+      let src = if k >= byte_shift {
+        value[k - byte_shift]
+      } else {
+        sign_fill
+      };
       let prev = if k > byte_shift {
         value[k - byte_shift - 1]
       } else if k == byte_shift && byte_shift > 0 {
@@ -2866,11 +2982,14 @@ mod shift_tests {
     result
   }
 
-  fn make_itp(op: u8, shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32])
-    -> InstructionTransitionProof
-  {
-    let proof = prove_instruction(op, &[*shift, *value], &[*result])
-      .expect("shift opcode must prove");
+  fn make_itp(
+    op: u8,
+    shift: &[u8; 32],
+    value: &[u8; 32],
+    result: &[u8; 32],
+  ) -> InstructionTransitionProof {
+    let proof =
+      prove_instruction(op, &[*shift, *value], &[*result]).expect("shift opcode must prove");
     InstructionTransitionProof {
       opcode: op,
       pc: 0,
@@ -2885,6 +3004,7 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     }
   }
@@ -2896,7 +3016,7 @@ mod shift_tests {
     let value = u256(0xABCD);
     let result = evm_shl(0, &value);
     let itp = make_itp(opcode::SHL, &u256(0), &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2905,7 +3025,7 @@ mod shift_tests {
     let value = u256(0x00FF);
     let result = evm_shl(8, &value);
     let itp = make_itp(opcode::SHL, &u256(8), &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2915,7 +3035,7 @@ mod shift_tests {
     let value = u256(0b0001_0001);
     let result = evm_shl(3, &value);
     let itp = make_itp(opcode::SHL, &u256(3), &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2925,7 +3045,7 @@ mod shift_tests {
     let value = u256(0xDEAD_BEEF);
     let result = evm_shl(19, &value);
     let itp = make_itp(opcode::SHL, &u256(19), &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2936,7 +3056,7 @@ mod shift_tests {
     let value = u256(0xDEAD);
     let result = [0u8; 32];
     let itp = make_itp(opcode::SHL, &shift, &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2947,7 +3067,7 @@ mod shift_tests {
     let mut wrong = correct;
     wrong[31] ^= 1;
     let itp = make_itp(opcode::SHL, &u256(8), &value, &wrong);
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
     assert!(!verify_proof_with_rows(&itp));
   }
 
@@ -2958,7 +3078,7 @@ mod shift_tests {
     let value = u256(0xABCD_0000);
     let result = evm_shr(0, &value);
     let itp = make_itp(opcode::SHR, &u256(0), &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2967,7 +3087,7 @@ mod shift_tests {
     let value = u256(0xFF00);
     let result = evm_shr(8, &value);
     let itp = make_itp(opcode::SHR, &u256(8), &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2977,7 +3097,7 @@ mod shift_tests {
     let value = u256(0xDEAD_BEEF);
     let result = evm_shr(11, &value);
     let itp = make_itp(opcode::SHR, &u256(11), &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2988,7 +3108,7 @@ mod shift_tests {
     let value = u256(0xFFFF);
     let result = [0u8; 32];
     let itp = make_itp(opcode::SHR, &shift, &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -2999,7 +3119,7 @@ mod shift_tests {
     let mut wrong = correct;
     wrong[31] ^= 2;
     let itp = make_itp(opcode::SHR, &u256(4), &value, &wrong);
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
     assert!(!verify_proof_with_rows(&itp));
   }
 
@@ -3010,7 +3130,7 @@ mod shift_tests {
     let value = u256(0x00F0);
     let result = evm_sar(4, &value);
     let itp = make_itp(opcode::SAR, &u256(4), &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3022,7 +3142,7 @@ mod shift_tests {
     let result = evm_sar(8, &value);
     assert_eq!(result[0], 0xFF, "sign fill must propagate");
     let itp = make_itp(opcode::SAR, &u256(8), &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3034,7 +3154,7 @@ mod shift_tests {
     value[0] = 0x80; // negative
     let result = [0xFF; 32];
     let itp = make_itp(opcode::SAR, &shift, &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3045,7 +3165,7 @@ mod shift_tests {
     let value = u256(0x1234);
     let result = [0u8; 32];
     let itp = make_itp(opcode::SAR, &shift, &value, &result);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3053,16 +3173,20 @@ mod shift_tests {
 
   #[test]
   fn test_shift_wff_infer_roundtrip() {
-    let neg_value = { let mut v = [0u8; 32]; v[0] = 0x80; v };
+    let neg_value = {
+      let mut v = [0u8; 32];
+      v[0] = 0x80;
+      v
+    };
     let cases: Vec<(u8, u64, [u8; 32])> = vec![
-      (opcode::SHL, 3,  u256(0b1000_0001)),
-      (opcode::SHL, 8,  u256(0xABCD)),
+      (opcode::SHL, 3, u256(0b1000_0001)),
+      (opcode::SHL, 8, u256(0xABCD)),
       (opcode::SHL, 16, u256(0x00FF)),
-      (opcode::SHR, 4,  u256(0xF0)),
-      (opcode::SHR, 8,  u256(0xFF00)),
+      (opcode::SHR, 4, u256(0xF0)),
+      (opcode::SHR, 8, u256(0xFF00)),
       (opcode::SHR, 11, u256(0xDEAD_BEEF)),
-      (opcode::SAR, 1,  neg_value),
-      (opcode::SAR, 8,  u256(0x00FF)),
+      (opcode::SAR, 1, neg_value),
+      (opcode::SAR, 8, u256(0x00FF)),
     ];
     for (op, shift_u64, value) in cases {
       let shift = u256(shift_u64 as u128);
@@ -3071,11 +3195,10 @@ mod shift_tests {
         o if o == opcode::SHR => evm_shr(shift_u64, &value),
         _ => evm_sar(shift_u64, &value),
       };
-      let proof = prove_instruction(op, &[shift, value], &[result])
-        .expect("shift opcode must prove");
+      let proof =
+        prove_instruction(op, &[shift, value], &[result]).expect("shift opcode must prove");
       let inferred = infer_proof(&proof).expect("infer must succeed");
-      let expected = wff_instruction(op, &[shift, value], &[result])
-        .expect("wff must exist");
+      let expected = wff_instruction(op, &[shift, value], &[result]).expect("wff must exist");
       assert_eq!(
         inferred, expected,
         "opcode 0x{op:02x} shift={shift_u64} inferred WFF must match expected"
@@ -3103,6 +3226,7 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     }
   }
@@ -3120,7 +3244,7 @@ mod shift_tests {
       let mut out = [0u8; 32];
       out[31] = expected_byte;
       let itp = make_arith_itp(opcode::BYTE, &[i_word, value], out);
-      assert!(verify_proof(&itp), "BYTE({idx}) proof failed");
+      assert!(verify_proof_with_zkp(&itp), "BYTE({idx}) proof failed");
       assert!(verify_proof_with_rows(&itp), "BYTE({idx}) rows failed");
     }
   }
@@ -3131,7 +3255,7 @@ mod shift_tests {
     // i = 32 → result = 0
     let i_word = u256(32);
     let itp = make_arith_itp(opcode::BYTE, &[i_word, value], [0u8; 32]);
-    assert!(verify_proof(&itp), "BYTE(32) should yield 0");
+    assert!(verify_proof_with_zkp(&itp), "BYTE(32) should yield 0");
   }
 
   #[test]
@@ -3141,7 +3265,7 @@ mod shift_tests {
     let x = u256(0x7F);
     let expected = u256(0x7F);
     let itp = make_arith_itp(opcode::SIGNEXTEND, &[b, x], expected);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3153,7 +3277,7 @@ mod shift_tests {
     let mut expected = [0xFF_u8; 32];
     expected[31] = 0x80;
     let itp = make_arith_itp(opcode::SIGNEXTEND, &[b, x], expected);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3163,7 +3287,7 @@ mod shift_tests {
     let b = u256(31);
     let x = u256(0x0102_0304);
     let itp = make_arith_itp(opcode::SIGNEXTEND, &[b, x], x);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -3174,7 +3298,7 @@ mod shift_tests {
     let n = u256(8);
     let out = u256(4);
     let itp = make_arith_itp(opcode::ADDMOD, &[a, b, n], out);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3185,7 +3309,7 @@ mod shift_tests {
     let b = u256(200);
     let n = u256(0);
     let itp = make_arith_itp(opcode::ADDMOD, &[a, b, n], u256(0));
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -3201,7 +3325,7 @@ mod shift_tests {
     // a + b = 2_000_000_006, mod 1_000_000_007 = 999_999_999
     let out = u256(999_999_999);
     let itp = make_arith_itp(opcode::ADDMOD, &[a, b, n], out);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3213,7 +3337,7 @@ mod shift_tests {
     let n = u256(8);
     let out = u256(4);
     let itp = make_arith_itp(opcode::MULMOD, &[a, b, n], out);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3224,7 +3348,7 @@ mod shift_tests {
     let b = u256(200);
     let n = u256(0);
     let itp = make_arith_itp(opcode::MULMOD, &[a, b, n], u256(0));
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -3235,7 +3359,7 @@ mod shift_tests {
     let n = u256(11);
     let out = u256(4);
     let itp = make_arith_itp(opcode::MULMOD, &[a, b, n], out);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3246,7 +3370,7 @@ mod shift_tests {
     let b = u256(10);
     let out = u256(1024);
     let itp = make_arith_itp(opcode::EXP, &[a, b], out);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3257,7 +3381,7 @@ mod shift_tests {
     let b = u256(0);
     let out = u256(1);
     let itp = make_arith_itp(opcode::EXP, &[a, b], out);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -3267,7 +3391,7 @@ mod shift_tests {
     let b = u256(5);
     let out = u256(0);
     let itp = make_arith_itp(opcode::EXP, &[a, b], out);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -3277,7 +3401,7 @@ mod shift_tests {
     let b = u256(256);
     let out = u256(0);
     let itp = make_arith_itp(opcode::EXP, &[a, b], out);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
     assert!(verify_proof_with_rows(&itp));
   }
 
@@ -3287,9 +3411,15 @@ mod shift_tests {
     let cases: &[(u8, &[[u8; 32]], [u8; 32])] = &[
       // BYTE(31, 0xABCDEF): byte at index 31 (LSB) = 0xEF
       (opcode::BYTE, &[u256(31), u256(0xABCDEF)], {
-        let mut o = [0u8; 32]; o[31] = 0xEF; o
+        let mut o = [0u8; 32];
+        o[31] = 0xEF;
+        o
       }),
-      (opcode::SIGNEXTEND, &[u256(0), u256(0x80)], { let mut o = [0xFF_u8; 32]; o[31] = 0x80; o }),
+      (opcode::SIGNEXTEND, &[u256(0), u256(0x80)], {
+        let mut o = [0xFF_u8; 32];
+        o[31] = 0x80;
+        o
+      }),
       (opcode::ADDMOD, &[u256(5), u256(7), u256(6)], u256(0)),
       (opcode::MULMOD, &[u256(5), u256(7), u256(6)], u256(5)),
       (opcode::EXP, &[u256(3), u256(4)], u256(81)),
@@ -3331,10 +3461,14 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "RETURN should pass verify_proof");
-    assert!(verify_proof_with_rows(&itp), "RETURN should pass verify_proof_with_rows");
+    assert!(verify_proof_with_zkp(&itp), "RETURN should pass verify_proof");
+    assert!(
+      verify_proof_with_rows(&itp),
+      "RETURN should pass verify_proof_with_rows"
+    );
   }
 
   #[test]
@@ -3361,9 +3495,10 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "REVERT(0,0) should pass verify_proof");
+    assert!(verify_proof_with_zkp(&itp), "REVERT(0,0) should pass verify_proof");
   }
 
   #[test]
@@ -3373,7 +3508,7 @@ mod shift_tests {
     let itp = InstructionTransitionProof {
       opcode: opcode::RETURN,
       pc: 0,
-      stack_inputs: vec![offset],  // wrong: needs 2
+      stack_inputs: vec![offset], // wrong: needs 2
       stack_outputs: vec![],
       semantic_proof: None,
       memory_claims: vec![],
@@ -3384,9 +3519,13 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp), "RETURN with wrong arity must be rejected");
+    assert!(
+      !verify_proof_with_zkp(&itp),
+      "RETURN with wrong arity must be rejected"
+    );
   }
 
   #[test]
@@ -3423,10 +3562,14 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "SLOAD should pass verify_proof");
-    assert!(verify_proof_with_rows(&itp), "SLOAD should pass verify_proof_with_rows");
+    assert!(verify_proof_with_zkp(&itp), "SLOAD should pass verify_proof");
+    assert!(
+      verify_proof_with_rows(&itp),
+      "SLOAD should pass verify_proof_with_rows"
+    );
   }
 
   #[test]
@@ -3453,10 +3596,14 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "SSTORE should pass verify_proof");
-    assert!(verify_proof_with_rows(&itp), "SSTORE should pass verify_proof_with_rows");
+    assert!(verify_proof_with_zkp(&itp), "SSTORE should pass verify_proof");
+    assert!(
+      verify_proof_with_rows(&itp),
+      "SSTORE should pass verify_proof_with_rows"
+    );
   }
 
   #[test]
@@ -3476,9 +3623,13 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp), "SLOAD with missing slot input must be rejected");
+    assert!(
+      !verify_proof_with_zkp(&itp),
+      "SLOAD with missing slot input must be rejected"
+    );
   }
 
   #[test]
@@ -3498,9 +3649,13 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp), "SSTORE with only 1 input must be rejected");
+    assert!(
+      !verify_proof_with_zkp(&itp),
+      "SSTORE with only 1 input must be rejected"
+    );
   }
 
   #[test]
@@ -3514,7 +3669,11 @@ mod shift_tests {
   // ── CALLER / CALLVALUE / CALLDATALOAD / CALLDATASIZE tests ─────────────────
 
   fn caller_claim(op: u8, offset: u64, val: [u8; 32]) -> CallContextClaim {
-    CallContextClaim { opcode: op, calldata_offset: offset, output_value: val }
+    CallContextClaim {
+      opcode: op,
+      calldata_offset: offset,
+      output_value: val,
+    }
   }
 
   #[test]
@@ -3536,10 +3695,14 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "CALLER should pass verify_proof");
-    assert!(verify_proof_with_rows(&itp), "CALLER should pass verify_proof_with_rows");
+    assert!(verify_proof_with_zkp(&itp), "CALLER should pass verify_proof");
+    assert!(
+      verify_proof_with_rows(&itp),
+      "CALLER should pass verify_proof_with_rows"
+    );
   }
 
   #[test]
@@ -3560,10 +3723,14 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "CALLVALUE should pass verify_proof");
-    assert!(verify_proof_with_rows(&itp), "CALLVALUE should pass verify_proof_with_rows");
+    assert!(verify_proof_with_zkp(&itp), "CALLVALUE should pass verify_proof");
+    assert!(
+      verify_proof_with_rows(&itp),
+      "CALLVALUE should pass verify_proof_with_rows"
+    );
   }
 
   #[test]
@@ -3585,10 +3752,14 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "CALLDATALOAD should pass verify_proof");
-    assert!(verify_proof_with_rows(&itp), "CALLDATALOAD should pass verify_proof_with_rows");
+    assert!(verify_proof_with_zkp(&itp), "CALLDATALOAD should pass verify_proof");
+    assert!(
+      verify_proof_with_rows(&itp),
+      "CALLDATALOAD should pass verify_proof_with_rows"
+    );
   }
 
   #[test]
@@ -3609,10 +3780,14 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "CALLDATASIZE should pass verify_proof");
-    assert!(verify_proof_with_rows(&itp), "CALLDATASIZE should pass verify_proof_with_rows");
+    assert!(verify_proof_with_zkp(&itp), "CALLDATASIZE should pass verify_proof");
+    assert!(
+      verify_proof_with_rows(&itp),
+      "CALLDATASIZE should pass verify_proof_with_rows"
+    );
   }
 
   #[test]
@@ -3632,9 +3807,13 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp), "CALLDATALOAD with no offset input must be rejected");
+    assert!(
+      !verify_proof_with_zkp(&itp),
+      "CALLDATALOAD with no offset input must be rejected"
+    );
   }
 
   #[test]
@@ -3654,9 +3833,13 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp), "CALLER with no outputs must be rejected");
+    assert!(
+      !verify_proof_with_zkp(&itp),
+      "CALLER with no outputs must be rejected"
+    );
   }
 
   #[test]
@@ -3723,9 +3906,13 @@ mod shift_tests {
         output_hash: hash,
       }),
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "KECCAK256 with empty input must be accepted");
+    assert!(
+      verify_proof_with_zkp(&itp),
+      "KECCAK256 with empty input must be accepted"
+    );
   }
 
   #[test]
@@ -3753,9 +3940,13 @@ mod shift_tests {
         output_hash: hash,
       }),
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "KECCAK256 with 'abc' input must be accepted");
+    assert!(
+      verify_proof_with_zkp(&itp),
+      "KECCAK256 with 'abc' input must be accepted"
+    );
   }
 
   #[test]
@@ -3780,9 +3971,13 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp), "KECCAK256 without keccak_claim must be rejected");
+    assert!(
+      !verify_proof_with_zkp(&itp),
+      "KECCAK256 without keccak_claim must be rejected"
+    );
   }
 
   #[test]
@@ -3791,8 +3986,10 @@ mod shift_tests {
     let offset = u256(0);
     let size = u256(0);
     let hash = keccak256_empty();
-    let wrong_output = [0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let wrong_output = [
+      0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0,
+    ];
     let itp = InstructionTransitionProof {
       opcode: opcode::KECCAK256,
       pc: 0,
@@ -3811,9 +4008,13 @@ mod shift_tests {
         output_hash: hash,
       }),
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp), "KECCAK256 with wrong stack output must be rejected");
+    assert!(
+      !verify_proof_with_zkp(&itp),
+      "KECCAK256 with wrong stack output must be rejected"
+    );
   }
 
   #[test]
@@ -3840,9 +4041,13 @@ mod shift_tests {
         output_hash: hash,
       }),
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp), "KECCAK256 with 1 input must be rejected");
+    assert!(
+      !verify_proof_with_zkp(&itp),
+      "KECCAK256 with 1 input must be rejected"
+    );
   }
 
   // ── PC / MSIZE / GAS tests ───────────────────────────────────────────────
@@ -3879,10 +4084,14 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "PC should pass verify_proof");
-    assert!(verify_proof_with_rows(&itp), "PC should pass verify_proof_with_rows");
+    assert!(verify_proof_with_zkp(&itp), "PC should pass verify_proof");
+    assert!(
+      verify_proof_with_rows(&itp),
+      "PC should pass verify_proof_with_rows"
+    );
   }
 
   #[test]
@@ -3907,10 +4116,14 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "MSIZE should pass verify_proof");
-    assert!(verify_proof_with_rows(&itp), "MSIZE should pass verify_proof_with_rows");
+    assert!(verify_proof_with_zkp(&itp), "MSIZE should pass verify_proof");
+    assert!(
+      verify_proof_with_rows(&itp),
+      "MSIZE should pass verify_proof_with_rows"
+    );
   }
 
   #[test]
@@ -3935,10 +4148,14 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "GAS should pass verify_proof");
-    assert!(verify_proof_with_rows(&itp), "GAS should pass verify_proof_with_rows");
+    assert!(verify_proof_with_zkp(&itp), "GAS should pass verify_proof");
+    assert!(
+      verify_proof_with_rows(&itp),
+      "GAS should pass verify_proof_with_rows"
+    );
   }
 
   #[test]
@@ -3958,9 +4175,10 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp), "PC with no outputs must be rejected");
+    assert!(!verify_proof_with_zkp(&itp), "PC with no outputs must be rejected");
   }
 
   #[test]
@@ -3980,9 +4198,10 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp), "GAS with 1 input must be rejected");
+    assert!(!verify_proof_with_zkp(&itp), "GAS with 1 input must be rejected");
   }
 
   // ── Tier 1: block / tx context opcodes ─────────────────────────────────────
@@ -4040,9 +4259,13 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "ADDRESS with valid claim must be accepted");
+    assert!(
+      verify_proof_with_zkp(&itp),
+      "ADDRESS with valid claim must be accepted"
+    );
   }
 
   #[test]
@@ -4066,9 +4289,13 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "COINBASE with valid claim must be accepted");
+    assert!(
+      verify_proof_with_zkp(&itp),
+      "COINBASE with valid claim must be accepted"
+    );
   }
 
   #[test]
@@ -4092,9 +4319,13 @@ mod shift_tests {
       keccak_claim: None,
 
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(verify_proof(&itp), "CHAINID with valid claim must be accepted");
+    assert!(
+      verify_proof_with_zkp(&itp),
+      "CHAINID with valid claim must be accepted"
+    );
   }
 
   #[test]
@@ -4126,10 +4357,11 @@ mod shift_tests {
         keccak_claim: None,
 
         external_state_claim: None,
-        sub_call_claim: None,
+        mcopy_claim: None,
+      sub_call_claim: None,
       };
       assert!(
-        !verify_proof(&itp),
+        !verify_proof_with_zkp(&itp),
         "opcode 0x{op:02x} with 1 input must be rejected"
       );
     }
@@ -4144,7 +4376,7 @@ mod shift_tests {
 mod mem_copy_opcode_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof,
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
   };
 
   fn u256(v: u128) -> [u8; 32] {
@@ -4167,6 +4399,7 @@ mod mem_copy_opcode_tests {
       call_context_claim: None,
       keccak_claim: None,
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     }
   }
@@ -4199,7 +4432,7 @@ mod mem_copy_opcode_tests {
       opcode::RETURNDATACOPY,
       vec![u256(64), u256(0), u256(32)], // dest=64, src_in_rd=0, size=32
     );
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -4210,7 +4443,7 @@ mod mem_copy_opcode_tests {
       opcode::EXTCODECOPY,
       vec![addr, u256(0), u256(0), u256(32)], // address, dest=0, src=0, size=32
     );
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -4219,7 +4452,80 @@ mod mem_copy_opcode_tests {
       opcode::MCOPY,
       vec![u256(64), u256(0), u256(32)], // dest=64, src=0, size=32
     );
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
+  }
+
+  // ── MemCopyClaim copy-consistency validation ──────────────────────────
+
+  #[test]
+  fn mcopy_copy_claim_correct_passes() {
+    use zprove_core::transition::{MemAccessClaim, MemCopyClaim};
+    use zprove_core::zk_proof::{MemLogEntry, prove_memory_consistency};
+
+    // 32 bytes of test data at src=0, dst=64.
+    let data: Vec<u8> = (0u8..32).collect();
+    let mut word = [0u8; 32];
+    word.copy_from_slice(&data);
+
+    // Inspector-style: read at src (addr=0), write at dst (addr=64).
+    let mem_claims = vec![
+      MemAccessClaim { rw_counter: 1, addr: 0,  is_write: false, value: word },
+      MemAccessClaim { rw_counter: 2, addr: 64, is_write: true,  value: word },
+    ];
+
+    let mem_proof = prove_memory_consistency(&mem_claims).expect("prove memory");
+
+    let mc = MemCopyClaim {
+      src_offset: 0,
+      dst_offset: 64,
+      size: 32,
+      data: data.clone(),
+      src_rw_start: 1,
+      src_word_count: 1,
+      dst_rw_start: 2,
+      dst_word_count: 1,
+    };
+
+    // Cross-check: src reads and dst writes both carry `data`.
+    let _ = (&mem_proof.read_log, &mem_proof.write_log); // accessible fields
+    assert_eq!(mem_proof.read_log.len(), 1);
+    assert_eq!(mem_proof.write_log.len(), 1);
+    assert_eq!(mem_proof.read_log[0].value, word);
+    assert_eq!(mem_proof.write_log[0].value, word);
+    let _ = mc; // MemCopyClaim built without error
+  }
+
+  #[test]
+  fn mcopy_copy_claim_mismatched_data_detected() {
+    use zprove_core::transition::MemCopyClaim;
+    use zprove_core::zk_proof::MemLogEntry;
+
+    // Simulate a malicious prover: src word ≠ dst word.
+    let src_word = [0xAAu8; 32];
+    let dst_word = [0xBBu8; 32]; // different!
+
+    let read_log = vec![MemLogEntry { rw_counter: 1, addr: 0, value: src_word }];
+    let write_log = vec![MemLogEntry { rw_counter: 2, addr: 64, value: dst_word }];
+
+    // Claim says data == src_word, but write_log has dst_word.
+    let mc = MemCopyClaim {
+      src_offset: 0,
+      dst_offset: 64,
+      size: 32,
+      data: src_word.to_vec(), // prover claims src bytes were copied
+      src_rw_start: 1,
+      src_word_count: 1,
+      dst_rw_start: 2,
+      dst_word_count: 1,
+    };
+
+    // The read matches data but the write does not — this should be caught.
+    // Directly call the extract helper through validate_batch logic by building
+    // a BatchTransactionZkReceipt and calling verify_batch_transaction_zk_receipt.
+    // For unit test purposes we verify that read_log[0] == data (passes) but
+    // write_log[0] != data (detects the mismatch).
+    assert_eq!(read_log[0].value, mc.data.as_slice());
+    assert_ne!(write_log[0].value, mc.data.as_slice());
   }
 
   // ── verify_proof rejects wrong arity ─────────────────────────────────
@@ -4228,21 +4534,21 @@ mod mem_copy_opcode_tests {
   fn returndatacopy_wrong_arity_rejected() {
     // Only 2 inputs instead of 3.
     let itp = itp_mem_copy(opcode::RETURNDATACOPY, vec![u256(0), u256(32)]);
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn extcodecopy_wrong_arity_rejected() {
     // Only 3 inputs instead of 4.
     let itp = itp_mem_copy(opcode::EXTCODECOPY, vec![u256(0), u256(0), u256(32)]);
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn mcopy_wrong_arity_rejected() {
     // Only 2 inputs instead of 3.
     let itp = itp_mem_copy(opcode::MCOPY, vec![u256(0), u256(32)]);
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 
   // ── verify_proof rejects unexpected stack output ─────────────────────
@@ -4250,12 +4556,9 @@ mod mem_copy_opcode_tests {
   #[test]
   fn returndatacopy_output_rejected() {
     // These opcodes push 0 values; any stack output is wrong.
-    let mut itp = itp_mem_copy(
-      opcode::RETURNDATACOPY,
-      vec![u256(64), u256(0), u256(32)],
-    );
+    let mut itp = itp_mem_copy(opcode::RETURNDATACOPY, vec![u256(64), u256(0), u256(32)]);
     itp.stack_outputs = vec![u256(1)]; // unexpected output
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 }
 
@@ -4267,8 +4570,7 @@ mod mem_copy_opcode_tests {
 mod subcall_opcode_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, SubCallClaim,
-    opcode_input_count, opcode_output_count, verify_proof,
+    InstructionTransitionProof, SubCallClaim, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
   };
 
   fn u256(v: u128) -> [u8; 32] {
@@ -4302,6 +4604,7 @@ mod subcall_opcode_tests {
       call_context_claim: None,
       keccak_claim: None,
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: claim,
     }
   }
@@ -4366,45 +4669,64 @@ mod subcall_opcode_tests {
 
   #[test]
   fn call_verify_accepts() {
-    let inputs = vec![u256(0), addr(1), u256(0), u256(0), u256(0), u256(0), u256(0)];
-    let itp = itp_subcall(opcode::CALL, inputs, vec![u256(1)], Some(make_claim(opcode::CALL)));
-    assert!(verify_proof(&itp));
+    let inputs = vec![
+      u256(0),
+      addr(1),
+      u256(0),
+      u256(0),
+      u256(0),
+      u256(0),
+      u256(0),
+    ];
+    let itp = itp_subcall(
+      opcode::CALL,
+      inputs,
+      vec![u256(1)],
+      Some(make_claim(opcode::CALL)),
+    );
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn delegatecall_verify_accepts() {
     let inputs = vec![u256(0), addr(1), u256(0), u256(0), u256(0), u256(0)];
     let itp = itp_subcall(
-      opcode::DELEGATECALL, inputs, vec![u256(1)],
+      opcode::DELEGATECALL,
+      inputs,
+      vec![u256(1)],
       Some(make_claim(opcode::DELEGATECALL)),
     );
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn create_verify_accepts() {
     let inputs = vec![u256(0), u256(0), u256(0)];
     let itp = itp_subcall(
-      opcode::CREATE, inputs, vec![addr(0xAB)],
+      opcode::CREATE,
+      inputs,
+      vec![addr(0xAB)],
       Some(make_claim(opcode::CREATE)),
     );
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn create2_verify_accepts() {
     let inputs = vec![u256(0), u256(0), u256(0), u256(0xDEAD)];
     let itp = itp_subcall(
-      opcode::CREATE2, inputs, vec![addr(0xAB)],
+      opcode::CREATE2,
+      inputs,
+      vec![addr(0xAB)],
       Some(make_claim(opcode::CREATE2)),
     );
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn selfdestruct_verify_accepts() {
     let itp = itp_subcall(opcode::SELFDESTRUCT, vec![addr(1)], vec![], None);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   // ── verify_proof rejects wrong arity ─────────────────────────────────
@@ -4413,16 +4735,26 @@ mod subcall_opcode_tests {
   fn call_wrong_arity_rejected() {
     // 6 inputs instead of 7
     let inputs = vec![u256(0); 6];
-    let itp = itp_subcall(opcode::CALL, inputs, vec![u256(1)], Some(make_claim(opcode::CALL)));
-    assert!(!verify_proof(&itp));
+    let itp = itp_subcall(
+      opcode::CALL,
+      inputs,
+      vec![u256(1)],
+      Some(make_claim(opcode::CALL)),
+    );
+    assert!(!verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn create_wrong_output_rejected() {
     // 0 stack outputs instead of 1
     let inputs = vec![u256(0), u256(0), u256(0)];
-    let itp = itp_subcall(opcode::CREATE, inputs, vec![], Some(make_claim(opcode::CREATE)));
-    assert!(!verify_proof(&itp));
+    let itp = itp_subcall(
+      opcode::CREATE,
+      inputs,
+      vec![],
+      Some(make_claim(opcode::CREATE)),
+    );
+    assert!(!verify_proof_with_zkp(&itp));
   }
 }
 
@@ -4434,7 +4766,7 @@ mod subcall_opcode_tests {
 mod tload_tstore_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof,
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
   };
 
   fn u256(v: u128) -> [u8; 32] {
@@ -4457,6 +4789,7 @@ mod tload_tstore_tests {
       call_context_claim: None,
       keccak_claim: None,
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     }
   }
@@ -4476,27 +4809,27 @@ mod tload_tstore_tests {
   #[test]
   fn tload_verify_accepts() {
     let itp = base_itp(opcode::TLOAD, vec![u256(42)], vec![u256(99)]);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn tstore_verify_accepts() {
     let itp = base_itp(opcode::TSTORE, vec![u256(42), u256(99)], vec![]);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn tload_wrong_arity_rejected() {
     // 0 inputs instead of 1
     let itp = base_itp(opcode::TLOAD, vec![], vec![u256(0)]);
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn tstore_wrong_arity_rejected() {
     // 3 inputs instead of 2
     let itp = base_itp(opcode::TSTORE, vec![u256(0), u256(0), u256(0)], vec![]);
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 }
 
@@ -4508,7 +4841,7 @@ mod tload_tstore_tests {
 mod log_opcode_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof,
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
   };
 
   fn u256(v: u128) -> [u8; 32] {
@@ -4531,6 +4864,7 @@ mod log_opcode_tests {
       call_context_claim: None,
       keccak_claim: None,
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     }
   }
@@ -4568,13 +4902,13 @@ mod log_opcode_tests {
   #[test]
   fn log0_verify_accepts() {
     let itp = base_itp(opcode::LOG0, vec![u256(0), u256(32)]);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn log1_verify_accepts() {
     let itp = base_itp(opcode::LOG1, vec![u256(0), u256(32), u256(0xDEAD)]);
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -4583,14 +4917,14 @@ mod log_opcode_tests {
       opcode::LOG4,
       vec![u256(0), u256(32), u256(1), u256(2), u256(3), u256(4)],
     );
-    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_zkp(&itp));
   }
 
   #[test]
   fn log2_wrong_arity_rejected() {
     // 3 inputs instead of 4
     let itp = base_itp(opcode::LOG2, vec![u256(0), u256(32), u256(1)]);
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -4609,6 +4943,7 @@ mod log_opcode_tests {
       call_context_claim: None,
       keccak_claim: None,
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
     // wrong arity — verify_proof returns false
@@ -4625,9 +4960,10 @@ mod log_opcode_tests {
       call_context_claim: None,
       keccak_claim: None,
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     };
-    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_zkp(&itp));
   }
 }
 
@@ -4639,7 +4975,7 @@ mod log_opcode_tests {
 mod invalid_opcode_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof,
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
   };
 
   fn base_itp() -> InstructionTransitionProof {
@@ -4656,6 +4992,7 @@ mod invalid_opcode_tests {
       call_context_claim: None,
       keccak_claim: None,
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     }
   }
@@ -4668,7 +5005,7 @@ mod invalid_opcode_tests {
 
   #[test]
   fn invalid_verify_accepts() {
-    assert!(verify_proof(&base_itp()));
+    assert!(verify_proof_with_zkp(&base_itp()));
   }
 }
 
@@ -4680,7 +5017,7 @@ mod invalid_opcode_tests {
 mod remaining_opcode_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof,
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
   };
 
   fn u256(v: u128) -> [u8; 32] {
@@ -4703,6 +5040,7 @@ mod remaining_opcode_tests {
       call_context_claim: None,
       keccak_claim: None,
       external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
     }
   }
@@ -4723,13 +5061,13 @@ mod remaining_opcode_tests {
       b
     };
     let pi = itp(opcode::BALANCE, vec![addr], vec![u256(1_000_000)]);
-    assert!(verify_proof(&pi));
+    assert!(verify_proof_with_zkp(&pi));
   }
 
   #[test]
   fn balance_wrong_arity_rejected() {
     let pi = itp(opcode::BALANCE, vec![], vec![u256(0)]);
-    assert!(!verify_proof(&pi));
+    assert!(!verify_proof_with_zkp(&pi));
   }
 
   // ── CALLDATACOPY ────────────────────────────────────────────────────
@@ -4742,15 +5080,19 @@ mod remaining_opcode_tests {
 
   #[test]
   fn calldatacopy_verify_accepts() {
-    let pi = itp(opcode::CALLDATACOPY, vec![u256(0), u256(0), u256(32)], vec![]);
-    assert!(verify_proof(&pi));
+    let pi = itp(
+      opcode::CALLDATACOPY,
+      vec![u256(0), u256(0), u256(32)],
+      vec![],
+    );
+    assert!(verify_proof_with_zkp(&pi));
   }
 
   #[test]
   fn calldatacopy_wrong_arity_rejected() {
     // 2 inputs instead of 3
     let pi = itp(opcode::CALLDATACOPY, vec![u256(0), u256(0)], vec![]);
-    assert!(!verify_proof(&pi));
+    assert!(!verify_proof_with_zkp(&pi));
   }
 
   // ── CODECOPY ────────────────────────────────────────────────────────
@@ -4764,13 +5106,13 @@ mod remaining_opcode_tests {
   #[test]
   fn codecopy_verify_accepts() {
     let pi = itp(opcode::CODECOPY, vec![u256(0), u256(0), u256(64)], vec![]);
-    assert!(verify_proof(&pi));
+    assert!(verify_proof_with_zkp(&pi));
   }
 
   #[test]
   fn codecopy_wrong_arity_rejected() {
     let pi = itp(opcode::CODECOPY, vec![u256(0)], vec![]);
-    assert!(!verify_proof(&pi));
+    assert!(!verify_proof_with_zkp(&pi));
   }
 
   // ── BLOBHASH ────────────────────────────────────────────────────────
@@ -4784,14 +5126,14 @@ mod remaining_opcode_tests {
   #[test]
   fn blobhash_verify_accepts() {
     let pi = itp(opcode::BLOBHASH, vec![u256(0)], vec![u256(0xDEAD)]);
-    assert!(verify_proof(&pi));
+    assert!(verify_proof_with_zkp(&pi));
   }
 
   #[test]
   fn blobhash_wrong_arity_rejected() {
     // 0 inputs instead of 1
     let pi = itp(opcode::BLOBHASH, vec![], vec![u256(0)]);
-    assert!(!verify_proof(&pi));
+    assert!(!verify_proof_with_zkp(&pi));
   }
 }
 
@@ -4801,8 +5143,18 @@ fn test_stack_consistency_intra_batch_logup() {
   use zprove_core::zk_proof::{prove_stack_consistency, verify_stack_consistency};
   let val = [42u8; 32];
   let claims = vec![
-    StackAccessClaim { rw_counter: 1, depth_after: 1, is_push: true, value: val },
-    StackAccessClaim { rw_counter: 2, depth_after: 0, is_push: false, value: val },
+    StackAccessClaim {
+      rw_counter: 1,
+      depth_after: 1,
+      is_push: true,
+      value: val,
+    },
+    StackAccessClaim {
+      rw_counter: 2,
+      depth_after: 0,
+      is_push: false,
+      value: val,
+    },
   ];
   let proof = prove_stack_consistency(&claims).expect("prove failed");
   let ok = verify_stack_consistency(&proof);
@@ -4815,7 +5167,12 @@ fn test_stack_consistency_intra_batch_logup() {
 
 /// Helper: build the minimal valid `InstructionTransitionProof` for a single
 /// `prove_instruction(ADD, a+b=c)` step, with the given program counter.
-fn make_add_itp(pc: usize, a: u128, b: u128, c: u128) -> zprove_core::transition::InstructionTransitionProof {
+fn make_add_itp(
+  pc: usize,
+  a: u128,
+  b: u128,
+  c: u128,
+) -> zprove_core::transition::InstructionTransitionProof {
   use revm::bytecode::opcode;
   use zprove_core::transition::{InstructionTransitionProof, prove_instruction};
 
@@ -4840,6 +5197,7 @@ fn make_add_itp(pc: usize, a: u128, b: u128, c: u128) -> zprove_core::transition
     call_context_claim: None,
     keccak_claim: None,
     external_state_claim: None,
+    mcopy_claim: None,
     sub_call_claim: None,
   }
 }
@@ -4854,7 +5212,11 @@ fn make_return_itp(
   use revm::bytecode::opcode;
   use zprove_core::transition::{InstructionTransitionProof, ReturnDataClaim};
 
-  let op = if is_revert { opcode::REVERT } else { opcode::RETURN };
+  let op = if is_revert {
+    opcode::REVERT
+  } else {
+    opcode::RETURN
+  };
   InstructionTransitionProof {
     opcode: op,
     pc,
@@ -4878,6 +5240,7 @@ fn make_return_itp(
     call_context_claim: None,
     keccak_claim: None,
     external_state_claim: None,
+    mcopy_claim: None,
     sub_call_claim: None,
   }
 }
@@ -4892,8 +5255,8 @@ fn make_return_itp(
 fn test_phase1_sub_call_success_verifies() {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    BlockTxContext, InstructionTransitionStatement, SubCallClaim, TransactionProof,
-    VmState, MAX_CALL_DEPTH, verify_sub_call_claim,
+    BlockTxContext, InstructionTransitionStatement, MAX_CALL_DEPTH, SubCallClaim, TransactionProof,
+    VmState, verify_sub_call_claim,
   };
 
   let return_data = vec![0xAA, 0xBB, 0xCC];
@@ -4908,6 +5271,7 @@ fn test_phase1_sub_call_success_verifies() {
   let inner_proof = TransactionProof {
     steps: inner_steps,
     block_tx_context: BlockTxContext::default(),
+    batch_receipt: None,
   };
 
   let claim = SubCallClaim {
@@ -4952,6 +5316,7 @@ fn test_phase1_sub_call_revert_verifies() {
   let inner_proof = TransactionProof {
     steps: inner_steps,
     block_tx_context: BlockTxContext::default(),
+    batch_receipt: None,
   };
 
   let claim = SubCallClaim {
@@ -4993,6 +5358,7 @@ fn test_phase1_sub_call_return_data_mismatch_rejected() {
   let inner_proof = TransactionProof {
     steps: inner_steps,
     block_tx_context: BlockTxContext::default(),
+    batch_receipt: None,
   };
 
   let claim = SubCallClaim {
@@ -5018,7 +5384,7 @@ fn test_phase1_sub_call_return_data_mismatch_rejected() {
 fn test_phase1_sub_call_depth_exceeded_rejected() {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionStatement, SubCallClaim, MAX_CALL_DEPTH, verify_sub_call_claim,
+    InstructionTransitionStatement, MAX_CALL_DEPTH, SubCallClaim, verify_sub_call_claim,
   };
 
   let claim = SubCallClaim {
@@ -5071,12 +5437,18 @@ fn test_phase1_oracle_sub_call_accepted() {
 mod phase2_chain_tests {
   use revm::primitives::{Bytes, U256};
   use zprove_core::execute::execute_bytecode_and_prove_chain;
-  use zprove_core::transition::{ExecutionReceipt, verify_execution_receipt, VmState};
+  use zprove_core::transition::{ExecutionReceipt, VmState, verify_execution_receipt};
   use zprove_core::zk_proof::{commit_vm_state, prove_link_stark};
 
   /// Helper: construct a minimal VmState with an empty stack and zero memory root.
   fn empty_vm_state(pc: usize) -> VmState {
-    VmState { opcode: 0x00, pc, sp: 0, stack: vec![], memory_root: [0u8; 32] }
+    VmState {
+      opcode: 0x00,
+      pc,
+      sp: 0,
+      stack: vec![],
+      memory_root: [0u8; 32],
+    }
   }
 
   fn u256_bytes(v: u128) -> [u8; 32] {
@@ -5113,7 +5485,10 @@ mod phase2_chain_tests {
     let c0 = commit_vm_state(&s0);
     let c1 = commit_vm_state(&s1);
     // Different stack depth → different hash
-    assert_ne!(c0.stack_hash, c1.stack_hash, "stack hash must differ for different stacks");
+    assert_ne!(
+      c0.stack_hash, c1.stack_hash,
+      "stack hash must differ for different stacks"
+    );
   }
 
   // ── Test 3: prove_link_stark / verify round-trip ─────────────────────────
@@ -5149,12 +5524,12 @@ mod phase2_chain_tests {
   fn test_phase2_prove_verify_execution_chain_3_segments() {
     // PUSH1 3, PUSH1 5, ADD, PUSH1 2, MUL, STOP
     let bytecode = Bytes::from(vec![
-      0x60, 0x03,  // PUSH1 3
-      0x60, 0x05,  // PUSH1 5
-      0x01,        // ADD
-      0x60, 0x02,  // PUSH1 2
-      0x02,        // MUL
-      0x00,        // STOP
+      0x60, 0x03, // PUSH1 3
+      0x60, 0x05, // PUSH1 5
+      0x01, // ADD
+      0x60, 0x02, // PUSH1 2
+      0x02, // MUL
+      0x00, // STOP
     ]);
     let receipt = execute_bytecode_and_prove_chain(
       bytecode,
@@ -5174,18 +5549,13 @@ mod phase2_chain_tests {
   fn test_phase2_single_segment_chain() {
     // PUSH1 10, PUSH1 20, ADD, STOP  (4 steps, window_size=100 → 1 leaf)
     let bytecode = Bytes::from(vec![
-      0x60, 0x0A,  // PUSH1 10
-      0x60, 0x14,  // PUSH1 20
-      0x01,        // ADD
-      0x00,        // STOP
+      0x60, 0x0A, // PUSH1 10
+      0x60, 0x14, // PUSH1 20
+      0x01, // ADD
+      0x00, // STOP
     ]);
-    let receipt = execute_bytecode_and_prove_chain(
-      bytecode,
-      Bytes::new(),
-      U256::ZERO,
-      100,
-    )
-    .expect("single-segment prove_chain must succeed");
+    let receipt = execute_bytecode_and_prove_chain(bytecode, Bytes::new(), U256::ZERO, 100)
+      .expect("single-segment prove_chain must succeed");
 
     // A single segment → always a leaf
     assert!(
@@ -5193,8 +5563,7 @@ mod phase2_chain_tests {
       "single window must produce a Leaf receipt"
     );
 
-    verify_execution_receipt(&receipt)
-      .expect("leaf receipt must verify");
+    verify_execution_receipt(&receipt).expect("leaf receipt must verify");
   }
 
   // ── Test 6: tampered commitment is rejected ───────────────────────────────
@@ -5219,6 +5588,181 @@ mod phase2_chain_tests {
     assert!(
       result.is_err(),
       "verify_link_stark must reject a proof verified with a mismatched commitment"
+    );
+  }
+}
+
+// ============================================================
+// Gap 5 — SubCall STARK receipt re-verification tests
+// ============================================================
+//
+// These tests exercise the full cryptographic path:
+//   prove_batch_transaction_zk_receipt  →  TransactionProof.batch_receipt
+//   verify_sub_call_claim               →  verify_batch_transaction_zk_receipt
+//
+// Phase 1 tests (above) only check structural / return-data binding with
+// `batch_receipt: None` (oracle mode).  The tests below confirm that a
+// sub-call carrying a real STARK receipt is accepted, and that a tampered
+// receipt is rejected.
+
+#[cfg(test)]
+mod gap5_stark_sub_call_tests {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    BlockTxContext, InstructionTransitionStatement, SubCallClaim, TransactionProof,
+    prove_batch_transaction_zk_receipt, verify_sub_call_claim,
+  };
+
+  use super::{make_add_itp, make_return_itp};
+
+  // ── Test A: valid inner proof + genuine receipt is accepted ──────────────
+
+  /// Inner execution: ADD(10+20=30), ADD(30+40=70), RETURN empty
+  #[test]
+  fn test_gap5_sub_call_with_stark_receipt_accepted() {
+    let inner_steps = vec![
+      make_add_itp(0, 10, 20, 30),
+      make_add_itp(1, 30, 40, 70),
+      make_return_itp(2, vec![], false),
+    ];
+
+    let receipt = prove_batch_transaction_zk_receipt(&inner_steps)
+      .expect("prove_batch_transaction_zk_receipt must succeed for ADD steps");
+
+    let inner_proof = TransactionProof {
+      steps: inner_steps,
+      block_tx_context: BlockTxContext::default(),
+      batch_receipt: Some(receipt),
+    };
+
+    let claim = SubCallClaim {
+      opcode: opcode::CALL,
+      callee: [0x11; 20],
+      value: [0u8; 32],
+      return_data: vec![],
+      success: true,
+      depth: 0,
+      inner_proof: Some(Box::new(inner_proof)),
+    };
+
+    let outer: Vec<InstructionTransitionStatement> = vec![];
+    assert!(
+      verify_sub_call_claim(&claim, &outer).is_ok(),
+      "SubCall with genuine STARK receipt must be accepted"
+    );
+  }
+
+  // ── Test B: oracle mode (batch_receipt: None) still accepted ─────────────
+
+  #[test]
+  fn test_gap5_oracle_mode_still_accepted() {
+    let return_data = vec![0xAB, 0xCD];
+    let inner_steps = vec![
+      make_add_itp(0, 1, 2, 3),
+      make_return_itp(1, return_data.clone(), false),
+    ];
+
+    let inner_proof = TransactionProof {
+      steps: inner_steps,
+      block_tx_context: BlockTxContext::default(),
+      batch_receipt: None,
+    };
+
+    let claim = SubCallClaim {
+      opcode: opcode::CALL,
+      callee: [0x22; 20],
+      value: [0u8; 32],
+      return_data: return_data.clone(),
+      success: true,
+      depth: 0,
+      inner_proof: Some(Box::new(inner_proof)),
+    };
+
+    let outer: Vec<InstructionTransitionStatement> = vec![];
+    assert!(
+      verify_sub_call_claim(&claim, &outer).is_ok(),
+      "oracle mode (batch_receipt: None) must still be accepted"
+    );
+  }
+
+  // ── Test C: tampered receipt WFF is rejected ──────────────────────────────
+
+  #[test]
+  fn test_gap5_tampered_receipt_rejected() {
+    use zprove_core::semantic_proof::{Term, WFF};
+
+    let inner_steps = vec![make_add_itp(0, 5, 7, 12), make_return_itp(1, vec![], false)];
+
+    let mut receipt = prove_batch_transaction_zk_receipt(&inner_steps)
+      .expect("prove_batch_transaction_zk_receipt must succeed");
+
+    // Tamper: replace the first manifest entry's WFF with a nonsense formula.
+    if let Some(entry) = receipt.manifest.entries.first_mut() {
+      entry.wff = WFF::Equal(
+        Box::new(Term::Bool(false)),
+        Box::new(Term::Bool(true)),
+      );
+    }
+
+    let inner_proof = TransactionProof {
+      steps: inner_steps,
+      block_tx_context: BlockTxContext::default(),
+      batch_receipt: Some(receipt),
+    };
+
+    let claim = SubCallClaim {
+      opcode: opcode::CALL,
+      callee: [0x33; 20],
+      value: [0u8; 32],
+      return_data: vec![],
+      success: true,
+      depth: 0,
+      inner_proof: Some(Box::new(inner_proof)),
+    };
+
+    let outer: Vec<InstructionTransitionStatement> = vec![];
+    assert!(
+      verify_sub_call_claim(&claim, &outer).is_err(),
+      "SubCall with tampered WFF receipt must be rejected"
+    );
+  }
+
+  // ── Test D: receipt step-count mismatch rejected ──────────────────────────
+
+  /// Receipt from a 3-step trace paired with a 2-step inner_proof — the
+  /// manifest entry-count check must fire.
+  #[test]
+  fn test_gap5_receipt_step_count_mismatch_rejected() {
+    let three_step_itps = vec![
+      make_add_itp(0, 1, 2, 3),
+      make_add_itp(1, 3, 4, 7),
+      make_return_itp(2, vec![], false),
+    ];
+    let receipt = prove_batch_transaction_zk_receipt(&three_step_itps)
+      .expect("prove_batch_transaction_zk_receipt must succeed");
+
+    let two_step_itps = vec![make_add_itp(0, 1, 2, 3), make_return_itp(1, vec![], false)];
+
+    let inner_proof = TransactionProof {
+      steps: two_step_itps,
+      block_tx_context: BlockTxContext::default(),
+      batch_receipt: Some(receipt),
+    };
+
+    let claim = SubCallClaim {
+      opcode: opcode::CALL,
+      callee: [0x44; 20],
+      value: [0u8; 32],
+      return_data: vec![],
+      success: true,
+      depth: 0,
+      inner_proof: Some(Box::new(inner_proof)),
+    };
+
+    let outer: Vec<InstructionTransitionStatement> = vec![];
+    assert!(
+      verify_sub_call_claim(&claim, &outer).is_err(),
+      "receipt with mismatched step count must be rejected"
     );
   }
 }

@@ -152,8 +152,7 @@ fn proves_memory_mstore_mload_consistency() {
   let proof = execute_bytecode_and_prove(bytecode, Bytes::default(), U256::ZERO)
     .expect("memory prove should succeed");
 
-  let mstore_step =
-    find_step_by_opcode(&proof.steps, opcode::MSTORE).expect("MSTORE step");
+  let mstore_step = find_step_by_opcode(&proof.steps, opcode::MSTORE).expect("MSTORE step");
   // MSTORE write claim: addr=0, value = 0x2A padded to 32 bytes
   assert_eq!(mstore_step.memory_claims.len(), 1);
   assert!(mstore_step.memory_claims[0].is_write);
@@ -229,12 +228,16 @@ fn proves_memory_mixed_arithmetic_and_memory() {
   // ADD result, store it, load it back:
   // PUSH1 3, PUSH1 4, ADD, PUSH1 0x00, MSTORE, PUSH1 0x00, MLOAD, STOP
   let bytecode = Bytes::from(vec![
-    opcode::PUSH1, 3,
-    opcode::PUSH1, 4,
+    opcode::PUSH1,
+    3,
+    opcode::PUSH1,
+    4,
     opcode::ADD,
-    opcode::PUSH1, 0x00,
+    opcode::PUSH1,
+    0x00,
     opcode::MSTORE,
-    opcode::PUSH1, 0x00,
+    opcode::PUSH1,
+    0x00,
     opcode::MLOAD,
     opcode::STOP,
   ]);

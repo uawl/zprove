@@ -2510,6 +2510,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "p3-poseidon2-air"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3e6938072568e2ed9d9f3d998e4a5e5fa33cfaf649049e73c6b69fbca0bd833"
+dependencies = [
+ "p3-air",
+ "p3-field",
+ "p3-matrix",
+ "p3-maybe-rayon",
+ "p3-poseidon2",
+ "rand 0.9.2",
+ "tracing",
+]
+
+[[package]]
 name = "p3-symmetric"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4457,6 +4472,7 @@ dependencies = [
  "p3-matrix",
  "p3-merkle-tree",
  "p3-mersenne-31",
+ "p3-poseidon2-air",
  "p3-symmetric",
  "p3-uni-stark",
  "rand 0.9.2",
@@ -4465,6 +4481,7 @@ dependencies = [
  "revm-interpreter",
  "revm-primitives",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

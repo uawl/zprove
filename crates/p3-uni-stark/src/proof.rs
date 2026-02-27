@@ -23,7 +23,38 @@ pub struct Proof<SC: StarkGenericConfig> {
   pub degree_bits: usize,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl<SC: StarkGenericConfig> Clone for Proof<SC>
+where
+  Com<SC>: Clone,
+  PcsProof<SC>: Clone,
+  SC::Challenge: Clone,
+{
+  fn clone(&self) -> Self {
+    Self {
+      commitments: self.commitments.clone(),
+      opened_values: self.opened_values.clone(),
+      opening_proof: self.opening_proof.clone(),
+      degree_bits: self.degree_bits,
+    }
+  }
+}
+
+impl<SC: StarkGenericConfig> core::fmt::Debug for Proof<SC>
+where
+  Com<SC>: core::fmt::Debug,
+  PcsProof<SC>: core::fmt::Debug,
+  SC::Challenge: core::fmt::Debug,
+{
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.debug_struct("Proof")
+      .field("commitments", &self.commitments)
+      .field("opened_values", &self.opened_values)
+      .field("degree_bits", &self.degree_bits)
+      .finish_non_exhaustive()
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Commitments<Com> {
   pub trace: Com,
   pub quotient_chunks: Com,
@@ -32,7 +63,7 @@ pub struct Commitments<Com> {
   pub perm: Option<Com>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenedValues<Challenge> {
   pub trace_local: Vec<Challenge>,
   pub trace_next: Vec<Challenge>,

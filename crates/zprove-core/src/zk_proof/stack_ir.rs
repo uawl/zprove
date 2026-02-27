@@ -1,9 +1,9 @@
 //! StackIR (register-machine IR) trace builder, AIR, and prove/verify functions.
 
 use super::preprocessed::{
-  PREP_COL_ARG0, PREP_COL_ARG1, PREP_COL_ARG2, PREP_COL_EVM_OPCODE, PREP_COL_OP,
-  PREP_COL_SCALAR0, PREP_COL_SCALAR1, PREP_COL_SCALAR2, PREP_COL_VALUE, PREP_COL_RET_TY,
-  PREP_COL_WFF_DIGEST_START, build_proof_rows_preprocessed_matrix, setup_proof_rows_preprocessed,
+  PREP_COL_ARG0, PREP_COL_ARG1, PREP_COL_ARG2, PREP_COL_EVM_OPCODE, PREP_COL_OP, PREP_COL_RET_TY,
+  PREP_COL_SCALAR0, PREP_COL_SCALAR1, PREP_COL_SCALAR2, PREP_COL_VALUE, PREP_COL_WFF_DIGEST_START,
+  build_proof_rows_preprocessed_matrix,
 };
 use super::types::{
   CircleStarkConfig, CircleStarkProof, CircleStarkVerifyResult, RECEIPT_BIND_TAG_STACK, Val,
@@ -13,8 +13,8 @@ use crate::semantic_proof::{OP_EQ_REFL, ProofRow, RET_WFF_EQ};
 
 use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir, PairBuilder};
 use p3_field::PrimeCharacteristicRing;
-use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_uni_stark::{PreprocessedProverData, PreprocessedVerifierKey};
 
 // ============================================================
@@ -54,20 +54,22 @@ pub fn build_stack_ir_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<StackIrSt
   if rows.is_empty() {
     return Err("cannot build reg-ir steps from empty rows".to_string());
   }
-  Ok(rows
-    .iter()
-    .map(|row| StackIrStep {
-      op: row.op,
-      arg0: row.arg0,
-      arg1: row.arg1,
-      arg2: row.arg2,
-      scalar0: row.scalar0,
-      scalar1: row.scalar1,
-      scalar2: row.scalar2,
-      value: row.value,
-      ret_ty: row.ret_ty,
-    })
-    .collect())
+  Ok(
+    rows
+      .iter()
+      .map(|row| StackIrStep {
+        op: row.op,
+        arg0: row.arg0,
+        arg1: row.arg1,
+        arg2: row.arg2,
+        scalar0: row.scalar0,
+        scalar1: row.scalar1,
+        scalar2: row.scalar2,
+        value: row.value,
+        ret_ty: row.ret_ty,
+      })
+      .collect(),
+  )
 }
 
 pub fn build_stack_ir_trace_from_steps(
@@ -118,8 +120,8 @@ pub fn build_stack_ir_trace_from_steps(
   if steps.len() < n_rows {
     for i in steps.len()..n_rows {
       let base = i * NUM_STACK_IR_COLS;
-      trace.values[base + STACK_COL_OP] = Val::from_u32(OP_EQ_REFL as u32);
-      trace.values[base + STACK_COL_RET_TY] = Val::from_u32(RET_WFF_EQ as u32);
+      trace.values[base + STACK_COL_OP] = Val::from_u32(OP_EQ_REFL);
+      trace.values[base + STACK_COL_RET_TY] = Val::from_u32(RET_WFF_EQ);
     }
   }
 
@@ -187,8 +189,7 @@ impl StackIrAirWithPrep {
   /// Build a `StackIrAirWithPrep` for use in the **prover** path.
   pub fn new(rows: &[ProofRow], pv: &[Val]) -> Self {
     Self {
-      prep_matrix: cfg!(debug_assertions)
-        .then(|| build_proof_rows_preprocessed_matrix(rows, pv)),
+      prep_matrix: cfg!(debug_assertions).then(|| build_proof_rows_preprocessed_matrix(rows, pv)),
     }
   }
 
@@ -227,25 +228,49 @@ where
       let local = &*local;
 
       builder.assert_eq(local[STACK_COL_OP].clone(), prep_row[PREP_COL_OP].clone());
-      builder.assert_eq(local[STACK_COL_ARG0].clone(), prep_row[PREP_COL_ARG0].clone());
-      builder.assert_eq(local[STACK_COL_ARG1].clone(), prep_row[PREP_COL_ARG1].clone());
-      builder.assert_eq(local[STACK_COL_ARG2].clone(), prep_row[PREP_COL_ARG2].clone());
-      builder.assert_eq(local[STACK_COL_SCALAR0].clone(), prep_row[PREP_COL_SCALAR0].clone());
-      builder.assert_eq(local[STACK_COL_SCALAR1].clone(), prep_row[PREP_COL_SCALAR1].clone());
-      builder.assert_eq(local[STACK_COL_SCALAR2].clone(), prep_row[PREP_COL_SCALAR2].clone());
-      builder.assert_eq(local[STACK_COL_VALUE].clone(), prep_row[PREP_COL_VALUE].clone());
-      builder.assert_eq(local[STACK_COL_RET_TY].clone(), prep_row[PREP_COL_RET_TY].clone());
+      builder.assert_eq(
+        local[STACK_COL_ARG0].clone(),
+        prep_row[PREP_COL_ARG0].clone(),
+      );
+      builder.assert_eq(
+        local[STACK_COL_ARG1].clone(),
+        prep_row[PREP_COL_ARG1].clone(),
+      );
+      builder.assert_eq(
+        local[STACK_COL_ARG2].clone(),
+        prep_row[PREP_COL_ARG2].clone(),
+      );
+      builder.assert_eq(
+        local[STACK_COL_SCALAR0].clone(),
+        prep_row[PREP_COL_SCALAR0].clone(),
+      );
+      builder.assert_eq(
+        local[STACK_COL_SCALAR1].clone(),
+        prep_row[PREP_COL_SCALAR1].clone(),
+      );
+      builder.assert_eq(
+        local[STACK_COL_SCALAR2].clone(),
+        prep_row[PREP_COL_SCALAR2].clone(),
+      );
+      builder.assert_eq(
+        local[STACK_COL_VALUE].clone(),
+        prep_row[PREP_COL_VALUE].clone(),
+      );
+      builder.assert_eq(
+        local[STACK_COL_RET_TY].clone(),
+        prep_row[PREP_COL_RET_TY].clone(),
+      );
     }
 
     // Step 1b — bind pis[1] (EVM opcode) and pis[2..10] (tag-independent WFF digest).
     {
       let pi_opcode: AB::Expr = {
         let pis = builder.public_values();
-        pis[1].clone().into()
+        pis[1].into()
       };
       let pi_digest: [AB::Expr; 8] = {
         let pis = builder.public_values();
-        std::array::from_fn(|k| pis[2 + k].clone().into())
+        std::array::from_fn(|k| pis[2 + k].into())
       };
       let prep_opcode: AB::Expr = {
         let prep = builder.preprocessed();

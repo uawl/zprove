@@ -10,8 +10,8 @@ use super::memory::value_to_u32s;
 use p3_field::PrimeCharacteristicRing;
 use p3_lookup::logup::LogUpGadget;
 use p3_lookup::lookup_traits::{Kind, Lookup, LookupData, LookupGadget};
-use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_symmetric::CryptographicHasher;
 use p3_uni_stark::{
   Entry, SymbolicExpression, SymbolicVariable, VerifierConstraintFolder, prove_with_lookup,
@@ -49,7 +49,11 @@ pub fn split_stack_logs(
       depth_after: c.depth_after as u32,
       value: c.value,
     };
-    if c.is_push { pushes.push(entry); } else { pops.push(entry); }
+    if c.is_push {
+      pushes.push(entry);
+    } else {
+      pops.push(entry);
+    }
   }
   (pushes, pops)
 }
@@ -65,7 +69,9 @@ fn hash_stack_log(log: &[StackLogEntry]) -> [Val; 8] {
     input.push(Val::from_u32(e.rw_counter as u32));
     input.push(Val::from_u32(e.depth_after));
     for chunk in e.value.chunks(4) {
-      input.push(Val::from_u32(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])));
+      input.push(Val::from_u32(u32::from_be_bytes([
+        chunk[0], chunk[1], chunk[2], chunk[3],
+      ])));
     }
   }
   sponge.hash_iter(input)
@@ -112,15 +118,21 @@ fn check_stack_claims(claims: &[crate::transition::StackAccessClaim]) -> Result<
 pub struct StackConsistencyAir;
 
 impl<F: p3_field::Field> p3_air::BaseAir<F> for StackConsistencyAir {
-  fn width(&self) -> usize { NUM_STACK_COLS }
+  fn width(&self) -> usize {
+    NUM_STACK_COLS
+  }
 }
 
 impl<AB: p3_air::AirBuilderWithPublicValues> p3_air::Air<AB> for StackConsistencyAir
-where AB::F: p3_field::Field,
+where
+  AB::F: p3_field::Field,
 {
   fn eval(&self, builder: &mut AB) {
     let pis = builder.public_values();
-    builder.assert_eq(pis[0].into(), AB::Expr::from_u32(RECEIPT_BIND_TAG_STACK_CONSISTENCY));
+    builder.assert_eq(
+      pis[0].into(),
+      AB::Expr::from_u32(RECEIPT_BIND_TAG_STACK_CONSISTENCY),
+    );
     let main = builder.main();
     let local = main.row_slice(0).expect("empty stack trace");
     let local = &*local;
@@ -136,7 +148,9 @@ fn fill_stack_log_row(data: &mut [Val], base: usize, entry: &StackLogEntry, is_p
   data[base + STACK_COL_RW_LO] = Val::from_u32(entry.rw_counter as u32);
   data[base + STACK_COL_DEPTH] = Val::from_u32(entry.depth_after);
   let vals = value_to_u32s(&entry.value);
-  for k in 0..8 { data[base + STACK_COL_VAL0 + k] = Val::from_u32(vals[k]); }
+  for k in 0..8 {
+    data[base + STACK_COL_VAL0 + k] = Val::from_u32(vals[k]);
+  }
   data[base + STACK_COL_IS_PUSH] = Val::from_u32(is_push as u32);
 }
 
@@ -160,7 +174,9 @@ fn build_stack_log_trace(
     let key = (entry.depth_after, entry.value);
     let mult = if last_push_idx.get(&key) == Some(&i) {
       *intra_pop_count_per_push.get(&key).unwrap_or(&0)
-    } else { 0 };
+    } else {
+      0
+    };
     let base = i * NUM_STACK_COLS;
     data[base + STACK_COL_MULT] = if mult >= 0 {
       Val::from_u32(mult as u32)
@@ -184,18 +200,22 @@ fn build_stack_log_trace(
 // ── LogUp argument ────────────────────────────────────────────────────
 
 fn make_stack_lookup() -> Lookup<Val> {
-  let col = |c: usize| {
-    SymbolicExpression::Variable(SymbolicVariable::new(Entry::Main { offset: 0 }, c))
-  };
-  let depth_slot = col(STACK_COL_DEPTH)
-    + (SymbolicExpression::Constant(Val::ONE) - col(STACK_COL_IS_PUSH));
+  let col =
+    |c: usize| SymbolicExpression::Variable(SymbolicVariable::new(Entry::Main { offset: 0 }, c));
+  let depth_slot =
+    col(STACK_COL_DEPTH) + (SymbolicExpression::Constant(Val::ONE) - col(STACK_COL_IS_PUSH));
   Lookup::new(
     Kind::Local,
     vec![vec![
       depth_slot,
-      col(STACK_COL_VAL0), col(STACK_COL_VAL0 + 1), col(STACK_COL_VAL0 + 2),
-      col(STACK_COL_VAL0 + 3), col(STACK_COL_VAL0 + 4), col(STACK_COL_VAL0 + 5),
-      col(STACK_COL_VAL0 + 6), col(STACK_COL_VAL0 + 7),
+      col(STACK_COL_VAL0),
+      col(STACK_COL_VAL0 + 1),
+      col(STACK_COL_VAL0 + 2),
+      col(STACK_COL_VAL0 + 3),
+      col(STACK_COL_VAL0 + 4),
+      col(STACK_COL_VAL0 + 5),
+      col(STACK_COL_VAL0 + 6),
+      col(STACK_COL_VAL0 + 7),
     ]],
     vec![col(STACK_COL_MULT)],
     vec![0],
@@ -210,7 +230,12 @@ fn generate_stack_perm_trace(
   let lookup = make_stack_lookup();
   let mut lookup_data: Vec<LookupData<Challenge>> = vec![];
   let perm_trace = gadget.generate_permutation::<CircleStarkConfig>(
-    main_trace, &None, &[], &[lookup], &mut lookup_data, perm_challenges,
+    main_trace,
+    &None,
+    &[],
+    &[lookup],
+    &mut lookup_data,
+    perm_challenges,
   );
   Some(perm_trace)
 }
@@ -219,6 +244,7 @@ fn eval_stack_lookup(folder: &mut VerifierConstraintFolder<CircleStarkConfig>) {
   LogUpGadget::new().eval_local_lookup(folder, &make_stack_lookup());
 }
 
+#[allow(clippy::type_complexity)]
 fn build_stack_logup_aux(
   push_log: &[StackLogEntry],
   pop_log: &[StackLogEntry],
@@ -228,7 +254,10 @@ fn build_stack_logup_aux(
 ) {
   let mut push_set: std::collections::HashMap<(u32, [u8; 32]), Vec<u64>> = Default::default();
   for e in push_log {
-    push_set.entry((e.depth_after, e.value)).or_default().push(e.rw_counter);
+    push_set
+      .entry((e.depth_after, e.value))
+      .or_default()
+      .push(e.rw_counter);
   }
   let mut intra_pop_count: std::collections::HashMap<(u32, [u8; 32]), i32> = Default::default();
   let mut intra_pop_set: std::collections::HashSet<u64> = Default::default();
@@ -244,6 +273,7 @@ fn build_stack_logup_aux(
 
 // ── Public API ─────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct StackConsistencyProof {
   pub stark_proof: CircleStarkProof,
   pub push_log: Vec<StackLogEntry>,
@@ -267,35 +297,60 @@ pub fn prove_stack_consistency(
   let config = make_circle_config();
   let trace_for_perm = trace.clone();
   let stark_proof = prove_with_lookup(
-    &config, &StackConsistencyAir, trace, &public_values, None,
+    &config,
+    &StackConsistencyAir,
+    trace,
+    &public_values,
+    None,
     move |perm_challenges| generate_stack_perm_trace(&trace_for_perm, perm_challenges),
-    2, 2,
+    2,
+    2,
     |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_stack_lookup(folder),
   );
-  Ok(StackConsistencyProof { stark_proof, push_log, pop_log })
+  Ok(StackConsistencyProof {
+    stark_proof,
+    push_log,
+    pop_log,
+  })
 }
 
 pub fn verify_stack_consistency(proof: &StackConsistencyProof) -> bool {
   let public_values = make_stack_public_values(&proof.push_log, &proof.pop_log);
 
   let mut merged: Vec<(u64, bool, u32, [u8; 32])> = Vec::new();
-  for e in &proof.push_log { merged.push((e.rw_counter, true,  e.depth_after, e.value)); }
-  for e in &proof.pop_log  { merged.push((e.rw_counter, false, e.depth_after, e.value)); }
+  for e in &proof.push_log {
+    merged.push((e.rw_counter, true, e.depth_after, e.value));
+  }
+  for e in &proof.pop_log {
+    merged.push((e.rw_counter, false, e.depth_after, e.value));
+  }
   merged.sort_by_key(|(rw, _, _, _)| *rw);
 
   let reconstructed: Vec<crate::transition::StackAccessClaim> = merged
     .into_iter()
-    .map(|(rw_counter, is_push, depth_after, value)| crate::transition::StackAccessClaim {
-      rw_counter, depth_after: depth_after as usize, is_push, value,
-    })
+    .map(
+      |(rw_counter, is_push, depth_after, value)| crate::transition::StackAccessClaim {
+        rw_counter,
+        depth_after: depth_after as usize,
+        is_push,
+        value,
+      },
+    )
     .collect();
 
-  if check_stack_claims(&reconstructed).is_err() { return false; }
+  if check_stack_claims(&reconstructed).is_err() {
+    return false;
+  }
 
   let config = make_circle_config();
   verify_with_lookup(
-    &config, &StackConsistencyAir, &proof.stark_proof, &public_values, None,
+    &config,
+    &StackConsistencyAir,
+    &proof.stark_proof,
+    &public_values,
+    None,
     2,
     |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_stack_lookup(folder),
-  ).is_ok()
+  )
+  .is_ok()
 }

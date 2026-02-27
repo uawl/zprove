@@ -1,6 +1,6 @@
 //! Batch instruction metadata and manifest digest helpers.
 
-use super::types::{Val, RECEIPT_BIND_PUBLIC_VALUES_LEN, default_poseidon_sponge};
+use super::types::{RECEIPT_BIND_PUBLIC_VALUES_LEN, Val, default_poseidon_sponge};
 use crate::semantic_proof::WFF;
 use p3_field::PrimeCharacteristicRing;
 use p3_symmetric::CryptographicHasher;

@@ -28,7 +28,7 @@ pub struct PreprocessedProverData<SC: StarkGenericConfig> {
 ///
 /// This allows committing to the preprocessed trace once per [`Air`]/degree and reusing
 /// the commitment across many verifications.
-#[derive(Clone)]
+#[allow(dead_code)]
 pub struct PreprocessedVerifierKey<SC: StarkGenericConfig> {
   /// The width (number of columns) of the preprocessed trace.
   pub width: usize,
@@ -38,6 +38,32 @@ pub struct PreprocessedVerifierKey<SC: StarkGenericConfig> {
   pub degree_bits: usize,
   /// [`Pcs`] commitment to the preprocessed trace.
   pub commitment: <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Commitment,
+}
+
+impl<SC: StarkGenericConfig> Clone for PreprocessedVerifierKey<SC>
+where
+  <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Commitment: Clone,
+{
+  fn clone(&self) -> Self {
+    Self {
+      width: self.width,
+      degree_bits: self.degree_bits,
+      commitment: self.commitment.clone(),
+    }
+  }
+}
+
+impl<SC: StarkGenericConfig> core::fmt::Debug for PreprocessedVerifierKey<SC>
+where
+  <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Commitment: core::fmt::Debug,
+{
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.debug_struct("PreprocessedVerifierKey")
+      .field("width", &self.width)
+      .field("degree_bits", &self.degree_bits)
+      .field("commitment", &self.commitment)
+      .finish()
+  }
 }
 
 /// Set up and commit the preprocessed trace for a given [`Air`] and degree.

@@ -172,6 +172,7 @@ pub fn make_circle_config_with_params(
 
 const WFF_TAG_EQUAL: u8 = 1;
 const WFF_TAG_AND: u8 = 2;
+const WFF_TAG_AXIOM: u8 = 3;
 
 const TERM_TAG_BOOL: u8 = 1;
 const TERM_TAG_NOT: u8 = 2;
@@ -274,6 +275,75 @@ pub(super) fn serialize_wff(wff: &WFF, out: &mut Vec<u8>) {
       out.push(WFF_TAG_AND);
       serialize_wff(a, out);
       serialize_wff(b, out);
+    }
+    // ── Axiom variants: serialized as TAG + discriminant byte + fields ──
+    WFF::PushAxiom { value } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x00); out.extend_from_slice(value);
+    }
+    WFF::DupAxiom { depth, value } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x01); out.push(*depth); out.extend_from_slice(value);
+    }
+    WFF::SwapAxiom { depth, new_top, new_deep } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x02); out.push(*depth);
+      out.extend_from_slice(new_top); out.extend_from_slice(new_deep);
+    }
+    WFF::StructuralAxiom { opcode } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x03); out.push(*opcode);
+    }
+    WFF::MloadAxiom { addr, value } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x04);
+      out.extend_from_slice(addr); out.extend_from_slice(value);
+    }
+    WFF::MstoreAxiom { opcode, addr, value } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x05); out.push(*opcode);
+      out.extend_from_slice(addr); out.extend_from_slice(value);
+    }
+    WFF::MemCopyAxiom { opcode, dest_or_ret, offset, size } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x06); out.push(*opcode);
+      out.extend_from_slice(dest_or_ret); out.extend_from_slice(offset); out.extend_from_slice(size);
+    }
+    WFF::SloadAxiom { slot, value } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x07);
+      out.extend_from_slice(slot); out.extend_from_slice(value);
+    }
+    WFF::SstoreAxiom { slot, value } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x08);
+      out.extend_from_slice(slot); out.extend_from_slice(value);
+    }
+    WFF::TransientAxiom { opcode, slot, value } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x09); out.push(*opcode);
+      out.extend_from_slice(slot); out.extend_from_slice(value);
+    }
+    WFF::KeccakAxiom { offset, size, output_hash } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x0a);
+      out.extend_from_slice(offset); out.extend_from_slice(size); out.extend_from_slice(output_hash);
+    }
+    WFF::EnvAxiom { opcode, value } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x0b); out.push(*opcode);
+      out.extend_from_slice(value);
+    }
+    WFF::ExternalStateAxiom { opcode, key, value } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x0c); out.push(*opcode);
+      out.extend_from_slice(key); out.extend_from_slice(value);
+    }
+    WFF::TerminateAxiom { opcode, offset, size } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x0d); out.push(*opcode);
+      out.extend_from_slice(offset); out.extend_from_slice(size);
+    }
+    WFF::CallAxiom { opcode, success } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x0e); out.push(*opcode);
+      out.extend_from_slice(success);
+    }
+    WFF::CreateAxiom { opcode, deployed } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x0f); out.push(*opcode);
+      out.extend_from_slice(deployed);
+    }
+    WFF::SelfdestructAxiom { target } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x10); out.extend_from_slice(target);
+    }
+    WFF::LogAxiom { opcode, offset, size } => {
+      out.push(WFF_TAG_AXIOM); out.push(0x11); out.push(*opcode);
+      out.extend_from_slice(offset); out.extend_from_slice(size);
     }
   }
 }

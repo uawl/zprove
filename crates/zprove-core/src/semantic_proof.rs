@@ -74,6 +74,49 @@ pub enum WFF {
   Equal(Box<Term>, Box<Term>),
   /// `φ ∧ ψ`.
   And(Box<WFF>, Box<WFF>),
+
+  // ── Per-opcode axiom formulas ─────────────────────────────────────────
+  // Each variant represents the proposition that the axiom asserts.
+  // Soundness of the claim is enforced by the corresponding consistency
+  // AIR at the batch level; the axiom proof term is the per-instruction
+  // witness that the claim is well-formed and matches the stack I/O.
+
+  /// PUSH: the pushed value equals `value`.
+  PushAxiom { value: [u8; 32] },
+  /// DUP(depth): the top of stack equals the item at `depth`.
+  DupAxiom { depth: u8, value: [u8; 32] },
+  /// SWAP(depth): top becomes `new_top`, item at `depth` becomes `new_deep`.
+  SwapAxiom { depth: u8, new_top: [u8; 32], new_deep: [u8; 32] },
+  /// Structural no-output opcodes: STOP, POP, JUMP, JUMPI, JUMPDEST, INVALID.
+  StructuralAxiom { opcode: u8 },
+  /// MLOAD: reading addr returns value.
+  MloadAxiom { addr: [u8; 32], value: [u8; 32] },
+  /// MSTORE / MSTORE8: writing value to addr.
+  MstoreAxiom { opcode: u8, addr: [u8; 32], value: [u8; 32] },
+  /// Memory-copy opcodes: dest, offset, size triple.
+  MemCopyAxiom { opcode: u8, dest_or_ret: [u8; 32], offset: [u8; 32], size: [u8; 32] },
+  /// SLOAD: reading slot returns value.
+  SloadAxiom { slot: [u8; 32], value: [u8; 32] },
+  /// SSTORE: writing value to slot.
+  SstoreAxiom { slot: [u8; 32], value: [u8; 32] },
+  /// TLOAD / TSTORE (transient storage, EIP-1153).
+  TransientAxiom { opcode: u8, slot: [u8; 32], value: [u8; 32] },
+  /// KECCAK256: hash of memory[offset..offset+size] equals output_hash.
+  KeccakAxiom { offset: [u8; 32], size: [u8; 32], output_hash: [u8; 32] },
+  /// Environment / context opcodes: the value equals what the EVM state provides.
+  EnvAxiom { opcode: u8, value: [u8; 32] },
+  /// External-state opcodes (BLOCKHASH, EXTCODESIZE, BALANCE, EXTCODEHASH).
+  ExternalStateAxiom { opcode: u8, key: [u8; 32], value: [u8; 32] },
+  /// RETURN / REVERT: offset and size of return data.
+  TerminateAxiom { opcode: u8, offset: [u8; 32], size: [u8; 32] },
+  /// CALL / CALLCODE / DELEGATECALL / STATICCALL: success flag.
+  CallAxiom { opcode: u8, success: [u8; 32] },
+  /// CREATE / CREATE2: deployed address.
+  CreateAxiom { opcode: u8, deployed: [u8; 32] },
+  /// SELFDESTRUCT: target address.
+  SelfdestructAxiom { target: [u8; 32] },
+  /// LOG0-LOG4: topic count and memory region.
+  LogAxiom { opcode: u8, offset: [u8; 32], size: [u8; 32] },
 }
 
 // ============================================================
@@ -127,6 +170,27 @@ pub enum Proof {
   ByteMulLowEq(u8, u8),
   /// `ByteMulHigh(Byte(a), Byte(b)) = Byte((a * b) >> 8)`.
   ByteMulHighEq(u8, u8),
+
+  // ── Per-opcode axiom proof terms ──────────────────────────────────────
+  // Leaf nodes: no sub-proofs.  Each encodes exactly the WFF it witnesses.
+  PushAxiom { value: [u8; 32] },
+  DupAxiom { depth: u8, value: [u8; 32] },
+  SwapAxiom { depth: u8, new_top: [u8; 32], new_deep: [u8; 32] },
+  StructuralAxiom { opcode: u8 },
+  MloadAxiom { addr: [u8; 32], value: [u8; 32] },
+  MstoreAxiom { opcode: u8, addr: [u8; 32], value: [u8; 32] },
+  MemCopyAxiom { opcode: u8, dest_or_ret: [u8; 32], offset: [u8; 32], size: [u8; 32] },
+  SloadAxiom { slot: [u8; 32], value: [u8; 32] },
+  SstoreAxiom { slot: [u8; 32], value: [u8; 32] },
+  TransientAxiom { opcode: u8, slot: [u8; 32], value: [u8; 32] },
+  KeccakAxiom { offset: [u8; 32], size: [u8; 32], output_hash: [u8; 32] },
+  EnvAxiom { opcode: u8, value: [u8; 32] },
+  ExternalStateAxiom { opcode: u8, key: [u8; 32], value: [u8; 32] },
+  TerminateAxiom { opcode: u8, offset: [u8; 32], size: [u8; 32] },
+  CallAxiom { opcode: u8, success: [u8; 32] },
+  CreateAxiom { opcode: u8, deployed: [u8; 32] },
+  SelfdestructAxiom { target: [u8; 32] },
+  LogAxiom { opcode: u8, offset: [u8; 32], size: [u8; 32] },
 }
 
 // ============================================================
@@ -202,11 +266,34 @@ pub const OP_U15_MUL_EQ: u32 = 27;
 pub const OP_U29_ADD_EQ: u32 = 28;
 pub const OP_U24_ADD_EQ: u32 = 29;
 
+// ---- Per-opcode axiom opcodes (30..) ----
+pub const OP_PUSH_AXIOM: u32 = 30;
+pub const OP_DUP_AXIOM: u32 = 31;
+pub const OP_SWAP_AXIOM: u32 = 32;
+pub const OP_STRUCTURAL_AXIOM: u32 = 33;
+pub const OP_MLOAD_AXIOM: u32 = 34;
+pub const OP_MSTORE_AXIOM: u32 = 35;
+pub const OP_MEM_COPY_AXIOM: u32 = 36;
+pub const OP_SLOAD_AXIOM: u32 = 37;
+pub const OP_SSTORE_AXIOM: u32 = 38;
+pub const OP_TRANSIENT_AXIOM: u32 = 39;
+pub const OP_KECCAK_AXIOM: u32 = 40;
+pub const OP_ENV_AXIOM: u32 = 41;
+pub const OP_EXTERNAL_STATE_AXIOM: u32 = 42;
+pub const OP_TERMINATE_AXIOM: u32 = 43;
+pub const OP_CALL_AXIOM: u32 = 44;
+pub const OP_CREATE_AXIOM: u32 = 45;
+pub const OP_SELFDESTRUCT_AXIOM: u32 = 46;
+pub const OP_LOG_AXIOM: u32 = 47;
+
 // ---- Return-type tags ----
 pub const RET_BOOL: u32 = 0;
 pub const RET_BYTE: u32 = 1;
 pub const RET_WFF_EQ: u32 = 2;
 pub const RET_WFF_AND: u32 = 3;
+/// Axiom WFF: an opcode-specific axiom whose correctness is enforced by the
+/// consistency AIR at batch level, not by inline term evaluation.
+pub const RET_WFF_AXIOM: u32 = 4;
 
 /// Number of columns in the compiled proof row (= STARK trace width).
 pub const NUM_PROOF_COLS: usize = 9;
@@ -580,6 +667,46 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
       )),
       Box::new(Term::Byte(((*a as u16 * *b as u16) >> 8) as u8)),
     )),
+
+    // ── Per-opcode axiom proofs: each infers the matching WFF variant. ──────
+    Proof::PushAxiom { value } => Ok(WFF::PushAxiom { value: *value }),
+    Proof::DupAxiom { depth, value } => Ok(WFF::DupAxiom { depth: *depth, value: *value }),
+    Proof::SwapAxiom { depth, new_top, new_deep } => {
+      Ok(WFF::SwapAxiom { depth: *depth, new_top: *new_top, new_deep: *new_deep })
+    }
+    Proof::StructuralAxiom { opcode } => Ok(WFF::StructuralAxiom { opcode: *opcode }),
+    Proof::MloadAxiom { addr, value } => Ok(WFF::MloadAxiom { addr: *addr, value: *value }),
+    Proof::MstoreAxiom { opcode, addr, value } => {
+      Ok(WFF::MstoreAxiom { opcode: *opcode, addr: *addr, value: *value })
+    }
+    Proof::MemCopyAxiom { opcode, dest_or_ret, offset, size } => {
+      Ok(WFF::MemCopyAxiom { opcode: *opcode, dest_or_ret: *dest_or_ret, offset: *offset, size: *size })
+    }
+    Proof::SloadAxiom { slot, value } => Ok(WFF::SloadAxiom { slot: *slot, value: *value }),
+    Proof::SstoreAxiom { slot, value } => Ok(WFF::SstoreAxiom { slot: *slot, value: *value }),
+    Proof::TransientAxiom { opcode, slot, value } => {
+      Ok(WFF::TransientAxiom { opcode: *opcode, slot: *slot, value: *value })
+    }
+    Proof::KeccakAxiom { offset, size, output_hash } => {
+      Ok(WFF::KeccakAxiom { offset: *offset, size: *size, output_hash: *output_hash })
+    }
+    Proof::EnvAxiom { opcode, value } => Ok(WFF::EnvAxiom { opcode: *opcode, value: *value }),
+    Proof::ExternalStateAxiom { opcode, key, value } => {
+      Ok(WFF::ExternalStateAxiom { opcode: *opcode, key: *key, value: *value })
+    }
+    Proof::TerminateAxiom { opcode, offset, size } => {
+      Ok(WFF::TerminateAxiom { opcode: *opcode, offset: *offset, size: *size })
+    }
+    Proof::CallAxiom { opcode, success } => {
+      Ok(WFF::CallAxiom { opcode: *opcode, success: *success })
+    }
+    Proof::CreateAxiom { opcode, deployed } => {
+      Ok(WFF::CreateAxiom { opcode: *opcode, deployed: *deployed })
+    }
+    Proof::SelfdestructAxiom { target } => Ok(WFF::SelfdestructAxiom { target: *target }),
+    Proof::LogAxiom { opcode, offset, size } => {
+      Ok(WFF::LogAxiom { opcode: *opcode, offset: *offset, size: *size })
+    }
   }
 }
 
@@ -1924,7 +2051,7 @@ pub fn wff_sar(shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32]) -> WFF {
         if k == 0 {
           // For the top byte, sign-extend: OR in fill_mask to restore sign bits set to 1.
           let sar_val = ((mid[0] as i8) >> m) as u8;
-          let shr_val = (mid[0] as u16 * factor_shr as u16 >> 8) as u8;
+          let shr_val = ((mid[0] as u16 * factor_shr as u16) >> 8) as u8;
           leaves.push(wff_mul_hi(mid[0], factor_shr, shr_val));
           if sign_fill == 0xFF {
             // negative: OR the shifted byte with fill_mask
@@ -1972,7 +2099,10 @@ pub fn prove_shl(shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32]) -> Proof
     None => prove_xor(result, &ZERO_WORD, &ZERO_WORD),
     Some((n, 0)) => {
       let mid = shl_mid(value, n);
-      let leaves: Vec<Proof> = (0..32).rev().map(|k| Proof::ByteXorEq(mid[k], 0x00)).collect();
+      let leaves: Vec<Proof> = (0..32)
+        .rev()
+        .map(|k| Proof::ByteXorEq(mid[k], 0x00))
+        .collect();
       and_proofs(leaves)
     }
     Some((n, m)) => {
@@ -1998,7 +2128,10 @@ pub fn prove_shr(shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32]) -> Proof
     None => prove_xor(result, &ZERO_WORD, &ZERO_WORD),
     Some((n, 0)) => {
       let mid = shr_mid(value, n);
-      let leaves: Vec<Proof> = (0..32).rev().map(|k| Proof::ByteXorEq(mid[k], 0x00)).collect();
+      let leaves: Vec<Proof> = (0..32)
+        .rev()
+        .map(|k| Proof::ByteXorEq(mid[k], 0x00))
+        .collect();
       and_proofs(leaves)
     }
     Some((n, m)) => {
@@ -2034,7 +2167,10 @@ pub fn prove_sar(shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32]) -> Proof
           mid[k] = value[k - n];
         }
       }
-      let leaves: Vec<Proof> = (0..32).rev().map(|k| Proof::ByteXorEq(mid[k], 0x00)).collect();
+      let leaves: Vec<Proof> = (0..32)
+        .rev()
+        .map(|k| Proof::ByteXorEq(mid[k], 0x00))
+        .collect();
       and_proofs(leaves)
     }
     Some((n, m)) => {
@@ -2236,7 +2372,11 @@ pub fn compute_signextend(b: &[u8; 32], x: &[u8; 32]) -> [u8; 32] {
   }
   let b_val = b[31] as usize;
   let byte_sign = 31 - b_val; // index into x[] from MSB
-  let fill = if (x[byte_sign] & 0x80) != 0 { 0xFF } else { 0x00 };
+  let fill = if (x[byte_sign] & 0x80) != 0 {
+    0xFF
+  } else {
+    0x00
+  };
   let mut result = *x;
   for byte in result[..byte_sign].iter_mut() {
     *byte = fill;
@@ -2305,19 +2445,35 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
     Term::Bool(v) => {
       let val = *v as u32;
       let key = (OP_BOOL, 0, 0, 0, val, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BOOL, scalar0: val, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BOOL,
+        scalar0: val,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Term::Not(a) => {
       let ai = compile_term_inner(a, rows, memo);
       let key = (OP_NOT, ai, 0, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let val = 1 - rows[ai as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_NOT, arg0: ai, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_NOT,
+        arg0: ai,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2325,10 +2481,19 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
       let key = (OP_AND, ai, bi, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let val = rows[ai as usize].value * rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_AND, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_AND,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2336,11 +2501,20 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
       let key = (OP_OR, ai, bi, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let (av, bv) = (rows[ai as usize].value, rows[bi as usize].value);
       let val = av + bv - av * bv;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_OR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_OR,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2348,11 +2522,20 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
       let key = (OP_XOR, ai, bi, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let (av, bv) = (rows[ai as usize].value, rows[bi as usize].value);
       let val = av + bv - 2 * av * bv;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_XOR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_XOR,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2361,21 +2544,39 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
       let key = (OP_ITE, ci, ai, bi, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let cv = rows[ci as usize].value;
       let (av, bv) = (rows[ai as usize].value, rows[bi as usize].value);
       let val = cv * av + (1 - cv) * bv;
       let ret = rows[ai as usize].ret_ty;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_ITE, arg0: ci, arg1: ai, arg2: bi, value: val, ret_ty: ret, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_ITE,
+        arg0: ci,
+        arg1: ai,
+        arg2: bi,
+        value: val,
+        ret_ty: ret,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Term::Byte(v) => {
       let key = (OP_BYTE, 0, 0, 0, *v as u32, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE, scalar0: *v as u32, value: *v as u32, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE,
+        scalar0: *v as u32,
+        value: *v as u32,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2384,11 +2585,21 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       let bi = compile_term_inner(b, rows, memo);
       let ci = compile_term_inner(c, rows, memo);
       let key = (OP_BYTE_ADD, ai, bi, ci, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let total = rows[ai as usize].value + rows[bi as usize].value + rows[ci as usize].value;
       let val = total & 0xFF;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_ADD, arg0: ai, arg1: bi, arg2: ci, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_ADD,
+        arg0: ai,
+        arg1: bi,
+        arg2: ci,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2397,11 +2608,21 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       let bi = compile_term_inner(b, rows, memo);
       let ci = compile_term_inner(c, rows, memo);
       let key = (OP_BYTE_ADD_CARRY, ai, bi, ci, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let total = rows[ai as usize].value + rows[bi as usize].value + rows[ci as usize].value;
       let val = if total >= 256 { 1 } else { 0 };
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_ADD_CARRY, arg0: ai, arg1: bi, arg2: ci, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_ADD_CARRY,
+        arg0: ai,
+        arg1: bi,
+        arg2: ci,
+        value: val,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2409,10 +2630,19 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
       let key = (OP_BYTE_MUL_LOW, ai, bi, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let val = (rows[ai as usize].value * rows[bi as usize].value) & 0xFF;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_MUL_LOW, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_MUL_LOW,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2420,10 +2650,19 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
       let key = (OP_BYTE_MUL_HIGH, ai, bi, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let val = (rows[ai as usize].value * rows[bi as usize].value) >> 8;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_MUL_HIGH, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_MUL_HIGH,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2431,10 +2670,19 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
       let key = (OP_BYTE_AND, ai, bi, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let val = rows[ai as usize].value & rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_AND, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_AND,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2442,10 +2690,19 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
       let key = (OP_BYTE_OR, ai, bi, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let val = rows[ai as usize].value | rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_OR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_OR,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2453,10 +2710,19 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
       let key = (OP_BYTE_XOR, ai, bi, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let val = rows[ai as usize].value ^ rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_XOR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_XOR,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2469,27 +2735,49 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>, memo: &mut Memo)
       let p1i = compile_proof_inner(p1, rows, memo);
       let p2i = compile_proof_inner(p2, rows, memo);
       let key = (OP_AND_INTRO, p1i, p2i, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_AND_INTRO, arg0: p1i, arg1: p2i, ret_ty: RET_WFF_AND, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_AND_INTRO,
+        arg0: p1i,
+        arg1: p2i,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::EqRefl(t) => {
       let ti = compile_term_inner(t, rows, memo);
       let key = (OP_EQ_REFL, ti, 0, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_EQ_REFL, arg0: ti, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_EQ_REFL,
+        arg0: ti,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::EqSym(p) => {
       let pi = compile_proof_inner(p, rows, memo);
       let key = (OP_EQ_SYM, pi, 0, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_EQ_SYM, arg0: pi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_EQ_SYM,
+        arg0: pi,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2497,86 +2785,190 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>, memo: &mut Memo)
       let p1i = compile_proof_inner(p1, rows, memo);
       let p2i = compile_proof_inner(p2, rows, memo);
       let key = (OP_EQ_TRANS, p1i, p2i, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_EQ_TRANS, arg0: p1i, arg1: p2i, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_EQ_TRANS,
+        arg0: p1i,
+        arg1: p2i,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::ByteAndEq(a, b) => {
       let key = (OP_BYTE_AND_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_AND_EQ, scalar0: *a as u32, scalar1: *b as u32, value: (*a & *b) as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_AND_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        value: (*a & *b) as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::ByteOrEq(a, b) => {
       let key = (OP_BYTE_OR_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_OR_EQ, scalar0: *a as u32, scalar1: *b as u32, value: (*a | *b) as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_OR_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        value: (*a | *b) as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::ByteXorEq(a, b) => {
       let key = (OP_BYTE_XOR_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_XOR_EQ, scalar0: *a as u32, scalar1: *b as u32, value: (*a ^ *b) as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_XOR_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        value: (*a ^ *b) as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::U29AddEq(a, b, cin, c) => {
       let carry_in = *cin as u32;
       let key = (OP_U29_ADD_EQ, 0, 0, 0, *a, *b, carry_in);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let total = *a + *b + carry_in;
       let sum29 = total & ((1u32 << 29) - 1);
       let carry_out = if total >= (1u32 << 29) { 1 } else { 0 };
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_U29_ADD_EQ, scalar0: *a, scalar1: *b, scalar2: carry_in, arg0: *c, arg1: carry_out, value: sum29, ret_ty: RET_WFF_AND, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_U29_ADD_EQ,
+        scalar0: *a,
+        scalar1: *b,
+        scalar2: carry_in,
+        arg0: *c,
+        arg1: carry_out,
+        value: sum29,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::U24AddEq(a, b, cin, c) => {
       let carry_in = *cin as u32;
       let key = (OP_U24_ADD_EQ, 0, 0, 0, *a, *b, carry_in);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let total = *a + *b + carry_in;
       let sum24 = total & ((1u32 << 24) - 1);
       let carry_out = if total >= (1u32 << 24) { 1 } else { 0 };
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_U24_ADD_EQ, scalar0: *a, scalar1: *b, scalar2: carry_in, arg0: *c, arg1: carry_out, value: sum24, ret_ty: RET_WFF_AND, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_U24_ADD_EQ,
+        scalar0: *a,
+        scalar1: *b,
+        scalar2: carry_in,
+        arg0: *c,
+        arg1: carry_out,
+        value: sum24,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::U15MulEq(a, b) => {
       let key = (OP_U15_MUL_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let total = *a as u32 * *b as u32;
       let lo = total & 0x7FFF;
       let hi = total >> 15;
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_U15_MUL_EQ, scalar0: *a as u32, scalar1: *b as u32, scalar2: 0, arg0: hi, value: lo, ret_ty: RET_WFF_AND, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_U15_MUL_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        scalar2: 0,
+        arg0: hi,
+        value: lo,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::ByteAddThirdCongruence(p, a, b) => {
       let pi = compile_proof_inner(p, rows, memo);
-      let key = (OP_BYTE_ADD_THIRD_CONGRUENCE, pi, 0, 0, *a as u32, *b as u32, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      let key = (
+        OP_BYTE_ADD_THIRD_CONGRUENCE,
+        pi,
+        0,
+        0,
+        *a as u32,
+        *b as u32,
+        0,
+      );
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_ADD_THIRD_CONGRUENCE, scalar0: *a as u32, scalar1: *b as u32, arg0: pi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_ADD_THIRD_CONGRUENCE,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        arg0: pi,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::ByteAddCarryThirdCongruence(p, a, b) => {
       let pi = compile_proof_inner(p, rows, memo);
-      let key = (OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, pi, 0, 0, *a as u32, *b as u32, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      let key = (
+        OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+        pi,
+        0,
+        0,
+        *a as u32,
+        *b as u32,
+        0,
+      );
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, scalar0: *a as u32, scalar1: *b as u32, arg0: pi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        arg0: pi,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2584,9 +2976,17 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>, memo: &mut Memo)
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
       let key = (OP_ITE_TRUE_EQ, ai, bi, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_ITE_TRUE_EQ, arg0: ai, arg1: bi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_ITE_TRUE_EQ,
+        arg0: ai,
+        arg1: bi,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
@@ -2594,29 +2994,98 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>, memo: &mut Memo)
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
       let key = (OP_ITE_FALSE_EQ, ai, bi, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_ITE_FALSE_EQ, arg0: ai, arg1: bi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_ITE_FALSE_EQ,
+        arg0: ai,
+        arg1: bi,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::ByteMulLowEq(a, b) => {
       let key = (OP_BYTE_MUL_LOW_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_MUL_LOW_EQ, scalar0: *a as u32, scalar1: *b as u32, value: (*a as u32 * *b as u32) & 0xFF, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_MUL_LOW_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        value: (*a as u32 * *b as u32) & 0xFF,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
     Proof::ByteMulHighEq(a, b) => {
       let key = (OP_BYTE_MUL_HIGH_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
-      if let Some(&cached) = memo.get(&key) { return cached; }
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
       let idx = rows.len() as u32;
-      rows.push(ProofRow { op: OP_BYTE_MUL_HIGH_EQ, scalar0: *a as u32, scalar1: *b as u32, value: (*a as u32 * *b as u32) >> 8, ret_ty: RET_WFF_EQ, ..Default::default() });
+      rows.push(ProofRow {
+        op: OP_BYTE_MUL_HIGH_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        value: (*a as u32 * *b as u32) >> 8,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
       memo.insert(key, idx);
       idx
     }
+
+    // ── Per-opcode axiom leaf rows ──────────────────────────────────────────
+    // Each axiom compiles to a single row with:
+    //   op      = OP_*_AXIOM
+    //   scalar0 = EVM opcode byte
+    //   ret_ty  = RET_WFF_AXIOM
+    // The row carries no child indices — it is a leaf.  Its soundness is
+    // enforced by the consistency AIR at batch level, not by verify_compiled.
+    Proof::PushAxiom { .. } => push_axiom_row(OP_PUSH_AXIOM, 0, rows, memo),
+    Proof::DupAxiom { depth, .. } => push_axiom_row(OP_DUP_AXIOM, *depth as u32, rows, memo),
+    Proof::SwapAxiom { depth, .. } => push_axiom_row(OP_SWAP_AXIOM, *depth as u32, rows, memo),
+    Proof::StructuralAxiom { opcode } => push_axiom_row(OP_STRUCTURAL_AXIOM, *opcode as u32, rows, memo),
+    Proof::MloadAxiom { .. } => push_axiom_row(OP_MLOAD_AXIOM, 0, rows, memo),
+    Proof::MstoreAxiom { opcode, .. } => push_axiom_row(OP_MSTORE_AXIOM, *opcode as u32, rows, memo),
+    Proof::MemCopyAxiom { opcode, .. } => push_axiom_row(OP_MEM_COPY_AXIOM, *opcode as u32, rows, memo),
+    Proof::SloadAxiom { .. } => push_axiom_row(OP_SLOAD_AXIOM, 0, rows, memo),
+    Proof::SstoreAxiom { .. } => push_axiom_row(OP_SSTORE_AXIOM, 0, rows, memo),
+    Proof::TransientAxiom { opcode, .. } => push_axiom_row(OP_TRANSIENT_AXIOM, *opcode as u32, rows, memo),
+    Proof::KeccakAxiom { .. } => push_axiom_row(OP_KECCAK_AXIOM, 0, rows, memo),
+    Proof::EnvAxiom { opcode, .. } => push_axiom_row(OP_ENV_AXIOM, *opcode as u32, rows, memo),
+    Proof::ExternalStateAxiom { opcode, .. } => push_axiom_row(OP_EXTERNAL_STATE_AXIOM, *opcode as u32, rows, memo),
+    Proof::TerminateAxiom { opcode, .. } => push_axiom_row(OP_TERMINATE_AXIOM, *opcode as u32, rows, memo),
+    Proof::CallAxiom { opcode, .. } => push_axiom_row(OP_CALL_AXIOM, *opcode as u32, rows, memo),
+    Proof::CreateAxiom { opcode, .. } => push_axiom_row(OP_CREATE_AXIOM, *opcode as u32, rows, memo),
+    Proof::SelfdestructAxiom { .. } => push_axiom_row(OP_SELFDESTRUCT_AXIOM, 0, rows, memo),
+    Proof::LogAxiom { opcode, .. } => push_axiom_row(OP_LOG_AXIOM, *opcode as u32, rows, memo),
   }
+}
+
+/// Emit a single axiom leaf row, deduplicating by (op, scalar0).
+fn push_axiom_row(op: u32, scalar0: u32, rows: &mut Vec<ProofRow>, memo: &mut Memo) -> u32 {
+  let key = (op, scalar0, 0, 0, 0, 0, 0);
+  if let Some(&cached) = memo.get(&key) {
+    return cached;
+  }
+  let idx = rows.len() as u32;
+  rows.push(ProofRow {
+    op,
+    scalar0,
+    ret_ty: RET_WFF_AXIOM,
+    ..Default::default()
+  });
+  memo.insert(key, idx);
+  idx
 }
 
 /// Flatten a [`Proof`] tree into a `Vec<ProofRow>` (post-order).
@@ -2906,6 +3375,33 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
           });
         }
       }
+      // ── Per-opcode axiom rows: leaf nodes, no children to validate ──────
+      // Soundness is guaranteed by the consistency AIR at batch level.
+      OP_PUSH_AXIOM
+      | OP_DUP_AXIOM
+      | OP_SWAP_AXIOM
+      | OP_STRUCTURAL_AXIOM
+      | OP_MLOAD_AXIOM
+      | OP_MSTORE_AXIOM
+      | OP_MEM_COPY_AXIOM
+      | OP_SLOAD_AXIOM
+      | OP_SSTORE_AXIOM
+      | OP_TRANSIENT_AXIOM
+      | OP_KECCAK_AXIOM
+      | OP_ENV_AXIOM
+      | OP_EXTERNAL_STATE_AXIOM
+      | OP_TERMINATE_AXIOM
+      | OP_CALL_AXIOM
+      | OP_CREATE_AXIOM
+      | OP_SELFDESTRUCT_AXIOM
+      | OP_LOG_AXIOM => {
+        if row.ret_ty != RET_WFF_AXIOM {
+          return Err(VerifyError::UnexpectedProofVariant {
+            expected: "axiom row must have RET_WFF_AXIOM",
+          });
+        }
+        // No child rows to check; accepted unconditionally here.
+      }
       _ => {
         return Err(VerifyError::UnexpectedTermVariant {
           expected: "valid opcode",
@@ -2914,6 +3410,68 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
     }
   }
   Ok(())
+}
+
+// ============================================================
+// Oracle I/O axiom helpers
+// ============================================================
+
+/// Build the WFF for an oracle axiom that commits concrete `inputs` and
+/// `outputs` values to the batch manifest.
+///
+/// Produces a right-fold conjunction of `Equal(Byte(b), Byte(b))` over every
+/// byte in `inputs ++ outputs` (in word-order: word[0..32] then word[1..32]…).
+/// Each equality is trivially true, so `infer_proof(prove_oracle_io(…))` always
+/// succeeds — soundness comes from the cross-validation in
+/// `verify_batch_transaction_zk_receipt`, which checks the committed values
+/// against the appropriate consistency AIR (memory, storage, keccak).
+///
+/// For no-input-no-output calls (future extension), returns a trivial
+/// `Equal(Bool(true), Bool(true))`.
+pub fn wff_oracle_io(inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> WFF {
+  let all_bytes: Vec<u8> = inputs
+    .iter()
+    .chain(outputs.iter())
+    .flat_map(|w| w.iter().copied())
+    .collect();
+  if all_bytes.is_empty() {
+    return WFF::Equal(Box::new(Term::Bool(true)), Box::new(Term::Bool(true)));
+  }
+  let n = all_bytes.len();
+  let byte_refl = |b: u8| WFF::Equal(Box::new(Term::Byte(b)), Box::new(Term::Byte(b)));
+  let mut result = byte_refl(all_bytes[n - 1]);
+  for &b in all_bytes[..n - 1].iter().rev() {
+    result = WFF::And(Box::new(byte_refl(b)), Box::new(result));
+  }
+  result
+}
+
+/// Build a trivially-satisfied oracle proof that encodes concrete `inputs` and
+/// `outputs` values in the proof tree.
+///
+/// Compiles to a right-fold `AndIntro` chain of `EqRefl(Byte(b))` nodes —
+/// one per byte across all input and output words.  These become non-arithmetic
+/// padding rows in the LUT STARK (they satisfy the U29AddEq constraint with all
+/// zeros), while the byte values appear in the preprocessed matrix and are
+/// covered by the batch manifest digest.
+///
+/// `infer_proof(prove_oracle_io(inputs, outputs))` returns exactly
+/// `wff_oracle_io(inputs, outputs)`.
+pub fn prove_oracle_io(inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Proof {
+  let all_bytes: Vec<u8> = inputs
+    .iter()
+    .chain(outputs.iter())
+    .flat_map(|w| w.iter().copied())
+    .collect();
+  if all_bytes.is_empty() {
+    return Proof::EqRefl(Term::Bool(true));
+  }
+  let n = all_bytes.len();
+  let mut result = Proof::EqRefl(Term::Byte(all_bytes[n - 1]));
+  for &b in all_bytes[..n - 1].iter().rev() {
+    result = Proof::AndIntro(Box::new(Proof::EqRefl(Term::Byte(b))), Box::new(result));
+  }
+  result
 }
 
 // ============================================================

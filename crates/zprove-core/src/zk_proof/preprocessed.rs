@@ -14,14 +14,14 @@
 //! public-input slots on the first row, closing the gap that previously let a forger
 //! prove valid-arithmetic rows for a different WFF claim.
 
-use super::types::{CircleStarkConfig, Val, make_circle_config};
 use super::batch::BatchProofRowsManifest;
+use super::types::{CircleStarkConfig, Val, make_circle_config};
 use crate::semantic_proof::{OP_EQ_REFL, ProofRow, RET_WFF_EQ};
 
 use p3_air::{Air, AirBuilder, BaseAir};
 use p3_field::PrimeCharacteristicRing;
-use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_uni_stark::{PreprocessedProverData, PreprocessedVerifierKey, setup_preprocessed};
 
 pub const PREP_COL_OP: usize = 0;
@@ -75,14 +75,14 @@ pub const NUM_BATCH_PREP_COLS: usize = 27;
 ///
 /// **Layout per row (NUM_BATCH_PREP_COLS = 27 columns):**
 /// - Cols 0..8 : ProofRow fields (`op`, `scalar0`–`scalar2`, `arg0`–`arg2`,
-///              `value`, `ret_ty`) — identical to the single-instruction matrix.
+///   `value`, `ret_ty`) — identical to the single-instruction matrix.
 /// - Col 9    : `PREP_COL_EVM_OPCODE` — the EVM opcode for the owning
-///              instruction segment; changes at instruction boundaries.
+///   instruction segment; changes at instruction boundaries.
 /// - Cols 10..17 : `PREP_COL_WFF_DIGEST_START + k` — per-instruction WFF
-///              digest; changes at instruction boundaries.
+///   digest; changes at instruction boundaries.
 /// - Col 18   : `PREP_COL_BATCH_N` — N, replicated in every row.
 /// - Cols 19..26 : `PREP_COL_BATCH_DIGEST_START + k` — batch manifest digest,
-///              replicated in every row.
+///   replicated in every row.
 ///
 /// Height = `all_rows.len().max(4).next_power_of_two()` (power-of-2 FRI requirement).
 /// Padding rows beyond `all_rows.len()` use `op = OP_EQ_REFL`, `ret_ty =
@@ -106,9 +106,7 @@ pub fn build_batch_proof_rows_preprocessed_matrix(
   let mut entry_idx = 0_usize;
 
   for (i, row) in rows.iter().enumerate() {
-    while entry_idx + 1 < manifest.entries.len()
-      && i >= manifest.entries[entry_idx + 1].row_start
-    {
+    while entry_idx + 1 < manifest.entries.len() && i >= manifest.entries[entry_idx + 1].row_start {
       entry_idx += 1;
     }
     let entry = &manifest.entries[entry_idx];
@@ -125,8 +123,8 @@ pub fn build_batch_proof_rows_preprocessed_matrix(
     matrix.values[base + PREP_COL_VALUE] = Val::from_u32(row.value);
     matrix.values[base + PREP_COL_RET_TY] = Val::from_u32(row.ret_ty);
     matrix.values[base + PREP_COL_EVM_OPCODE] = opcode_val;
-    for k in 0..8 {
-      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] = per_digest[k];
+    for (k, &v) in per_digest.iter().enumerate() {
+      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] = v;
     }
     matrix.values[base + PREP_COL_BATCH_N] = batch_n;
     for k in 0..8 {
@@ -149,8 +147,8 @@ pub fn build_batch_proof_rows_preprocessed_matrix(
     matrix.values[base + PREP_COL_OP] = Val::from_u32(OP_EQ_REFL);
     matrix.values[base + PREP_COL_RET_TY] = Val::from_u32(RET_WFF_EQ);
     matrix.values[base + PREP_COL_EVM_OPCODE] = last_opcode;
-    for k in 0..8 {
-      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] = last_per_digest[k];
+    for (k, &v) in last_per_digest.iter().enumerate() {
+      matrix.values[base + PREP_COL_WFF_DIGEST_START + k] = v;
     }
     matrix.values[base + PREP_COL_BATCH_N] = batch_n;
     for k in 0..8 {

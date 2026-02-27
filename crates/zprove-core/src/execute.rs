@@ -1,7 +1,8 @@
 use crate::transition::{
   BlockTxContext, CallContextClaim, ExecutionReceipt, ExternalStateClaim,
   InstructionTransitionProof, InstructionTransitionStatement, KeccakClaim, MemAccessClaim,
-  ReturnDataClaim, StackAccessClaim, StorageAccessClaim, SubCallClaim, TransactionProof, VmState,
+  MemCopyClaim, ReturnDataClaim, StackAccessClaim, StorageAccessClaim, SubCallClaim,
+  TransactionProof, VmState,
   opcode_input_count, opcode_output_count, prove_batch_transaction_zk_receipt,
   prove_execution_chain, prove_instruction, prove_instruction_zk_receipts_parallel,
   verify_batch_transaction_zk_receipt, verify_instruction_zk_receipt, verify_proof,
@@ -14,12 +15,11 @@ use revm::{
   context::TxEnv,
   database::BenchmarkDB,
   database_interface::{BENCH_CALLER, BENCH_TARGET},
-  interpreter::interpreter_types::StackTr,
   interpreter::interpreter_types::InputsTr,
+  interpreter::interpreter_types::StackTr,
   interpreter::{
-    Interpreter, InterpreterTypes,
+    CallInputs, CallOutcome, CreateInputs, CreateOutcome, Interpreter, InterpreterTypes,
     interpreter_types::{Jumps, MemoryTr},
-    CallInputs, CallOutcome, CreateInputs, CreateOutcome,
   },
   primitives::{Address, Bytes, TxKind, U256},
   state::Bytecode,
@@ -68,6 +68,9 @@ struct ProvingInspector {
   pending_sub_call_stack: Vec<(u8, [u8; 20], [u8; 32])>, // (opcode, callee, value)
   /// Sub-call claim ready to be attached to the next ITP in `step_end()`.
   pending_sub_call: Option<SubCallClaim>,
+  /// MCOPY copy-consistency claim ready to be attached to the next ITP.
+  /// Set inside `build_memory_and_return_claims` for MCOPY instructions.
+  pending_mcopy: Option<MemCopyClaim>,
 }
 
 /// Read a 32-byte word from a raw memory slice at a given byte offset.
@@ -176,6 +179,9 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
     // Take the sub-call claim captured in call_end/create_end.
     let sub_call_claim = self.pending_sub_call.take();
 
+    // Take the MCOPY copy-consistency claim (set in build_memory_and_return_claims).
+    let mcopy_claim = self.pending_mcopy.take();
+
     // Build stack access claims.
     let stack_claims = self.build_stack_claims(&outputs);
 
@@ -186,6 +192,7 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
       stack_outputs: outputs,
       semantic_proof,
       memory_claims,
+      mcopy_claim,
       storage_claims,
       stack_claims,
       return_data_claim,
@@ -217,12 +224,7 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
 
   /// Called after a CALL / CALLCODE / DELEGATECALL / STATICCALL finishes.
   /// Builds the `SubCallClaim` from the recorded info + outcome.
-  fn call_end(
-    &mut self,
-    _context: &mut CTX,
-    _inputs: &CallInputs,
-    outcome: &mut CallOutcome,
-  ) {
+  fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
     if let Some((op, callee, value)) = self.pending_sub_call_stack.pop() {
       // After popping, len() equals the call nesting depth (0 = top-level TX).
       let depth = self.pending_sub_call_stack.len() as u16;
@@ -239,11 +241,7 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
   }
 
   /// Called when a CREATE / CREATE2 is about to execute.
-  fn create(
-    &mut self,
-    _context: &mut CTX,
-    inputs: &mut CreateInputs,
-  ) -> Option<CreateOutcome> {
+  fn create(&mut self, _context: &mut CTX, inputs: &mut CreateInputs) -> Option<CreateOutcome> {
     use revm::interpreter::CreateScheme;
     let op = match inputs.scheme() {
       CreateScheme::Create => opcode::CREATE,
@@ -251,7 +249,9 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
       CreateScheme::Custom { .. } => opcode::CREATE,
     };
     // Callee address is not known until after deployment; use zero placeholder.
-    self.pending_sub_call_stack.push((op, [0u8; 20], inputs.value().to_be_bytes::<32>()));
+    self
+      .pending_sub_call_stack
+      .push((op, [0u8; 20], inputs.value().to_be_bytes::<32>()));
     None
   }
 
@@ -295,7 +295,7 @@ impl ProvingInspector {
     match self.pending_opcode {
       opcode::MLOAD => {
         // inputs[0] = offset; outputs[0] = loaded 32-byte word
-        if self.pending_inputs.len() >= 1 && outputs.len() >= 1 {
+        if !self.pending_inputs.is_empty() && !outputs.is_empty() {
           let offset_bytes = self.pending_inputs[0];
           let offset_u256 = U256::from_be_bytes::<32>(offset_bytes);
           if let Some(word_addr) = offset_u256
@@ -379,8 +379,14 @@ impl ProvingInspector {
           let offset_u256 = U256::from_be_bytes::<32>(self.pending_inputs[0]);
           let size_u256 = U256::from_be_bytes::<32>(self.pending_inputs[1]);
           if let (Some(offset), Some(size)) = (
-            offset_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
-            size_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            offset_u256
+              .try_into()
+              .ok()
+              .filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            size_u256
+              .try_into()
+              .ok()
+              .filter(|&v: &usize| v <= 4 * 1024 * 1024),
           ) {
             // Read the current memory snapshot.
             let local_off = interp.memory.local_memory_offset();
@@ -394,7 +400,7 @@ impl ProvingInspector {
             if size > 0 {
               let start_aligned = (offset / 32) * 32;
               let end_byte = offset + size;
-              let end_aligned = ((end_byte + 31) / 32) * 32;
+              let end_aligned = end_byte.div_ceil(32) * 32;
               let mut addr = start_aligned;
               while addr < end_aligned {
                 self.rw_counter += 1;
@@ -439,10 +445,16 @@ impl ProvingInspector {
           let dest_u256 = U256::from_be_bytes::<32>(self.pending_inputs[0]);
           let size_u256 = U256::from_be_bytes::<32>(self.pending_inputs[2]);
           if let (Some(dest), Some(size)) = (
-            dest_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
-            size_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
-          ) {
-            if size > 0 {
+            dest_u256
+              .try_into()
+              .ok()
+              .filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            size_u256
+              .try_into()
+              .ok()
+              .filter(|&v: &usize| v <= 4 * 1024 * 1024),
+          )
+            && size > 0 {
               let local_off = interp.memory.local_memory_offset();
               let local_size = interp.memory.size();
               let mem: Vec<u8> = interp
@@ -450,7 +462,7 @@ impl ProvingInspector {
                 .global_slice(local_off..local_off + local_size)
                 .to_vec();
               let start_aligned = (dest / 32) * 32;
-              let end_aligned = ((dest + size + 31) / 32) * 32;
+              let end_aligned = (dest + size).div_ceil(32) * 32;
               let mut addr = start_aligned;
               while addr < end_aligned {
                 self.rw_counter += 1;
@@ -463,7 +475,6 @@ impl ProvingInspector {
                 addr += 32;
               }
             }
-          }
         }
       }
 
@@ -474,10 +485,16 @@ impl ProvingInspector {
           let dest_u256 = U256::from_be_bytes::<32>(self.pending_inputs[1]);
           let size_u256 = U256::from_be_bytes::<32>(self.pending_inputs[3]);
           if let (Some(dest), Some(size)) = (
-            dest_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
-            size_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
-          ) {
-            if size > 0 {
+            dest_u256
+              .try_into()
+              .ok()
+              .filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            size_u256
+              .try_into()
+              .ok()
+              .filter(|&v: &usize| v <= 4 * 1024 * 1024),
+          )
+            && size > 0 {
               let local_off = interp.memory.local_memory_offset();
               let local_size = interp.memory.size();
               let mem: Vec<u8> = interp
@@ -485,7 +502,7 @@ impl ProvingInspector {
                 .global_slice(local_off..local_off + local_size)
                 .to_vec();
               let start_aligned = (dest / 32) * 32;
-              let end_aligned = ((dest + size + 31) / 32) * 32;
+              let end_aligned = (dest + size).div_ceil(32) * 32;
               let mut addr = start_aligned;
               while addr < end_aligned {
                 self.rw_counter += 1;
@@ -498,23 +515,32 @@ impl ProvingInspector {
                 addr += 32;
               }
             }
-          }
         }
       }
 
       // MCOPY: (dest_offset, src_offset, size) → 0
-      // Emits read claims for src range then write claims for dest range.
+      // Emits read claims for src range then write claims for dest range, and
+      // builds a MemCopyClaim that cross-links them for batch verification.
       opcode::MCOPY => {
         if self.pending_inputs.len() >= 3 {
           let dest_u256 = U256::from_be_bytes::<32>(self.pending_inputs[0]);
           let src_u256 = U256::from_be_bytes::<32>(self.pending_inputs[1]);
           let size_u256 = U256::from_be_bytes::<32>(self.pending_inputs[2]);
           if let (Some(dest), Some(src), Some(size)) = (
-            dest_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
-            src_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
-            size_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
-          ) {
-            if size > 0 {
+            dest_u256
+              .try_into()
+              .ok()
+              .filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            src_u256
+              .try_into()
+              .ok()
+              .filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            size_u256
+              .try_into()
+              .ok()
+              .filter(|&v: &usize| v <= 4 * 1024 * 1024),
+          )
+            && size > 0 {
               let local_off = interp.memory.local_memory_offset();
               let local_size = interp.memory.size();
               let mem: Vec<u8> = interp
@@ -523,7 +549,7 @@ impl ProvingInspector {
                 .to_vec();
               // Read claims for source range.
               let src_start = (src / 32) * 32;
-              let src_end = ((src + size + 31) / 32) * 32;
+              let src_end = (src + size).div_ceil(32) * 32;
               let mut addr = src_start;
               while addr < src_end {
                 self.rw_counter += 1;
@@ -535,9 +561,10 @@ impl ProvingInspector {
                 });
                 addr += 32;
               }
+              let src_word_count = (src_end - src_start) / 32;
               // Write claims for destination range (after copy).
               let dst_start = (dest / 32) * 32;
-              let dst_end = ((dest + size + 31) / 32) * 32;
+              let dst_end = (dest + size).div_ceil(32) * 32;
               let mut addr = dst_start;
               while addr < dst_end {
                 self.rw_counter += 1;
@@ -549,8 +576,31 @@ impl ProvingInspector {
                 });
                 addr += 32;
               }
+              let dst_word_count = (dst_end - dst_start) / 32;
+              // Extract actual copied bytes from the destination range in
+              // post-copy memory (correct even for overlapping src/dst).
+              let data: Vec<u8> = {
+                let start = dest.min(mem.len());
+                let end = (dest + size).min(mem.len());
+                let mut d = vec![0u8; size];
+                if start < end {
+                  d[..end - start].copy_from_slice(&mem[start..end]);
+                }
+                d
+              };
+              // src_rw_start / dst_rw_start are set to 0 here; they will be
+              // translated to batch-scoped counters by prove_batch_transaction_zk_receipt.
+              self.pending_mcopy = Some(MemCopyClaim {
+                src_offset: src as u64,
+                dst_offset: dest as u64,
+                size: size as u64,
+                data,
+                src_rw_start: 0,
+                src_word_count,
+                dst_rw_start: 0,
+                dst_word_count,
+              });
             }
-          }
         }
       }
 
@@ -608,7 +658,12 @@ impl ProvingInspector {
       bytes
     };
 
-    Some(KeccakClaim { offset, size, input_bytes, output_hash })
+    Some(KeccakClaim {
+      offset,
+      size,
+      input_bytes,
+      output_hash,
+    })
   }
 
   /// Build a `CallContextClaim` for CALLER / CALLVALUE / CALLDATALOAD / CALLDATASIZE.
@@ -627,7 +682,11 @@ impl ProvingInspector {
         let addr = interp.input.caller_address();
         let mut value = [0u8; 32];
         value[12..32].copy_from_slice(&addr.into_array());
-        Some(CallContextClaim { opcode: opcode::CALLER, calldata_offset: 0, output_value: value })
+        Some(CallContextClaim {
+          opcode: opcode::CALLER,
+          calldata_offset: 0,
+          output_value: value,
+        })
       }
       opcode::CALLVALUE => {
         let val = interp.input.call_value();
@@ -733,7 +792,7 @@ impl ProvingInspector {
   fn build_storage_claims(&mut self, outputs: &[[u8; 32]]) -> Vec<StorageAccessClaim> {
     match self.pending_opcode {
       opcode::SLOAD => {
-        if self.pending_inputs.len() >= 1 && outputs.len() >= 1 {
+        if !self.pending_inputs.is_empty() && !outputs.is_empty() {
           self.rw_counter += 1;
           vec![StorageAccessClaim {
             rw_counter: self.rw_counter,
@@ -910,12 +969,12 @@ pub fn execute_and_prove(
     .inspect_one_tx(tx)
     .map_err(|err| format!("failed to execute tx: {err}"))?;
 
-  let block_tx_context =
-    extract_block_tx_context(&evm.ctx.block, &evm.ctx.tx, &evm.ctx.cfg);
+  let block_tx_context = extract_block_tx_context(&evm.ctx.block, &evm.ctx.tx, &evm.ctx.cfg);
 
   let proof = TransactionProof {
     steps: evm.inspector.proofs.clone(),
     block_tx_context,
+    batch_receipt: None,
   };
 
   verify_transaction_proof(&proof)?;
@@ -1053,6 +1112,7 @@ fn statement_from_step(step: &InstructionTransitionProof) -> InstructionTransiti
     },
     accesses: Vec::new(),
     sub_call_claim: step.sub_call_claim.clone(),
+    mcopy_claim: step.mcopy_claim.clone(),
   }
 }
 
@@ -1134,12 +1194,12 @@ pub fn execute_bytecode_trace(
     .inspect_one_tx(tx)
     .map_err(|err| format!("failed to execute tx: {err}"))?;
 
-  let block_tx_context =
-    extract_block_tx_context(&evm.ctx.block, &evm.ctx.tx, &evm.ctx.cfg);
+  let block_tx_context = extract_block_tx_context(&evm.ctx.block, &evm.ctx.tx, &evm.ctx.cfg);
 
   Ok(TransactionProof {
     steps: evm.inspector.proofs.clone(),
     block_tx_context,
+    batch_receipt: None,
   })
 }
 

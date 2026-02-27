@@ -5,10 +5,12 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use revm::bytecode::opcode;
 
-use zprove_core::semantic_proof::{compute_addmod, compute_byte, compute_exp, compute_mulmod, compute_signextend};
+use zprove_core::semantic_proof::{
+  compute_addmod, compute_byte, compute_exp, compute_mulmod, compute_signextend,
+};
 use zprove_core::transition::{
   InstructionTransitionProof, InstructionTransitionStatement, VmState, build_batch_manifest,
-  prove_instruction, prove_batch_transaction_zk_receipt, verify_batch_transaction_zk_receipt,
+  prove_batch_transaction_zk_receipt, prove_instruction, verify_batch_transaction_zk_receipt,
 };
 
 // ============================================================
@@ -52,11 +54,27 @@ fn render_html(r: &BenchReport) -> String {
 
   let meta = format!(
     "<p>timestamp: <b>{}</b></p><p>seed: <b>{}</b> | samples per opcode: <b>{}</b> | log_rows (N): <b>{}</b> (max rows/batch = 2^N = {})</p>",
-    r.timestamp, r.seed, r.samples, r.log_rows, 1usize << r.log_rows
+    r.timestamp,
+    r.seed,
+    r.samples,
+    r.log_rows,
+    1usize << r.log_rows
   );
 
-  let headers = ["opcode group", "rows/instr", "batch count", "prove µs", "prove/instr µs", "verify µs", "verify/instr µs", "verify_ok"];
-  let th_row: String = headers.iter().map(|h| format!("<th>{h}</th>")).collect::<String>();
+  let headers = [
+    "opcode group",
+    "rows/instr",
+    "batch count",
+    "prove µs",
+    "prove/instr µs",
+    "verify µs",
+    "verify/instr µs",
+    "verify_ok",
+  ];
+  let th_row: String = headers
+    .iter()
+    .map(|h| format!("<th>{h}</th>"))
+    .collect::<String>();
 
   let rows: String = r
     .rows
@@ -69,12 +87,12 @@ fn render_html(r: &BenchReport) -> String {
         "<tr><td style=\"text-align:left\">{g}</td><td>{ri}</td><td>{n}</td>\
          <td>{p:.1}</td><td>{pp:.1}</td><td>{v:.1}</td><td>{vp:.1}</td>\
          <td class=\"{cls}\">{ok}</td></tr>",
-        g  = row.group,
+        g = row.group,
         ri = row.rows_per_instr,
-        n  = n,
-        p  = row.prove_us,
+        n = n,
+        p = row.prove_us,
         pp = row.prove_us / n.max(1) as f64,
-        v  = row.verify_us,
+        v = row.verify_us,
         vp = row.verify_us / n.max(1) as f64,
         cls = cls,
         ok = ok_str,
@@ -224,13 +242,23 @@ type CaseGen = fn(&mut StdRng, usize) -> BenchCase;
 fn make_add_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   let a = u256_bytes(rng.random::<u128>());
   let b = u256_bytes(rng.random::<u128>());
-  BenchCase { group: "ADD", opcode: opcode::ADD, inputs: vec![a, b], output: add_u256_mod(&a, &b) }
+  BenchCase {
+    group: "ADD",
+    opcode: opcode::ADD,
+    inputs: vec![a, b],
+    output: add_u256_mod(&a, &b),
+  }
 }
 
 fn make_sub_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   let a = u256_bytes(rng.random::<u128>());
   let b = u256_bytes(rng.random::<u128>());
-  BenchCase { group: "SUB", opcode: opcode::SUB, inputs: vec![a, b], output: sub_u256_mod(&a, &b) }
+  BenchCase {
+    group: "SUB",
+    opcode: opcode::SUB,
+    inputs: vec![a, b],
+    output: sub_u256_mod(&a, &b),
+  }
 }
 
 fn make_mul_sparse_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
@@ -304,7 +332,12 @@ fn make_and_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   for i in 0..32 {
     c[i] = a[i] & b[i];
   }
-  BenchCase { group: "AND", opcode: opcode::AND, inputs: vec![a, b], output: c }
+  BenchCase {
+    group: "AND",
+    opcode: opcode::AND,
+    inputs: vec![a, b],
+    output: c,
+  }
 }
 
 fn make_or_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
@@ -314,7 +347,12 @@ fn make_or_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   for i in 0..32 {
     c[i] = a[i] | b[i];
   }
-  BenchCase { group: "OR", opcode: opcode::OR, inputs: vec![a, b], output: c }
+  BenchCase {
+    group: "OR",
+    opcode: opcode::OR,
+    inputs: vec![a, b],
+    output: c,
+  }
 }
 
 fn make_xor_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
@@ -324,7 +362,12 @@ fn make_xor_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   for i in 0..32 {
     c[i] = a[i] ^ b[i];
   }
-  BenchCase { group: "XOR", opcode: opcode::XOR, inputs: vec![a, b], output: c }
+  BenchCase {
+    group: "XOR",
+    opcode: opcode::XOR,
+    inputs: vec![a, b],
+    output: c,
+  }
 }
 
 fn make_not_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
@@ -333,7 +376,12 @@ fn make_not_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   for i in 0..32 {
     c[i] = !a[i];
   }
-  BenchCase { group: "NOT", opcode: opcode::NOT, inputs: vec![a], output: c }
+  BenchCase {
+    group: "NOT",
+    opcode: opcode::NOT,
+    inputs: vec![a],
+    output: c,
+  }
 }
 
 fn make_lt_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
@@ -381,7 +429,11 @@ fn make_sgt_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
 fn make_eq_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   let same = rng.random::<bool>();
   let a = u256_bytes(rng.random::<u128>());
-  let b = if same { a } else { u256_bytes(rng.random::<u128>()) };
+  let b = if same {
+    a
+  } else {
+    u256_bytes(rng.random::<u128>())
+  };
   BenchCase {
     group: "EQ",
     opcode: opcode::EQ,
@@ -391,7 +443,11 @@ fn make_eq_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
 }
 
 fn make_iszero_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
-  let v: u128 = if rng.random::<bool>() { 0 } else { rng.random::<u128>() };
+  let v: u128 = if rng.random::<bool>() {
+    0
+  } else {
+    rng.random::<u128>()
+  };
   BenchCase {
     group: "ISZERO",
     opcode: opcode::ISZERO,
@@ -414,7 +470,11 @@ fn evm_shl_bytes(value: &[u8; 32], shift: u64) -> [u8; 32] {
         value[src]
       } else {
         let lo = value[src] << bit_shift;
-        let hi = if src + 1 < 32 { value[src + 1] >> (8 - bit_shift) } else { 0 };
+        let hi = if src + 1 < 32 {
+          value[src + 1] >> (8 - bit_shift)
+        } else {
+          0
+        };
         lo | hi
       };
     }
@@ -423,11 +483,19 @@ fn evm_shl_bytes(value: &[u8; 32], shift: u64) -> [u8; 32] {
 }
 
 fn evm_shr_u128(shift: u64, value: u128) -> u128 {
-  if shift >= 128 { 0 } else { value.wrapping_shr(shift as u32) }
+  if shift >= 128 {
+    0
+  } else {
+    value.wrapping_shr(shift as u32)
+  }
 }
 
 fn evm_sar_u128(shift: u64, value: i128) -> i128 {
-  if shift >= 128 { if value < 0 { -1 } else { 0 } } else { value >> shift }
+  if shift >= 128 {
+    if value < 0 { -1 } else { 0 }
+  } else {
+    value >> shift
+  }
 }
 
 fn make_shl_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
@@ -469,7 +537,12 @@ fn make_addmod_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   let b = random_bytes32(rng);
   let n = random_bytes32(rng);
   let out = compute_addmod(&a, &b, &n);
-  BenchCase { group: "ADDMOD", opcode: opcode::ADDMOD, inputs: vec![a, b, n], output: out }
+  BenchCase {
+    group: "ADDMOD",
+    opcode: opcode::ADDMOD,
+    inputs: vec![a, b, n],
+    output: out,
+  }
 }
 
 fn make_mulmod_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
@@ -477,29 +550,49 @@ fn make_mulmod_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   let b = random_bytes32(rng);
   let n = random_bytes32(rng);
   let out = compute_mulmod(&a, &b, &n);
-  BenchCase { group: "MULMOD", opcode: opcode::MULMOD, inputs: vec![a, b, n], output: out }
+  BenchCase {
+    group: "MULMOD",
+    opcode: opcode::MULMOD,
+    inputs: vec![a, b, n],
+    output: out,
+  }
 }
 
 fn make_exp_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   // Small base/exponent to keep bench runtime reasonable.
   let base = u256_bytes(rng.random::<u16>() as u128);
-  let exp  = u256_bytes(rng.random::<u8>()  as u128);
-  let out  = compute_exp(&base, &exp);
-  BenchCase { group: "EXP", opcode: opcode::EXP, inputs: vec![base, exp], output: out }
+  let exp = u256_bytes(rng.random::<u8>() as u128);
+  let out = compute_exp(&base, &exp);
+  BenchCase {
+    group: "EXP",
+    opcode: opcode::EXP,
+    inputs: vec![base, exp],
+    output: out,
+  }
 }
 
 fn make_byte_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   let i = u256_bytes((rng.random::<u8>() % 32) as u128);
   let x = random_bytes32(rng);
   let out = compute_byte(&i, &x);
-  BenchCase { group: "BYTE", opcode: opcode::BYTE, inputs: vec![i, x], output: out }
+  BenchCase {
+    group: "BYTE",
+    opcode: opcode::BYTE,
+    inputs: vec![i, x],
+    output: out,
+  }
 }
 
 fn make_signextend_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   let b = u256_bytes((rng.random::<u8>() % 32) as u128);
   let x = random_bytes32(rng);
   let out = compute_signextend(&b, &x);
-  BenchCase { group: "SIGNEXTEND", opcode: opcode::SIGNEXTEND, inputs: vec![b, x], output: out }
+  BenchCase {
+    group: "SIGNEXTEND",
+    opcode: opcode::SIGNEXTEND,
+    inputs: vec![b, x],
+    output: out,
+  }
 }
 
 static CASE_GENERATORS: &[CaseGen] = &[
@@ -557,6 +650,7 @@ fn build_itp(case: &BenchCase) -> Option<InstructionTransitionProof> {
     memory_claims: vec![],
     storage_claims: vec![],
     stack_claims: vec![],
+    mcopy_claim: None,
     return_data_claim: None,
     call_context_claim: None,
     keccak_claim: None,
@@ -584,6 +678,7 @@ fn build_statement(case: &BenchCase) -> InstructionTransitionStatement {
     },
     accesses: Vec::new(),
     sub_call_claim: None,
+    mcopy_claim: None,
   }
 }
 
@@ -631,8 +726,15 @@ fn utc_timestamp() -> String {
   let mut y = 1970u64;
   let mut rem = days;
   loop {
-    let leap: u64 =
-      if y % 400 == 0 { 1 } else if y % 100 == 0 { 0 } else if y % 4 == 0 { 1 } else { 0 };
+    let leap: u64 = if y % 400 == 0 {
+      1
+    } else if y % 100 == 0 {
+      0
+    } else if y % 4 == 0 {
+      1
+    } else {
+      0
+    };
     let ydays = 365 + leap;
     if rem < ydays {
       break;
@@ -640,8 +742,15 @@ fn utc_timestamp() -> String {
     rem -= ydays;
     y += 1;
   }
-  let leap: u64 =
-    if y % 400 == 0 { 1 } else if y % 100 == 0 { 0 } else if y % 4 == 0 { 1 } else { 0 };
+  let leap: u64 = if y % 400 == 0 {
+    1
+  } else if y % 100 == 0 {
+    0
+  } else if y % 4 == 0 {
+    1
+  } else {
+    0
+  };
   let month_days: [u64; 12] = [31, 28 + leap, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
   let mut mo = 1u64;
   for &md in &month_days {
@@ -661,17 +770,17 @@ fn utc_timestamp() -> String {
 
 fn main() {
   let args: Vec<String> = std::env::args().collect();
-  let samples   = parse_arg_usize(&args, "--samples",  3);
-  let iters     = parse_arg_usize(&args, "--iters",    1);
-  let log_rows  = parse_arg_usize(&args, "--log-rows", 10);
-  let seed_opt  = parse_arg_opt_u64(&args, "--seed");
+  let samples = parse_arg_usize(&args, "--samples", 3);
+  let iters = parse_arg_usize(&args, "--iters", 1);
+  let log_rows = parse_arg_usize(&args, "--log-rows", 10);
+  let seed_opt = parse_arg_opt_u64(&args, "--seed");
   let seed = seed_opt.unwrap_or_else(rand::random::<u64>);
   let max_rows: usize = 1 << log_rows;
 
   println!("zprove batch bench");
   match seed_opt {
     Some(s) => println!("  seed     : {s} (fixed)"),
-    None    => println!("  seed     : {seed} (random)"),
+    None => println!("  seed     : {seed} (random)"),
   }
   println!("  samples  : {samples}  (per opcode)");
   println!("  iters    : {iters}  (repetitions per bench point)");
@@ -689,7 +798,14 @@ fn main() {
   println!("   (N = {log_rows}, max rows/batch = {max_rows})");
   println!(
     "  {:<16}  {:>10}  {:>6}  {:>12}  {:>12}  {:>12}  {:>12}  {:>10}",
-    "group", "rows/instr", "batch", "prove µs", "prove/instr", "verify µs", "verify/instr", "verify_ok"
+    "group",
+    "rows/instr",
+    "batch",
+    "prove µs",
+    "prove/instr",
+    "verify µs",
+    "verify/instr",
+    "verify_ok"
   );
   println!("  {}", "─".repeat(100));
 
@@ -705,16 +821,20 @@ fn main() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ (gen_idx as u64));
 
     // ── Probe row count for this opcode ───────────────────────────────────
-    let probe = probe_cases.get(gen_idx).cloned().unwrap_or_else(|| {
-      make_case(&mut rand::rngs::StdRng::seed_from_u64(probe_seed), gen_idx)
-    });
+    let probe = probe_cases
+      .get(gen_idx)
+      .cloned()
+      .unwrap_or_else(|| make_case(&mut rand::rngs::StdRng::seed_from_u64(probe_seed), gen_idx));
     let rows_per_instr = match prove_instruction(probe.opcode, &probe.inputs, &[probe.output]) {
       Some(p) => match build_batch_manifest(&[(probe.opcode, &p)]) {
         Ok(m) => m.entries.first().map_or(1, |e| e.row_count.max(1)),
         Err(_) => 1,
       },
       None => {
-        eprintln!("  {:<16} : skipped (prove_instruction returned None)", probe.group);
+        eprintln!(
+          "  {:<16} : skipped (prove_instruction returned None)",
+          probe.group
+        );
         continue;
       }
     };
@@ -727,9 +847,7 @@ fn main() {
     };
 
     // ── Generate `samples` cases for this generator, cycling for batch ────
-    let mut seed_cases: Vec<BenchCase> = (0..samples)
-      .map(|i| make_case(&mut rng, i))
-      .collect();
+    let mut seed_cases: Vec<BenchCase> = (0..samples).map(|i| make_case(&mut rng, i)).collect();
     if seed_cases.is_empty() {
       seed_cases.push(make_case(&mut rng, 0));
     }

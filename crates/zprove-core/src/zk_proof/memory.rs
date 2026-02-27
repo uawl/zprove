@@ -3,17 +3,19 @@
 pub const RECEIPT_BIND_TAG_MEM: u32 = 4;
 
 use super::types::{
-  Challenge, CircleStarkConfig, CircleStarkProof, Val,
-  default_poseidon_sponge, make_circle_config,
+  Challenge, CircleStarkConfig, CircleStarkProof, Val, default_poseidon_sponge, make_circle_config,
 };
 
 use p3_field::PrimeCharacteristicRing;
 use p3_lookup::logup::LogUpGadget;
 use p3_lookup::lookup_traits::{Kind, Lookup, LookupData, LookupGadget};
-use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
+use p3_matrix::dense::RowMajorMatrix;
 use p3_symmetric::CryptographicHasher;
-use p3_uni_stark::{Entry, SymbolicExpression, SymbolicVariable, VerifierConstraintFolder, prove_with_lookup, verify_with_lookup};
+use p3_uni_stark::{
+  Entry, SymbolicExpression, SymbolicVariable, VerifierConstraintFolder, prove_with_lookup,
+  verify_with_lookup,
+};
 
 // ── Column layout  (NUM_MEM_COLS = 12) ───────────────────────────────
 
@@ -50,8 +52,16 @@ pub fn split_mem_logs(
   let mut writes = Vec::new();
   let mut reads = Vec::new();
   for c in claims {
-    let entry = MemLogEntry { rw_counter: c.rw_counter, addr: c.addr, value: c.value };
-    if c.is_write { writes.push(entry); } else { reads.push(entry); }
+    let entry = MemLogEntry {
+      rw_counter: c.rw_counter,
+      addr: c.addr,
+      value: c.value,
+    };
+    if c.is_write {
+      writes.push(entry);
+    } else {
+      reads.push(entry);
+    }
   }
   (writes, reads)
 }
@@ -68,7 +78,9 @@ fn hash_mem_log(log: &[MemLogEntry]) -> [Val; 8] {
     input.push(Val::from_u32((e.addr >> 32) as u32));
     input.push(Val::from_u32(e.addr as u32));
     for chunk in e.value.chunks(4) {
-      input.push(Val::from_u32(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])));
+      input.push(Val::from_u32(u32::from_be_bytes([
+        chunk[0], chunk[1], chunk[2], chunk[3],
+      ])));
     }
   }
   sponge.hash_iter(input)
@@ -88,7 +100,9 @@ fn hash_mem_set(set: &std::collections::HashMap<u64, [u8; 32]>) -> [Val; 8] {
     input.push(Val::from_u32((*addr >> 32) as u32));
     input.push(Val::from_u32(*addr as u32));
     for chunk in value.chunks(4) {
-      input.push(Val::from_u32(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])));
+      input.push(Val::from_u32(u32::from_be_bytes([
+        chunk[0], chunk[1], chunk[2], chunk[3],
+      ])));
     }
   }
   sponge.hash_iter(input)
@@ -117,6 +131,7 @@ fn make_mem_public_values(
 
 // ── Intra-batch consistency checker ──────────────────────────────────
 
+#[allow(clippy::type_complexity)]
 fn check_claims_and_build_sets(
   claims: &[crate::transition::MemAccessClaim],
 ) -> Result<
@@ -144,12 +159,16 @@ fn check_claims_and_build_sets(
       }
     } else {
       match read_set.entry(claim.addr) {
-        std::collections::hash_map::Entry::Vacant(e) => { e.insert(claim.value); }
+        std::collections::hash_map::Entry::Vacant(e) => {
+          e.insert(claim.value);
+        }
         std::collections::hash_map::Entry::Occupied(e) => {
           if *e.get() != claim.value {
             return Err(format!(
               "cross-batch read mismatch at addr=0x{:x}: {:?} vs {:?}",
-              claim.addr, e.get(), claim.value
+              claim.addr,
+              e.get(),
+              claim.value
             ));
           }
         }
@@ -159,6 +178,7 @@ fn check_claims_and_build_sets(
   Ok((write_set, read_set))
 }
 
+#[allow(clippy::type_complexity)]
 fn derive_sets_from_logs(
   write_log: &[MemLogEntry],
   read_log: &[MemLogEntry],
@@ -196,12 +216,16 @@ fn derive_sets_from_logs(
       }
     } else {
       match read_set.entry(addr) {
-        std::collections::hash_map::Entry::Vacant(e) => { e.insert(value); }
+        std::collections::hash_map::Entry::Vacant(e) => {
+          e.insert(value);
+        }
         std::collections::hash_map::Entry::Occupied(e) => {
           if *e.get() != value {
             return Err(format!(
               "cross-batch read mismatch at addr=0x{:x}: {:?} vs {:?}",
-              addr, e.get(), value
+              addr,
+              e.get(),
+              value
             ));
           }
         }
@@ -216,11 +240,14 @@ fn derive_sets_from_logs(
 pub struct MemoryConsistencyAir;
 
 impl<F: p3_field::Field> p3_air::BaseAir<F> for MemoryConsistencyAir {
-  fn width(&self) -> usize { NUM_MEM_COLS }
+  fn width(&self) -> usize {
+    NUM_MEM_COLS
+  }
 }
 
 impl<AB: p3_air::AirBuilderWithPublicValues> p3_air::Air<AB> for MemoryConsistencyAir
-where AB::F: p3_field::Field,
+where
+  AB::F: p3_field::Field,
 {
   fn eval(&self, builder: &mut AB) {
     let pis = builder.public_values();
@@ -273,26 +300,44 @@ fn build_mem_log_trace(
   for (i, entry) in write_log.iter().enumerate() {
     let mult = if last_write_idx.get(&entry.addr) == Some(&i) {
       *intra_read_count.get(&entry.addr).unwrap_or(&0)
-    } else { 0 };
+    } else {
+      0
+    };
     fill_log_row(&mut data, i * NUM_MEM_COLS, entry, true, mult);
   }
   for (i, entry) in read_log.iter().enumerate() {
-    let mult = if write_set.contains_key(&entry.addr) { -1 } else { 0 };
-    fill_log_row(&mut data, (write_log.len() + i) * NUM_MEM_COLS, entry, false, mult);
+    let mult = if write_set.contains_key(&entry.addr) {
+      -1
+    } else {
+      0
+    };
+    fill_log_row(
+      &mut data,
+      (write_log.len() + i) * NUM_MEM_COLS,
+      entry,
+      false,
+      mult,
+    );
   }
   RowMajorMatrix::new(data, NUM_MEM_COLS)
 }
 
 fn make_mem_lookup() -> Lookup<Val> {
-  let col = |c: usize| {
-    SymbolicExpression::Variable(SymbolicVariable::new(Entry::Main { offset: 0 }, c))
-  };
+  let col =
+    |c: usize| SymbolicExpression::Variable(SymbolicVariable::new(Entry::Main { offset: 0 }, c));
   Lookup::new(
     Kind::Local,
     vec![vec![
-      col(MEM_COL_ADDR_HI), col(MEM_COL_ADDR_LO),
-      col(MEM_COL_VAL0), col(MEM_COL_VAL0 + 1), col(MEM_COL_VAL0 + 2), col(MEM_COL_VAL0 + 3),
-      col(MEM_COL_VAL0 + 4), col(MEM_COL_VAL0 + 5), col(MEM_COL_VAL0 + 6), col(MEM_COL_VAL0 + 7),
+      col(MEM_COL_ADDR_HI),
+      col(MEM_COL_ADDR_LO),
+      col(MEM_COL_VAL0),
+      col(MEM_COL_VAL0 + 1),
+      col(MEM_COL_VAL0 + 2),
+      col(MEM_COL_VAL0 + 3),
+      col(MEM_COL_VAL0 + 4),
+      col(MEM_COL_VAL0 + 5),
+      col(MEM_COL_VAL0 + 6),
+      col(MEM_COL_VAL0 + 7),
     ]],
     vec![col(MEM_COL_MULT)],
     vec![0],
@@ -307,7 +352,12 @@ fn generate_mem_perm_trace(
   let lookup = make_mem_lookup();
   let mut lookup_data: Vec<LookupData<Challenge>> = vec![];
   let perm_trace = gadget.generate_permutation::<CircleStarkConfig>(
-    main_trace, &None, &[], &[lookup], &mut lookup_data, perm_challenges,
+    main_trace,
+    &None,
+    &[],
+    &[lookup],
+    &mut lookup_data,
+    perm_challenges,
   );
   Some(perm_trace)
 }
@@ -318,6 +368,7 @@ fn eval_mem_lookup(folder: &mut VerifierConstraintFolder<CircleStarkConfig>) {
 
 // ── Public types and API ──────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct MemoryConsistencyProof {
   pub stark_proof: CircleStarkProof,
   pub write_set: std::collections::HashMap<u64, [u8; 32]>,
@@ -342,13 +393,24 @@ pub fn prove_memory_consistency(
   let config = make_circle_config();
   let trace_for_perm = trace.clone();
   let stark_proof = prove_with_lookup(
-    &config, &MemoryConsistencyAir, trace, &public_values, None,
+    &config,
+    &MemoryConsistencyAir,
+    trace,
+    &public_values,
+    None,
     move |perm_challenges| generate_mem_perm_trace(&trace_for_perm, perm_challenges),
-    2, 2,
+    2,
+    2,
     |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_mem_lookup(folder),
   );
 
-  Ok(MemoryConsistencyProof { stark_proof, write_set, read_set, write_log, read_log })
+  Ok(MemoryConsistencyProof {
+    stark_proof,
+    write_set,
+    read_set,
+    write_log,
+    read_log,
+  })
 }
 
 pub fn verify_memory_consistency(proof: &MemoryConsistencyProof) -> bool {
@@ -361,14 +423,22 @@ pub fn verify_memory_consistency(proof: &MemoryConsistencyProof) -> bool {
     return false;
   }
   let public_values = make_mem_public_values(
-    &proof.write_log, &proof.read_log, &proof.write_set, &proof.read_set,
+    &proof.write_log,
+    &proof.read_log,
+    &proof.write_set,
+    &proof.read_set,
   );
   let config = make_circle_config();
   verify_with_lookup(
-    &config, &MemoryConsistencyAir, &proof.stark_proof, &public_values, None,
+    &config,
+    &MemoryConsistencyAir,
+    &proof.stark_proof,
+    &public_values,
+    None,
     2,
     |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_mem_lookup(folder),
-  ).is_ok()
+  )
+  .is_ok()
 }
 
 // ── Binary-tree aggregation ───────────────────────────────────────────
@@ -389,7 +459,12 @@ pub fn aggregate_memory_proofs(
   if !verify_memory_consistency(right) {
     return Err("right child proof failed verification".to_string());
   }
-  merge_sets(&left.write_set, &left.read_set, &right.write_set, &right.read_set)
+  merge_sets(
+    &left.write_set,
+    &left.read_set,
+    &right.write_set,
+    &right.read_set,
+  )
 }
 
 fn merge_sets(
@@ -399,21 +474,27 @@ fn merge_sets(
   right_rs: &std::collections::HashMap<u64, [u8; 32]>,
 ) -> Result<AggregatedMemoryProof, String> {
   for (addr, &r_val) in right_rs {
-    if let Some(&l_val) = left_ws.get(addr) {
-      if r_val != l_val {
+    if let Some(&l_val) = left_ws.get(addr)
+      && r_val != l_val {
         return Err(format!(
           "read/write set mismatch at addr=0x{addr:x}: right read {r_val:?}, left wrote {l_val:?}"
         ));
       }
-    }
   }
   let mut write_set = left_ws.clone();
-  for (&addr, &val) in right_ws { write_set.insert(addr, val); }
+  for (&addr, &val) in right_ws {
+    write_set.insert(addr, val);
+  }
   let mut read_set = left_rs.clone();
   for (&addr, &val) in right_rs {
-    if !left_ws.contains_key(&addr) { read_set.entry(addr).or_insert(val); }
+    if !left_ws.contains_key(&addr) {
+      read_set.entry(addr).or_insert(val);
+    }
   }
-  Ok(AggregatedMemoryProof { write_set, read_set })
+  Ok(AggregatedMemoryProof {
+    write_set,
+    read_set,
+  })
 }
 
 pub fn aggregate_proofs_tree(
@@ -429,17 +510,25 @@ pub fn aggregate_proofs_tree(
       if !verify_memory_consistency(p) {
         Err(format!("leaf proof {i} failed verification"))
       } else {
-        Ok(AggregatedMemoryProof { write_set: p.write_set.clone(), read_set: p.read_set.clone() })
+        Ok(AggregatedMemoryProof {
+          write_set: p.write_set.clone(),
+          read_set: p.read_set.clone(),
+        })
       }
     })
     .collect::<Result<Vec<_>, _>>()?;
 
   while nodes.len() > 1 {
-    let mut next_level = Vec::with_capacity((nodes.len() + 1) / 2);
+    let mut next_level = Vec::with_capacity(nodes.len().div_ceil(2));
     let mut iter = nodes.into_iter().peekable();
     while let Some(left) = iter.next() {
       if let Some(right) = iter.next() {
-        let merged = merge_sets(&left.write_set, &left.read_set, &right.write_set, &right.read_set)?;
+        let merged = merge_sets(
+          &left.write_set,
+          &left.read_set,
+          &right.write_set,
+          &right.read_set,
+        )?;
         next_level.push(merged);
       } else {
         next_level.push(left);

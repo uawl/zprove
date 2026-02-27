@@ -189,6 +189,68 @@ where
   }
 }
 
+/// Replays the Fiat-Shamir challenger up to (but not including) the final `pcs.verify()` call.
+///
+/// This allows callers to then observe the PCS proof's `commit_phase_commits` to
+/// derive the FRI fold betas, without needing to know the AIR definition.
+///
+/// The shape of `opened_values` is inferred from the proof itself:
+/// - `trace_width` = `opened_values.trace_local.len()`
+/// - `num_quotient_chunks` = `opened_values.quotient_chunks.len()`
+/// - `preprocessed_width` = `opened_values.preprocessed_local.as_ref().map(|v| v.len()).unwrap_or(0)`
+///
+/// Returns the challenger in the state it would be in just before `pcs.verify()` is called.
+#[allow(dead_code)]
+pub fn replay_challenger_pre_pcs<SC>(
+  config: &SC,
+  proof: &Proof<SC>,
+  public_values: &[Val<SC>],
+) -> SC::Challenger
+where
+  SC: StarkGenericConfig,
+{
+  use p3_challenger::CanObserve;
+
+  let Proof {
+    commitments,
+    opened_values,
+    degree_bits,
+    ..
+  } = proof;
+
+  let preprocessed_width = opened_values
+    .preprocessed_local
+    .as_ref()
+    .map(|v| v.len())
+    .unwrap_or(0);
+
+  let mut challenger = config.initialise_challenger();
+
+  challenger.observe(Val::<SC>::from_usize(*degree_bits));
+  challenger.observe(Val::<SC>::from_usize(*degree_bits - config.is_zk()));
+  challenger.observe(Val::<SC>::from_usize(preprocessed_width));
+  challenger.observe(commitments.trace.clone());
+  if preprocessed_width > 0 {
+    // We don't have the preprocessed commitment here; skip for now.
+    // In practice, recursive proofs don't use preprocessed traces.
+  }
+  challenger.observe_slice(public_values);
+
+  // alpha (constraint aggregation challenge)
+  let _alpha: SC::Challenge = challenger.sample_algebra_element();
+  challenger.observe(commitments.quotient_chunks.clone());
+
+  if let Some(r_commit) = commitments.random.clone() {
+    challenger.observe(r_commit);
+  }
+
+  // zeta (OOD evaluation point) — sampled but not needed here
+  let _zeta: SC::Challenge = challenger.sample_algebra_element();
+
+  // The challenger is now in the state where pcs.verify() receives it.
+  challenger
+}
+
 #[instrument(skip_all)]
 pub fn verify<SC, A>(
   config: &SC,

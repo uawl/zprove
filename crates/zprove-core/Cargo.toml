@@ -8,9 +8,11 @@ revm = { version = "34", features = ["std", "alloydb", "tracer"] }
 revm-interpreter = "32.0.0"
 revm-primitives = "22.0.0"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 # Plonky3 Circle STARK over M31
 p3-mersenne-31 = "0.4"
+p3-poseidon2-air = "0.4"
 p3-field = "0.4"
 p3-air = "0.4"
 p3-matrix = "0.4"
