@@ -1,10 +1,11 @@
 use crate::transition::{
-  BlockTxContext, CallContextClaim, ExternalStateClaim, InstructionTransitionProof,
-  InstructionTransitionStatement, KeccakClaim, MemAccessClaim, ReturnDataClaim, StackAccessClaim,
-  StorageAccessClaim, SubCallClaim, TransactionProof, VmState, opcode_input_count,
-  opcode_output_count, prove_batch_transaction_zk_receipt, prove_instruction,
-  prove_instruction_zk_receipts_parallel, verify_batch_transaction_zk_receipt,
-  verify_instruction_zk_receipt, verify_proof, verify_proof_with_rows,
+  BlockTxContext, CallContextClaim, ExecutionReceipt, ExternalStateClaim,
+  InstructionTransitionProof, InstructionTransitionStatement, KeccakClaim, MemAccessClaim,
+  ReturnDataClaim, StackAccessClaim, StorageAccessClaim, SubCallClaim, TransactionProof, VmState,
+  opcode_input_count, opcode_output_count, prove_batch_transaction_zk_receipt,
+  prove_execution_chain, prove_instruction, prove_instruction_zk_receipts_parallel,
+  verify_batch_transaction_zk_receipt, verify_instruction_zk_receipt, verify_proof,
+  verify_proof_with_rows,
 };
 use crate::zk_proof::{prove_memory_consistency, verify_memory_consistency};
 use revm::bytecode::opcode;
@@ -1280,4 +1281,64 @@ pub fn execute_bytecode_and_prove_with_zkp_parallel_batched(
   let proof = execute_bytecode_trace(bytecode, data, value)?;
   verify_transaction_proof_with_zkp_parallel(&proof, worker_count, batch_capacity)?;
   Ok(proof)
+}
+
+/// Execute `bytecode` and produce a recursive [`ExecutionReceipt`] via the
+/// Phase-2 segment-chain prover.
+///
+/// Steps are chunked into windows of `window_size` instructions.  Each window
+/// is proved independently with a [`BatchTransactionZkReceipt`] (omitted when
+/// the window contains no arithmetic opcodes), and all windows are linked into
+/// a binary aggregation tree using [`LinkAir`](crate::zk_proof::LinkAir)
+/// link STARKs.
+///
+/// The `memory_root` in synthesised [`VmState`] boundaries is set to all-zeros
+/// for Phase 2 (full Merkle-memory integration is deferred to Phase 3).
+pub fn execute_bytecode_and_prove_chain(
+  bytecode: Bytes,
+  data: Bytes,
+  value: U256,
+  window_size: usize,
+) -> Result<ExecutionReceipt, String> {
+  let proof = execute_bytecode_trace(bytecode, data, value)?;
+  verify_transaction_proof(&proof)?;
+
+  let steps = &proof.steps;
+  if steps.is_empty() {
+    return Err("execute_bytecode_and_prove_chain: no execution steps".to_string());
+  }
+
+  let wsize = window_size.max(1);
+
+  // Split steps into window-sized segments.
+  let windows: Vec<Vec<InstructionTransitionProof>> =
+    steps.chunks(wsize).map(|c| c.to_vec()).collect();
+
+  // Build VmState boundary for the start of each window, then append the
+  // terminal state after the last step.
+  let mut vm_states: Vec<VmState> = windows
+    .iter()
+    .map(|w| {
+      let first = w.first().unwrap();
+      VmState {
+        opcode: first.opcode,
+        pc: first.pc,
+        sp: first.stack_inputs.len(),
+        stack: first.stack_inputs.clone(),
+        memory_root: [0u8; 32],
+      }
+    })
+    .collect();
+
+  // Terminal boundary: state as-of the instruction *after* the last step.
+  let last = steps.last().unwrap();
+  vm_states.push(VmState {
+    opcode: last.opcode,
+    pc: last.pc.saturating_add(1),
+    sp: last.stack_outputs.len(),
+    stack: last.stack_outputs.clone(),
+    memory_root: [0u8; 32],
+  });
+
+  prove_execution_chain(&vm_states, windows)
 }

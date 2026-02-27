@@ -13,11 +13,12 @@
 //! ```
 
 use super::types::{
-  CircleStarkProof, CircleStarkVerifyResult, Val, make_circle_config,
+  CircleStarkProof, CircleStarkVerifyResult, Val, default_poseidon_sponge, make_circle_config,
 };
 use crate::transition::VmState;
+use p3_symmetric::CryptographicHasher;
 
-use p3_air::{Air, AirBuilderWithPublicValues, BaseAir};
+use p3_air::{Air, AirBuilder, AirBuilderWithPublicValues, BaseAir};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
@@ -83,12 +84,50 @@ impl StateCommitment {
 
 /// Derive a [`StateCommitment`] from a VM execution snapshot.
 ///
-/// **Stub — not yet implemented.**
-/// See `plans/recursive-proving.md §4-1` for the full design:
-/// - `stack_hash  = Poseidon2(stack[0..sp] packed as 32-bit limbs)`
-/// - `memory_root = Poseidon2(existing 32-byte Merkle root bytes)`
-pub fn commit_vm_state(_state: &VmState) -> StateCommitment {
-  todo!("Phase 2: hash stack and memory_root via Poseidon2 sponge")
+/// Hashes the stack and memory root using a domain-tagged Poseidon2 sponge
+/// (Mersenne31 field) to produce compact M31 commitments suitable as STARK
+/// public inputs.
+///
+/// **Domain tags** (prevents cross-domain collisions):
+/// - `0x53544B5F` ("STK_") prefixed before stack elements
+/// - `0x4D454D5F` ("MEM_") prefixed before memory root bytes
+///
+/// **Stack packing**: each 32-byte EVM word is split into 8 × u32 BE limbs.
+/// **Memory root**: the existing 32-byte Merkle root is split into 8 × u32 BE limbs.
+pub fn commit_vm_state(state: &VmState) -> StateCommitment {
+  let sponge = default_poseidon_sponge();
+
+  // Domain-separation tags. Keep as runtime values to avoid const-fn limitations.
+  let domain_stack = Val::from_u32(0x53544B5F); // "STK_"
+  let domain_mem   = Val::from_u32(0x4D454D5F); // "MEM_"
+
+  // stack_hash: Poseidon2([domain_stack, sp, stack[0..sp] as 8×u32 per word])
+  let mut stack_input: Vec<Val> = Vec::with_capacity(2 + state.sp * 8);
+  stack_input.push(domain_stack);
+  stack_input.push(Val::from_u32(state.sp as u32));
+  for word in &state.stack[..state.sp] {
+    for chunk in word.chunks(4) {
+      let v = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+      stack_input.push(Val::from_u32(v));
+    }
+  }
+  let stack_hash = sponge.hash_iter(stack_input);
+
+  // memory_root: Poseidon2([domain_mem, root[0..32] as 8×u32])
+  let mut mem_input: Vec<Val> = Vec::with_capacity(9);
+  mem_input.push(domain_mem);
+  for chunk in state.memory_root.chunks(4) {
+    let v = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    mem_input.push(Val::from_u32(v));
+  }
+  let memory_root = sponge.hash_iter(mem_input);
+
+  StateCommitment {
+    pc: state.pc as u32,
+    sp: state.sp as u32,
+    stack_hash,
+    memory_root,
+  }
 }
 
 // ── Public-value helpers ──────────────────────────────────────────────
@@ -166,19 +205,21 @@ where
     builder.assert_eq(l_pc.clone().into(), r_pc.clone().into());
     builder.assert_eq(l_sp.clone().into(), r_sp.clone().into());
 
-    // Pin public values to the first row so the verifier can independently re-derive them.
+    // Pin public values to the first row so the verifier can independently
+    // re-derive them from the block header.  All other rows are padding and
+    // must not be constrained against the public values.
     // pv layout: [l_pc, l_sp, l_stack[8], l_mem[8], r_pc, r_sp, r_stack[8], r_mem[8]]
-    builder.assert_eq(pv[0].clone(), l_pc.into());
-    builder.assert_eq(pv[1].clone(), l_sp.into());
+    builder.when_first_row().assert_eq(pv[0].clone(), l_pc.into());
+    builder.when_first_row().assert_eq(pv[1].clone(), l_sp.into());
     for i in 0..8 {
-      builder.assert_eq(pv[2  + i].clone(), l_stack[i].clone().into());
-      builder.assert_eq(pv[10 + i].clone(), l_mem[i].clone().into());
+      builder.when_first_row().assert_eq(pv[2  + i].clone(), l_stack[i].clone().into());
+      builder.when_first_row().assert_eq(pv[10 + i].clone(), l_mem[i].clone().into());
     }
-    builder.assert_eq(pv[18].clone(), r_pc.into());
-    builder.assert_eq(pv[19].clone(), r_sp.into());
+    builder.when_first_row().assert_eq(pv[18].clone(), r_pc.into());
+    builder.when_first_row().assert_eq(pv[19].clone(), r_sp.into());
     for i in 0..8 {
-      builder.assert_eq(pv[20 + i].clone(), r_stack[i].clone().into());
-      builder.assert_eq(pv[28 + i].clone(), r_mem[i].clone().into());
+      builder.when_first_row().assert_eq(pv[20 + i].clone(), r_stack[i].clone().into());
+      builder.when_first_row().assert_eq(pv[28 + i].clone(), r_mem[i].clone().into());
     }
   }
 }

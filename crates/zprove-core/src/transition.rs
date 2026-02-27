@@ -31,7 +31,7 @@ use crate::zk_proof::{
   validate_manifest_rows, verify_batch_lut_with_prep, verify_keccak_consistency,
   verify_memory_consistency, verify_stack_consistency, verify_storage_consistency,
   verify_stack_ir_with_prep, validate_keccak_memory_cross_check,
-  StateCommitment, commit_vm_state, verify_link_stark,
+  StateCommitment, commit_vm_state, prove_link_stark, verify_link_stark,
 };
 use p3_uni_stark::PreprocessedVerifierKey;
 use revm::bytecode::opcode;
@@ -1538,8 +1538,13 @@ pub struct LeafReceipt {
   pub s_in: StateCommitment,
   /// VM state commitment at segment exit.
   pub s_out: StateCommitment,
-  /// The batch STARK proof covering all instructions in this segment.
-  pub batch_receipt: BatchTransactionZkReceipt,
+  /// The batch STARK proof covering all arithmetic instructions in this
+  /// segment.  `None` when the segment has no arithmetic opcodes (pure
+  /// structural instructions like JUMP/PUSH need no batch proof).
+  pub batch_receipt: Option<BatchTransactionZkReceipt>,
+  /// Raw step proofs for this segment — required by the verifier to
+  /// reconstruct [`InstructionTransitionStatement`]s from stored data.
+  pub steps: Vec<InstructionTransitionProof>,
 }
 
 /// Aggregation of two adjacent [`ExecutionReceipt`]s via a LinkAir STARK.
@@ -1689,41 +1694,117 @@ pub fn verify_sub_call_claim(
 
 // ── Phase 2: Execution chain proving / verification ───────────────────
 
-/// Split execution into window-sized segments and aggregate via binary-tree
-/// [`LinkAir`](crate::zk_proof::LinkAir) STARKs.
+/// Split execution into window-sized segments, prove each segment with a
+/// [`BatchTransactionZkReceipt`] (skipping pure-structural segments), then
+/// aggregates all leaves into a binary tree via [`LinkAir`] link STARKs.
 ///
-/// **Stub — `commit_vm_state` must be implemented first.**
-///
-/// # Expected arguments
-/// - `vm_state_seq`: one [`VmState`] snapshot per segment boundary (length = K+1 for K segments).
-/// - `receipts`:     one [`BatchTransactionZkReceipt`] per segment (length = K).
+/// # Arguments
+/// - `vm_state_seq`: K+1 [`VmState`] boundary snapshots for K segments.
+/// - `step_seqs`:    K segment step vectors (one per segment).
 ///
 /// # Returns
 /// The root [`ExecutionReceipt`] of the binary aggregation tree.
 pub fn prove_execution_chain(
-  _vm_state_seq: &[VmState],
-  _receipts: Vec<BatchTransactionZkReceipt>,
+  vm_state_seq: &[VmState],
+  step_seqs: Vec<Vec<InstructionTransitionProof>>,
 ) -> Result<ExecutionReceipt, String> {
-  todo!("Phase 2: implement window segmentation + binary LinkAir tree aggregation")
+  let n = step_seqs.len();
+  if n == 0 {
+    return Err("prove_execution_chain: no segments".to_string());
+  }
+  if vm_state_seq.len() != n + 1 {
+    return Err(format!(
+      "prove_execution_chain: expected {} VmState boundaries for {} segments, got {}",
+      n + 1,
+      n,
+      vm_state_seq.len()
+    ));
+  }
+
+  // Step 1: Commit all boundary states at once.
+  let commitments: Vec<StateCommitment> =
+    vm_state_seq.iter().map(commit_vm_state).collect();
+
+  // Step 2: Build one LeafReceipt per segment.
+  let mut nodes: Vec<ExecutionReceipt> = Vec::with_capacity(n);
+  for (i, steps) in step_seqs.into_iter().enumerate() {
+    let has_semantic = steps.iter().any(|s| s.semantic_proof.is_some());
+    let batch_receipt = if has_semantic {
+      Some(prove_batch_transaction_zk_receipt(&steps)?)
+    } else {
+      None
+    };
+    let leaf = LeafReceipt {
+      s_in: commitments[i].clone(),
+      s_out: commitments[i + 1].clone(),
+      batch_receipt,
+      steps,
+    };
+    nodes.push(ExecutionReceipt::Leaf(leaf));
+  }
+
+  // Step 3: Binary tree aggregation — repeatedly merge adjacent pairs.
+  while nodes.len() > 1 {
+    let mut new_nodes: Vec<ExecutionReceipt> = Vec::with_capacity((nodes.len() + 1) / 2);
+    let mut iter = nodes.into_iter();
+    loop {
+      match (iter.next(), iter.next()) {
+        (Some(left), Some(right)) => {
+          // The link STARK binds the junction: left.s_out must equal right.s_in.
+          let junction = [(left.s_out().clone(), right.s_in().clone())];
+          let link_proof = prove_link_stark(&junction, left.s_out(), right.s_in());
+          let s_in = left.s_in().clone();
+          let s_out = right.s_out().clone();
+          new_nodes.push(ExecutionReceipt::Aggregated(AggregationReceipt {
+            s_in,
+            s_out,
+            link_proof,
+            left: Box::new(left),
+            right: Box::new(right),
+          }));
+        }
+        (Some(odd), None) => {
+          // Odd node carries forward unchanged.
+          new_nodes.push(odd);
+          break;
+        }
+        (None, _) => break,
+      }
+    }
+    nodes = new_nodes;
+  }
+
+  Ok(nodes.remove(0))
 }
 
 /// Recursively verify an [`ExecutionReceipt`] tree.
 ///
-/// - **Leaf**: calls [`verify_batch_transaction_zk_receipt`].
-/// - **Aggregated**: calls [`verify_link_stark`] then recurses into `left` and `right`.
-///
-/// **Stub — `verify_link_stark` is wired but `commit_vm_state` is not yet
-/// implemented, so leaf verification cannot reconstruct `s_in`/`s_out` yet.**
+/// - **Leaf**: reconstructs [`InstructionTransitionStatement`]s from the stored
+///   steps and calls [`verify_batch_transaction_zk_receipt`] (when a batch
+///   receipt is present).
+/// - **Aggregated**: verifies the junction link proof via [`verify_link_stark`]
+///   using the actual junction states (`left.s_out`, `right.s_in`), then
+///   recurses into both sub-receipts.
 pub fn verify_execution_receipt(receipt: &ExecutionReceipt) -> Result<(), String> {
   match receipt {
     ExecutionReceipt::Leaf(leaf) => {
-      // TODO (Phase 2): supply real InstructionTransitionStatements here.
-      // For now, flag the leaf as structurally valid but proof-unverified.
-      let _ = &leaf.batch_receipt;
-      todo!("Phase 2: wire InstructionTransitionStatements for leaf batch receipt")
+      if let Some(batch_receipt) = &leaf.batch_receipt {
+        let stmts: Vec<InstructionTransitionStatement> = leaf
+          .steps
+          .iter()
+          .filter(|s| s.semantic_proof.is_some())
+          .map(statement_from_proof_step)
+          .collect();
+        if !verify_batch_transaction_zk_receipt(&stmts, batch_receipt) {
+          return Err("Leaf batch receipt verification failed".to_string());
+        }
+      }
+      Ok(())
     }
     ExecutionReceipt::Aggregated(agg) => {
-      verify_link_stark(&agg.link_proof, &agg.s_in, &agg.s_out)
+      // Verify the link at the junction (left.s_out ↔ right.s_in), NOT the
+      // overall chain boundaries — that is the public value the proof encodes.
+      verify_link_stark(&agg.link_proof, agg.left.s_out(), agg.right.s_in())
         .map_err(|e| format!("LinkAir verify failed: {:?}", e))?;
       verify_execution_receipt(&agg.left)?;
       verify_execution_receipt(&agg.right)?;

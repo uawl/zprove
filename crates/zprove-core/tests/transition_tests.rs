@@ -5064,3 +5064,161 @@ fn test_phase1_oracle_sub_call_accepted() {
     "oracle-mode sub-call (inner_proof=None) must always be accepted"
   );
 }
+
+// ── Phase 2: Execution chain proving / verification ────────────────────────
+
+#[cfg(test)]
+mod phase2_chain_tests {
+  use revm::primitives::{Bytes, U256};
+  use zprove_core::execute::execute_bytecode_and_prove_chain;
+  use zprove_core::transition::{ExecutionReceipt, verify_execution_receipt, VmState};
+  use zprove_core::zk_proof::{commit_vm_state, prove_link_stark};
+
+  /// Helper: construct a minimal VmState with an empty stack and zero memory root.
+  fn empty_vm_state(pc: usize) -> VmState {
+    VmState { opcode: 0x00, pc, sp: 0, stack: vec![], memory_root: [0u8; 32] }
+  }
+
+  fn u256_bytes(v: u128) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    b[16..32].copy_from_slice(&v.to_be_bytes());
+    b
+  }
+
+  // ── Test 1: commit_vm_state is deterministic ──────────────────────────────
+
+  #[test]
+  fn test_phase2_commit_vm_state_deterministic() {
+    let s = empty_vm_state(0);
+    let c1 = commit_vm_state(&s);
+    let c2 = commit_vm_state(&s);
+    assert_eq!(c1.pc, c2.pc);
+    assert_eq!(c1.sp, c2.sp);
+    assert_eq!(c1.stack_hash, c2.stack_hash);
+    assert_eq!(c1.memory_root, c2.memory_root);
+  }
+
+  // ── Test 2: commit_vm_state changes when state changes ───────────────────
+
+  #[test]
+  fn test_phase2_commit_vm_state_sensitive_to_stack() {
+    let s0 = empty_vm_state(0);
+    let s1 = VmState {
+      opcode: 0x00,
+      pc: 0,
+      sp: 1,
+      stack: vec![u256_bytes(42)],
+      memory_root: [0u8; 32],
+    };
+    let c0 = commit_vm_state(&s0);
+    let c1 = commit_vm_state(&s1);
+    // Different stack depth → different hash
+    assert_ne!(c0.stack_hash, c1.stack_hash, "stack hash must differ for different stacks");
+  }
+
+  // ── Test 3: prove_link_stark / verify round-trip ─────────────────────────
+
+  /// The LinkAir junction constraint requires both sides of a link to have the
+  /// same state commitment.  In `prove_execution_chain` this is satisfied
+  /// automatically because `left.s_out == right.s_in` at every junction.
+  /// Here we test that property directly: create a single junction state and use
+  /// it on both sides of the link.
+  #[test]
+  fn test_phase2_link_stark_roundtrip() {
+    use zprove_core::zk_proof::verify_link_stark;
+
+    // A junction state: the state that appears at the boundary between two
+    // adjacent segments (left.s_out == right.s_in == junction).
+    let junction = commit_vm_state(&empty_vm_state(5));
+
+    // prove_link_stark expects (junction, junction) pairs and s_in = s_out = junction.
+    let proof = prove_link_stark(
+      &[(junction.clone(), junction.clone())],
+      &junction,
+      &junction,
+    );
+    verify_link_stark(&proof, &junction, &junction)
+      .expect("verify_link_stark must accept a freshly generated proof");
+  }
+
+  // ── Test 4: end-to-end chain prove + verify (3 segments) ─────────────────
+
+  /// Bytecode: PUSH1 3, PUSH1 5, ADD, PUSH1 2, MUL, STOP
+  /// With window_size=2 we get 3 windows → 3 leaves → 2-level tree.
+  #[test]
+  fn test_phase2_prove_verify_execution_chain_3_segments() {
+    // PUSH1 3, PUSH1 5, ADD, PUSH1 2, MUL, STOP
+    let bytecode = Bytes::from(vec![
+      0x60, 0x03,  // PUSH1 3
+      0x60, 0x05,  // PUSH1 5
+      0x01,        // ADD
+      0x60, 0x02,  // PUSH1 2
+      0x02,        // MUL
+      0x00,        // STOP
+    ]);
+    let receipt = execute_bytecode_and_prove_chain(
+      bytecode,
+      Bytes::new(),
+      U256::ZERO,
+      2, // window_size = 2 → 5 steps / 2 = 3 windows
+    )
+    .expect("prove_chain must succeed");
+
+    verify_execution_receipt(&receipt)
+      .expect("verify_execution_receipt must accept a freshly generated chain receipt");
+  }
+
+  // ── Test 5: single-segment chain (window wider than execution) ───────────
+
+  #[test]
+  fn test_phase2_single_segment_chain() {
+    // PUSH1 10, PUSH1 20, ADD, STOP  (4 steps, window_size=100 → 1 leaf)
+    let bytecode = Bytes::from(vec![
+      0x60, 0x0A,  // PUSH1 10
+      0x60, 0x14,  // PUSH1 20
+      0x01,        // ADD
+      0x00,        // STOP
+    ]);
+    let receipt = execute_bytecode_and_prove_chain(
+      bytecode,
+      Bytes::new(),
+      U256::ZERO,
+      100,
+    )
+    .expect("single-segment prove_chain must succeed");
+
+    // A single segment → always a leaf
+    assert!(
+      matches!(receipt, ExecutionReceipt::Leaf(_)),
+      "single window must produce a Leaf receipt"
+    );
+
+    verify_execution_receipt(&receipt)
+      .expect("leaf receipt must verify");
+  }
+
+  // ── Test 6: tampered commitment is rejected ───────────────────────────────
+
+  /// Verify that `verify_link_stark` rejects a proof when the public-value
+  /// commitments do not match. We build a valid proof with `junction` as both
+  /// s_in and s_out, then verify with a different commitment.
+  #[test]
+  fn test_phase2_tampered_commitment_rejected() {
+    use zprove_core::zk_proof::verify_link_stark;
+
+    let junction = commit_vm_state(&empty_vm_state(5));
+    let proof = prove_link_stark(
+      &[(junction.clone(), junction.clone())],
+      &junction,
+      &junction,
+    );
+
+    // Try verifying with a completely different commitment
+    let wrong = commit_vm_state(&empty_vm_state(99));
+    let result = verify_link_stark(&proof, &wrong, &junction);
+    assert!(
+      result.is_err(),
+      "verify_link_stark must reject a proof verified with a mismatched commitment"
+    );
+  }
+}
