@@ -242,6 +242,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      sub_call_claim: None,
     };
 
     let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
@@ -293,6 +294,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      sub_call_claim: None,
     };
 
     assert!(!verify_instruction_zk_receipt(&wrong_statement, &receipt));
@@ -367,6 +369,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      sub_call_claim: None,
     };
 
     assert!(!verify_instruction_zk_receipt(
@@ -417,6 +420,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      sub_call_claim: None,
     };
 
     assert!(!verify_instruction_zk_receipt(
@@ -466,6 +470,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      sub_call_claim: None,
     };
 
     let mut receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
@@ -517,6 +522,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      sub_call_claim: None,
     };
 
     let mut receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
@@ -588,6 +594,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      sub_call_claim: None,
     };
 
     let mut receipt1 = prove_instruction_zk_receipt(&itp1).expect("receipt proving should succeed");
@@ -659,6 +666,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      sub_call_claim: None,
     };
 
     let mut receipt1 = prove_instruction_zk_receipt(&itp1).expect("receipt proving should succeed");
@@ -733,6 +741,7 @@ mod tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      sub_call_claim: None,
     };
 
     let mut receipt1 = prove_instruction_zk_receipt(&itp1).expect("receipt proving should succeed");
@@ -773,6 +782,7 @@ mod tests {
         merkle_path_before: vec![[1u8; 32]],
         merkle_path_after: Vec::new(),
       }],
+      sub_call_claim: None,
     };
     assert!(verify_statement_semantics(&statement));
   }
@@ -808,6 +818,7 @@ mod tests {
         merkle_path_before: vec![[2u8; 32]],
         merkle_path_after: vec![[2u8; 32]],
       }],
+      sub_call_claim: None,
     };
     assert!(verify_statement_semantics(&statement));
   }
@@ -849,6 +860,7 @@ mod tests {
         merkle_path_before: vec![[3u8; 32]],
         merkle_path_after: vec![[3u8; 32]],
       }],
+      sub_call_claim: None,
     };
     assert!(verify_statement_semantics(&statement));
   }
@@ -4301,6 +4313,7 @@ mod subcall_opcode_tests {
       value: u256(0),
       return_data: vec![],
       success: true,
+      depth: 0,
       inner_proof: None,
     }
   }
@@ -4794,4 +4807,260 @@ fn test_stack_consistency_intra_batch_logup() {
   let proof = prove_stack_consistency(&claims).expect("prove failed");
   let ok = verify_stack_consistency(&proof);
   assert!(ok, "stack LogUp intra-batch push-pop must verify");
+}
+
+// ============================================================
+// Phase 1 — SubCall recursive verification tests (Gap 5)
+// ============================================================
+
+/// Helper: build the minimal valid `InstructionTransitionProof` for a single
+/// `prove_instruction(ADD, a+b=c)` step, with the given program counter.
+fn make_add_itp(pc: usize, a: u128, b: u128, c: u128) -> zprove_core::transition::InstructionTransitionProof {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{InstructionTransitionProof, prove_instruction};
+
+  let mut av = [0u8; 32];
+  let mut bv = [0u8; 32];
+  let mut cv = [0u8; 32];
+  av[16..].copy_from_slice(&a.to_be_bytes());
+  bv[16..].copy_from_slice(&b.to_be_bytes());
+  cv[16..].copy_from_slice(&c.to_be_bytes());
+
+  let proof = prove_instruction(opcode::ADD, &[av, bv], &[cv]).expect("prove ADD");
+  InstructionTransitionProof {
+    opcode: opcode::ADD,
+    pc,
+    stack_inputs: vec![av, bv],
+    stack_outputs: vec![cv],
+    semantic_proof: Some(proof),
+    memory_claims: vec![],
+    storage_claims: vec![],
+    stack_claims: vec![],
+    return_data_claim: None,
+    call_context_claim: None,
+    keccak_claim: None,
+    external_state_claim: None,
+    sub_call_claim: None,
+  }
+}
+
+/// Helper: build a minimal `InstructionTransitionProof` for a RETURN step
+/// that records the given return_data bytes.
+fn make_return_itp(
+  pc: usize,
+  return_data: Vec<u8>,
+  is_revert: bool,
+) -> zprove_core::transition::InstructionTransitionProof {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{InstructionTransitionProof, ReturnDataClaim};
+
+  let op = if is_revert { opcode::REVERT } else { opcode::RETURN };
+  InstructionTransitionProof {
+    opcode: op,
+    pc,
+    stack_inputs: vec![[0u8; 32], {
+      // second argument = size of return data
+      let mut s = [0u8; 32];
+      s[31] = return_data.len() as u8;
+      s
+    }],
+    stack_outputs: vec![],
+    semantic_proof: None,
+    memory_claims: vec![],
+    storage_claims: vec![],
+    stack_claims: vec![],
+    return_data_claim: Some(ReturnDataClaim {
+      is_revert,
+      offset: 0,
+      size: return_data.len() as u64,
+      data: return_data,
+    }),
+    call_context_claim: None,
+    keccak_claim: None,
+    external_state_claim: None,
+    sub_call_claim: None,
+  }
+}
+
+/// Phase 1, test case A:
+/// CALL with successful callee — `verify_sub_call_claim` should pass.
+///
+/// Scenario: caller holds a `SubCallClaim` whose `inner_proof` contains two
+/// ADD instructions followed by a RETURN with the expected `return_data`.
+/// The depth is 0 (top-level TX making the call), which is within bounds.
+#[test]
+fn test_phase1_sub_call_success_verifies() {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    BlockTxContext, InstructionTransitionStatement, SubCallClaim, TransactionProof,
+    VmState, MAX_CALL_DEPTH, verify_sub_call_claim,
+  };
+
+  let return_data = vec![0xAA, 0xBB, 0xCC];
+
+  // Build the callee's inner proof: ADD(1+2=3), ADD(3+4=7), RETURN "aabbcc".
+  let inner_steps = vec![
+    make_add_itp(0, 1, 2, 3),
+    make_add_itp(1, 3, 4, 7),
+    make_return_itp(2, return_data.clone(), false),
+  ];
+
+  let inner_proof = TransactionProof {
+    steps: inner_steps,
+    block_tx_context: BlockTxContext::default(),
+  };
+
+  let claim = SubCallClaim {
+    opcode: opcode::CALL,
+    callee: [0xCA; 20],
+    value: [0u8; 32],
+    return_data: return_data.clone(),
+    success: true,
+    depth: 0,
+    inner_proof: Some(Box::new(inner_proof)),
+  };
+
+  // Outer statements (empty — not used by the current implementation).
+  let outer: Vec<InstructionTransitionStatement> = vec![];
+  assert!(
+    verify_sub_call_claim(&claim, &outer).is_ok(),
+    "successful CALL with matching return_data must verify"
+  );
+}
+
+/// Phase 1, test case B:
+/// CALL with reverted callee — `verify_sub_call_claim` should pass.
+///
+/// A reverting callee is still a valid inner proof; the caller just records
+/// `success: false` and the revert payload in `return_data`.
+#[test]
+fn test_phase1_sub_call_revert_verifies() {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    BlockTxContext, InstructionTransitionStatement, SubCallClaim, TransactionProof,
+    verify_sub_call_claim,
+  };
+
+  let revert_data = vec![0xDE, 0xAD];
+
+  // Callee did a single ADD then reverted.
+  let inner_steps = vec![
+    make_add_itp(0, 100, 200, 300),
+    make_return_itp(1, revert_data.clone(), /* is_revert */ true),
+  ];
+
+  let inner_proof = TransactionProof {
+    steps: inner_steps,
+    block_tx_context: BlockTxContext::default(),
+  };
+
+  let claim = SubCallClaim {
+    opcode: opcode::CALL,
+    callee: [0xBE; 20],
+    value: [0u8; 32],
+    return_data: revert_data.clone(),
+    success: false,
+    depth: 0,
+    inner_proof: Some(Box::new(inner_proof)),
+  };
+
+  let outer: Vec<InstructionTransitionStatement> = vec![];
+  assert!(
+    verify_sub_call_claim(&claim, &outer).is_ok(),
+    "reverted CALL with matching revert_data must verify"
+  );
+}
+
+/// Phase 1 soundness check:
+/// A `SubCallClaim` whose `return_data` disagrees with the callee's RETURN
+/// bytes must be rejected.
+#[test]
+fn test_phase1_sub_call_return_data_mismatch_rejected() {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    BlockTxContext, InstructionTransitionStatement, SubCallClaim, TransactionProof,
+    verify_sub_call_claim,
+  };
+
+  let actual_return = vec![0x01, 0x02, 0x03];
+  let forged_claim_return = vec![0xFF, 0xFF, 0xFF]; // does NOT match
+
+  let inner_steps = vec![
+    make_add_itp(0, 5, 6, 11),
+    make_return_itp(1, actual_return.clone(), false),
+  ];
+
+  let inner_proof = TransactionProof {
+    steps: inner_steps,
+    block_tx_context: BlockTxContext::default(),
+  };
+
+  let claim = SubCallClaim {
+    opcode: opcode::CALL,
+    callee: [0x11; 20],
+    value: [0u8; 32],
+    return_data: forged_claim_return, // forged!
+    success: true,
+    depth: 0,
+    inner_proof: Some(Box::new(inner_proof)),
+  };
+
+  let outer: Vec<InstructionTransitionStatement> = vec![];
+  assert!(
+    verify_sub_call_claim(&claim, &outer).is_err(),
+    "return_data mismatch must be rejected"
+  );
+}
+
+/// Phase 1 soundness check:
+/// A `SubCallClaim` whose `depth` is exactly `MAX_CALL_DEPTH` must be rejected.
+#[test]
+fn test_phase1_sub_call_depth_exceeded_rejected() {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    InstructionTransitionStatement, SubCallClaim, MAX_CALL_DEPTH, verify_sub_call_claim,
+  };
+
+  let claim = SubCallClaim {
+    opcode: opcode::CALL,
+    callee: [0x22; 20],
+    value: [0u8; 32],
+    return_data: vec![],
+    success: false,
+    depth: MAX_CALL_DEPTH, // == 1024, must be rejected
+    inner_proof: None,
+  };
+
+  let outer: Vec<InstructionTransitionStatement> = vec![];
+  assert!(
+    verify_sub_call_claim(&claim, &outer).is_err(),
+    "depth == MAX_CALL_DEPTH must be rejected"
+  );
+}
+
+/// Phase 1 soundness check:
+/// An oracle-mode `SubCallClaim` (`inner_proof: None`) at any valid depth is
+/// accepted — oracle witnesses are allowed at depth < MAX_CALL_DEPTH.
+#[test]
+fn test_phase1_oracle_sub_call_accepted() {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    InstructionTransitionStatement, SubCallClaim, verify_sub_call_claim,
+  };
+
+  let claim = SubCallClaim {
+    opcode: opcode::STATICCALL,
+    callee: [0x33; 20],
+    value: [0u8; 32],
+    return_data: vec![0xAB],
+    success: true,
+    depth: 5,
+    inner_proof: None, // oracle mode
+  };
+
+  let outer: Vec<InstructionTransitionStatement> = vec![];
+  assert!(
+    verify_sub_call_claim(&claim, &outer).is_ok(),
+    "oracle-mode sub-call (inner_proof=None) must always be accepted"
+  );
 }

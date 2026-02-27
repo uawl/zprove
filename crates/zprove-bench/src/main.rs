@@ -5,9 +5,10 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use revm::bytecode::opcode;
 
+use zprove_core::semantic_proof::{compute_addmod, compute_byte, compute_exp, compute_mulmod, compute_signextend};
 use zprove_core::transition::{
-  InstructionTransitionProof, InstructionTransitionStatement, VmState, prove_instruction,
-  prove_batch_transaction_zk_receipt, verify_batch_transaction_zk_receipt,
+  InstructionTransitionProof, InstructionTransitionStatement, VmState, build_batch_manifest,
+  prove_instruction, prove_batch_transaction_zk_receipt, verify_batch_transaction_zk_receipt,
 };
 
 // ============================================================
@@ -19,11 +20,14 @@ struct BenchReport {
   timestamp: String,
   seed: u64,
   samples: usize,
+  log_rows: usize,
   rows: Vec<BatchBenchRow>,
 }
 
 struct BatchBenchRow {
-  n: usize,
+  group: String,
+  rows_per_instr: usize,
+  batch_count: usize,
   prove_us: f64,
   verify_us: f64,
   verify_ok: bool,
@@ -47,11 +51,11 @@ fn render_html(r: &BenchReport) -> String {
   "#;
 
   let meta = format!(
-    "<p>timestamp: <b>{}</b></p><p>seed: <b>{}</b> | samples per opcode: <b>{}</b></p>",
-    r.timestamp, r.seed, r.samples
+    "<p>timestamp: <b>{}</b></p><p>seed: <b>{}</b> | samples per opcode: <b>{}</b> | log_rows (N): <b>{}</b> (max rows/batch = 2^N = {})</p>",
+    r.timestamp, r.seed, r.samples, r.log_rows, 1usize << r.log_rows
   );
 
-  let headers = ["N", "prove µs", "prove/N µs", "verify µs", "verify/N µs", "verify_ok"];
+  let headers = ["opcode group", "rows/instr", "batch count", "prove µs", "prove/instr µs", "verify µs", "verify/instr µs", "verify_ok"];
   let th_row: String = headers.iter().map(|h| format!("<th>{h}</th>")).collect::<String>();
 
   let rows: String = r
@@ -60,14 +64,18 @@ fn render_html(r: &BenchReport) -> String {
     .map(|row| {
       let cls = if row.verify_ok { "ok" } else { "fail" };
       let ok_str = if row.verify_ok { "true" } else { "false" };
+      let n = row.batch_count;
       format!(
-        "<tr><td>{n}</td><td>{p:.1}</td><td>{pp:.1}</td><td>{v:.1}</td><td>{vp:.1}</td>\
+        "<tr><td style=\"text-align:left\">{g}</td><td>{ri}</td><td>{n}</td>\
+         <td>{p:.1}</td><td>{pp:.1}</td><td>{v:.1}</td><td>{vp:.1}</td>\
          <td class=\"{cls}\">{ok}</td></tr>",
-        n = row.n,
-        p = row.prove_us,
-        pp = row.prove_us / row.n as f64,
-        v = row.verify_us,
-        vp = row.verify_us / row.n as f64,
+        g  = row.group,
+        ri = row.rows_per_instr,
+        n  = n,
+        p  = row.prove_us,
+        pp = row.prove_us / n.max(1) as f64,
+        v  = row.verify_us,
+        vp = row.verify_us / n.max(1) as f64,
         cls = cls,
         ok = ok_str,
       )
@@ -456,6 +464,44 @@ fn make_sar_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
   }
 }
 
+fn make_addmod_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
+  let a = random_bytes32(rng);
+  let b = random_bytes32(rng);
+  let n = random_bytes32(rng);
+  let out = compute_addmod(&a, &b, &n);
+  BenchCase { group: "ADDMOD", opcode: opcode::ADDMOD, inputs: vec![a, b, n], output: out }
+}
+
+fn make_mulmod_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
+  let a = random_bytes32(rng);
+  let b = random_bytes32(rng);
+  let n = random_bytes32(rng);
+  let out = compute_mulmod(&a, &b, &n);
+  BenchCase { group: "MULMOD", opcode: opcode::MULMOD, inputs: vec![a, b, n], output: out }
+}
+
+fn make_exp_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
+  // Small base/exponent to keep bench runtime reasonable.
+  let base = u256_bytes(rng.random::<u16>() as u128);
+  let exp  = u256_bytes(rng.random::<u8>()  as u128);
+  let out  = compute_exp(&base, &exp);
+  BenchCase { group: "EXP", opcode: opcode::EXP, inputs: vec![base, exp], output: out }
+}
+
+fn make_byte_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
+  let i = u256_bytes((rng.random::<u8>() % 32) as u128);
+  let x = random_bytes32(rng);
+  let out = compute_byte(&i, &x);
+  BenchCase { group: "BYTE", opcode: opcode::BYTE, inputs: vec![i, x], output: out }
+}
+
+fn make_signextend_case(rng: &mut StdRng, _idx: usize) -> BenchCase {
+  let b = u256_bytes((rng.random::<u8>() % 32) as u128);
+  let x = random_bytes32(rng);
+  let out = compute_signextend(&b, &x);
+  BenchCase { group: "SIGNEXTEND", opcode: opcode::SIGNEXTEND, inputs: vec![b, x], output: out }
+}
+
 static CASE_GENERATORS: &[CaseGen] = &[
   make_add_case,
   make_sub_case,
@@ -478,6 +524,11 @@ static CASE_GENERATORS: &[CaseGen] = &[
   make_shl_case,
   make_shr_case,
   make_sar_case,
+  make_addmod_case,
+  make_mulmod_case,
+  make_exp_case,
+  make_byte_case,
+  make_signextend_case,
 ];
 
 fn bench_cases(samples: usize, seed: u64) -> Vec<BenchCase> {
@@ -532,6 +583,7 @@ fn build_statement(case: &BenchCase) -> InstructionTransitionStatement {
       memory_root: [0u8; 32],
     },
     accesses: Vec::new(),
+    sub_call_claim: None,
   }
 }
 
@@ -609,57 +661,97 @@ fn utc_timestamp() -> String {
 
 fn main() {
   let args: Vec<String> = std::env::args().collect();
-  let samples = parse_arg_usize(&args, "--samples", 3);
-  let iters = parse_arg_usize(&args, "--iters", 1);
-  let seed_opt = parse_arg_opt_u64(&args, "--seed");
+  let samples   = parse_arg_usize(&args, "--samples",  3);
+  let iters     = parse_arg_usize(&args, "--iters",    1);
+  let log_rows  = parse_arg_usize(&args, "--log-rows", 10);
+  let seed_opt  = parse_arg_opt_u64(&args, "--seed");
   let seed = seed_opt.unwrap_or_else(rand::random::<u64>);
+  let max_rows: usize = 1 << log_rows;
 
   println!("zprove batch bench");
   match seed_opt {
-    Some(s) => println!("  seed    : {s} (fixed)"),
-    None => println!("  seed    : {seed} (random)"),
+    Some(s) => println!("  seed     : {s} (fixed)"),
+    None    => println!("  seed     : {seed} (random)"),
   }
-  println!("  samples : {samples}  (per opcode)");
-  println!("  iters   : {iters}  (repetitions per batch size)");
+  println!("  samples  : {samples}  (per opcode)");
+  println!("  iters    : {iters}  (repetitions per bench point)");
+  println!("  log-rows : {log_rows}  (max rows/batch = 2^N = {max_rows})");
 
-  // ── Build ITPs ─────────────────────────────────────────────────────────────
-  let cases = bench_cases(samples, seed);
-  let pairs: Vec<(InstructionTransitionProof, InstructionTransitionStatement)> = cases
-    .iter()
-    .filter_map(|c| Some((build_itp(c)?, build_statement(c))))
-    .collect();
-
-  if pairs.is_empty() {
-    eprintln!("no valid ITPs — check opcode implementations");
-    return;
-  }
-  println!("  itps    : {} (from {} cases)", pairs.len(), cases.len());
-
-  // ── Batch prove / verify ───────────────────────────────────────────────────
-  let batch_sizes = [1usize, 2, 4, 8, 16, 32];
+  // ── Build one sample case per generator to count rows ────────────────────
+  //
+  // We probe row count with a single fixed-seed sample; the row count for a
+  // given opcode is structural (independent of input values).
+  let probe_seed = seed ^ 0xdead_beef_cafe;
+  let probe_cases = bench_cases(1, probe_seed);
 
   println!();
   println!("── prove_batch_transaction_zk_receipt / verify_batch_transaction_zk_receipt ──");
+  println!("   (N = {log_rows}, max rows/batch = {max_rows})");
   println!(
-    "  {:>5}  {:>12}  {:>12}  {:>12}  {:>12}  {:>10}",
-    "N", "prove µs", "prove/N µs", "verify µs", "verify/N µs", "verify_ok"
+    "  {:<16}  {:>10}  {:>6}  {:>12}  {:>12}  {:>12}  {:>12}  {:>10}",
+    "group", "rows/instr", "batch", "prove µs", "prove/instr", "verify µs", "verify/instr", "verify_ok"
   );
-  println!("  {}", "─".repeat(70));
+  println!("  {}", "─".repeat(100));
 
   let mut report = BenchReport {
     timestamp: utc_timestamp(),
     seed,
     samples,
+    log_rows,
     rows: Vec::new(),
   };
 
-  for &n in &batch_sizes {
-    let batch_itps: Vec<InstructionTransitionProof> =
-      pairs.iter().map(|(itp, _)| itp.clone()).cycle().take(n).collect();
-    let batch_stmts: Vec<InstructionTransitionStatement> =
-      pairs.iter().map(|(_, stmt)| stmt.clone()).cycle().take(n).collect();
+  for (gen_idx, make_case) in CASE_GENERATORS.iter().enumerate() {
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ (gen_idx as u64));
 
-    // ── prove (best of iters) ──────────────────────────────────────────────
+    // ── Probe row count for this opcode ───────────────────────────────────
+    let probe = probe_cases.get(gen_idx).cloned().unwrap_or_else(|| {
+      make_case(&mut rand::rngs::StdRng::seed_from_u64(probe_seed), gen_idx)
+    });
+    let rows_per_instr = match prove_instruction(probe.opcode, &probe.inputs, &[probe.output]) {
+      Some(p) => match build_batch_manifest(&[(probe.opcode, &p)]) {
+        Ok(m) => m.entries.first().map_or(1, |e| e.row_count.max(1)),
+        Err(_) => 1,
+      },
+      None => {
+        eprintln!("  {:<16} : skipped (prove_instruction returned None)", probe.group);
+        continue;
+      }
+    };
+
+    // batch_count = largest k such that k * rows_per_instr < 2^N
+    let batch_count = if rows_per_instr >= max_rows {
+      1
+    } else {
+      ((max_rows - 1) / rows_per_instr).max(1)
+    };
+
+    // ── Generate `samples` cases for this generator, cycling for batch ────
+    let mut seed_cases: Vec<BenchCase> = (0..samples)
+      .map(|i| make_case(&mut rng, i))
+      .collect();
+    if seed_cases.is_empty() {
+      seed_cases.push(make_case(&mut rng, 0));
+    }
+    let batch_itps: Vec<InstructionTransitionProof> = seed_cases
+      .iter()
+      .cycle()
+      .take(batch_count)
+      .filter_map(|c| build_itp(c))
+      .collect();
+    let batch_stmts: Vec<InstructionTransitionStatement> = seed_cases
+      .iter()
+      .cycle()
+      .take(batch_count)
+      .map(|c| build_statement(c))
+      .collect();
+    if batch_itps.is_empty() {
+      eprintln!("  {:<16} : skipped (no valid ITPs)", probe.group);
+      continue;
+    }
+    let actual_count = batch_itps.len();
+
+    // ── prove (best of iters) ─────────────────────────────────────────────
     let mut prove_us = f64::MAX;
     let mut last_receipt = None;
     for _ in 0..iters {
@@ -673,7 +765,7 @@ fn main() {
           last_receipt = Some(receipt);
         }
         Err(e) => {
-          eprintln!("  n={n}: prove failed: {e}");
+          eprintln!("  {:<16} : prove failed: {e}", probe.group);
           break;
         }
       }
@@ -683,7 +775,7 @@ fn main() {
       None => continue,
     };
 
-    // ── verify (best of iters) ─────────────────────────────────────────────
+    // ── verify (best of iters) ────────────────────────────────────────────
     let mut verify_us = f64::MAX;
     let mut verify_ok = false;
     for _ in 0..iters {
@@ -700,15 +792,24 @@ fn main() {
     }
 
     println!(
-      "  {:>5}  {:>12.1}  {:>12.1}  {:>12.1}  {:>12.1}  {:>10}",
-      n,
+      "  {:<16}  {:>10}  {:>6}  {:>12.1}  {:>12.1}  {:>12.1}  {:>12.1}  {:>10}",
+      probe.group,
+      rows_per_instr,
+      actual_count,
       prove_us,
-      prove_us / n as f64,
+      prove_us / actual_count as f64,
       verify_us,
-      verify_us / n as f64,
+      verify_us / actual_count as f64,
       verify_ok,
     );
-    report.rows.push(BatchBenchRow { n, prove_us, verify_us, verify_ok });
+    report.rows.push(BatchBenchRow {
+      group: probe.group.to_string(),
+      rows_per_instr,
+      batch_count: actual_count,
+      prove_us,
+      verify_us,
+      verify_ok,
+    });
   }
 
   write_html_report(&report);

@@ -1,6 +1,15 @@
 use revm_primitives::U256;
 use serde::Serialize;
-use std::{array, fmt};
+use std::{array, collections::HashMap, fmt};
+
+/// CSE memo for `compile_proof_inner` / `compile_term_inner`.
+///
+/// Key: `(op, scalar0, scalar1, scalar2)` — uniquely identifies any *leaf* row
+/// (those with no child-row operands).  Non-leaf rows (AndIntro, EqTrans, …)
+/// are never cached: their identity depends on child row indices which shift
+/// whenever the rows vec grows.
+/// CSE key: (op, arg0, arg1, arg2, scalar0, scalar1, scalar2)
+type Memo = HashMap<(u32, u32, u32, u32, u32, u32, u32), u32>;
 
 // ============================================================
 // Types
@@ -2291,440 +2300,320 @@ pub fn wff_exp(a: &[u8; 32], b: &[u8; 32], out: &[u8; 32]) -> WFF {
 // Compiling: Tree → Vec<ProofRow>
 // ============================================================
 
-fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>) -> u32 {
+fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) -> u32 {
   match term {
     Term::Bool(v) => {
-      let idx = rows.len() as u32;
       let val = *v as u32;
-      rows.push(ProofRow {
-        op: OP_BOOL,
-        scalar0: val,
-        value: val,
-        ret_ty: RET_BOOL,
-        ..Default::default()
-      });
+      let key = (OP_BOOL, 0, 0, 0, val, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow { op: OP_BOOL, scalar0: val, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::Not(a) => {
-      let ai = compile_term_inner(a, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let key = (OP_NOT, ai, 0, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let val = 1 - rows[ai as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_NOT,
-        arg0: ai,
-        value: val,
-        ret_ty: RET_BOOL,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_NOT, arg0: ai, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::And(a, b) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_AND, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let val = rows[ai as usize].value * rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_AND,
-        arg0: ai,
-        arg1: bi,
-        value: val,
-        ret_ty: RET_BOOL,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_AND, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::Or(a, b) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_OR, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let (av, bv) = (rows[ai as usize].value, rows[bi as usize].value);
       let val = av + bv - av * bv;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_OR,
-        arg0: ai,
-        arg1: bi,
-        value: val,
-        ret_ty: RET_BOOL,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_OR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::Xor(a, b) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_XOR, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let (av, bv) = (rows[ai as usize].value, rows[bi as usize].value);
       let val = av + bv - 2 * av * bv;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_XOR,
-        arg0: ai,
-        arg1: bi,
-        value: val,
-        ret_ty: RET_BOOL,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_XOR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::Ite(c, a, b) => {
-      let ci = compile_term_inner(c, rows);
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
+      let ci = compile_term_inner(c, rows, memo);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_ITE, ci, ai, bi, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let cv = rows[ci as usize].value;
       let (av, bv) = (rows[ai as usize].value, rows[bi as usize].value);
       let val = cv * av + (1 - cv) * bv;
-      let ret = rows[ai as usize].ret_ty; // branches have same type
+      let ret = rows[ai as usize].ret_ty;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_ITE,
-        arg0: ci,
-        arg1: ai,
-        arg2: bi,
-        value: val,
-        ret_ty: ret,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_ITE, arg0: ci, arg1: ai, arg2: bi, value: val, ret_ty: ret, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::Byte(v) => {
+      let key = (OP_BYTE, 0, 0, 0, *v as u32, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE,
-        scalar0: *v as u32,
-        value: *v as u32,
-        ret_ty: RET_BYTE,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE, scalar0: *v as u32, value: *v as u32, ret_ty: RET_BYTE, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::ByteAdd(a, b, c) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
-      let ci = compile_term_inner(c, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let ci = compile_term_inner(c, rows, memo);
+      let key = (OP_BYTE_ADD, ai, bi, ci, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let total = rows[ai as usize].value + rows[bi as usize].value + rows[ci as usize].value;
       let val = total & 0xFF;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_ADD,
-        arg0: ai,
-        arg1: bi,
-        arg2: ci,
-        value: val,
-        ret_ty: RET_BYTE,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_ADD, arg0: ai, arg1: bi, arg2: ci, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::ByteAddCarry(a, b, c) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
-      let ci = compile_term_inner(c, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let ci = compile_term_inner(c, rows, memo);
+      let key = (OP_BYTE_ADD_CARRY, ai, bi, ci, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let total = rows[ai as usize].value + rows[bi as usize].value + rows[ci as usize].value;
       let val = if total >= 256 { 1 } else { 0 };
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_ADD_CARRY,
-        arg0: ai,
-        arg1: bi,
-        arg2: ci,
-        value: val,
-        ret_ty: RET_BOOL,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_ADD_CARRY, arg0: ai, arg1: bi, arg2: ci, value: val, ret_ty: RET_BOOL, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::ByteMulLow(a, b) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_BYTE_MUL_LOW, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let val = (rows[ai as usize].value * rows[bi as usize].value) & 0xFF;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_MUL_LOW,
-        arg0: ai,
-        arg1: bi,
-        value: val,
-        ret_ty: RET_BYTE,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_MUL_LOW, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::ByteMulHigh(a, b) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_BYTE_MUL_HIGH, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let val = (rows[ai as usize].value * rows[bi as usize].value) >> 8;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_MUL_HIGH,
-        arg0: ai,
-        arg1: bi,
-        value: val,
-        ret_ty: RET_BYTE,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_MUL_HIGH, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::ByteAnd(a, b) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_BYTE_AND, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let val = rows[ai as usize].value & rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_AND,
-        arg0: ai,
-        arg1: bi,
-        value: val,
-        ret_ty: RET_BYTE,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_AND, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::ByteOr(a, b) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_BYTE_OR, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let val = rows[ai as usize].value | rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_OR,
-        arg0: ai,
-        arg1: bi,
-        value: val,
-        ret_ty: RET_BYTE,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_OR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Term::ByteXor(a, b) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_BYTE_XOR, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let val = rows[ai as usize].value ^ rows[bi as usize].value;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_XOR,
-        arg0: ai,
-        arg1: bi,
-        value: val,
-        ret_ty: RET_BYTE,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_XOR, arg0: ai, arg1: bi, value: val, ret_ty: RET_BYTE, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
   }
 }
 
-fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
+fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>, memo: &mut Memo) -> u32 {
   match proof {
     Proof::AndIntro(p1, p2) => {
-      let p1i = compile_proof_inner(p1, rows);
-      let p2i = compile_proof_inner(p2, rows);
+      let p1i = compile_proof_inner(p1, rows, memo);
+      let p2i = compile_proof_inner(p2, rows, memo);
+      let key = (OP_AND_INTRO, p1i, p2i, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_AND_INTRO,
-        arg0: p1i,
-        arg1: p2i,
-        ret_ty: RET_WFF_AND,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_AND_INTRO, arg0: p1i, arg1: p2i, ret_ty: RET_WFF_AND, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::EqRefl(t) => {
-      let ti = compile_term_inner(t, rows);
+      let ti = compile_term_inner(t, rows, memo);
+      let key = (OP_EQ_REFL, ti, 0, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_EQ_REFL,
-        arg0: ti,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_EQ_REFL, arg0: ti, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::EqSym(p) => {
-      let pi = compile_proof_inner(p, rows);
+      let pi = compile_proof_inner(p, rows, memo);
+      let key = (OP_EQ_SYM, pi, 0, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_EQ_SYM,
-        arg0: pi,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_EQ_SYM, arg0: pi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::EqTrans(p1, p2) => {
-      let p1i = compile_proof_inner(p1, rows);
-      let p2i = compile_proof_inner(p2, rows);
+      let p1i = compile_proof_inner(p1, rows, memo);
+      let p2i = compile_proof_inner(p2, rows, memo);
+      let key = (OP_EQ_TRANS, p1i, p2i, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_EQ_TRANS,
-        arg0: p1i,
-        arg1: p2i,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_EQ_TRANS, arg0: p1i, arg1: p2i, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::ByteAndEq(a, b) => {
+      let key = (OP_BYTE_AND_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_AND_EQ,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        value: (*a & *b) as u32,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_AND_EQ, scalar0: *a as u32, scalar1: *b as u32, value: (*a & *b) as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::ByteOrEq(a, b) => {
+      let key = (OP_BYTE_OR_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_OR_EQ,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        value: (*a | *b) as u32,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_OR_EQ, scalar0: *a as u32, scalar1: *b as u32, value: (*a | *b) as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::ByteXorEq(a, b) => {
+      let key = (OP_BYTE_XOR_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_XOR_EQ,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        value: (*a ^ *b) as u32,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_XOR_EQ, scalar0: *a as u32, scalar1: *b as u32, value: (*a ^ *b) as u32, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::U29AddEq(a, b, cin, c) => {
       let carry_in = *cin as u32;
+      let key = (OP_U29_ADD_EQ, 0, 0, 0, *a, *b, carry_in);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let total = *a + *b + carry_in;
       let sum29 = total & ((1u32 << 29) - 1);
       let carry_out = if total >= (1u32 << 29) { 1 } else { 0 };
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_U29_ADD_EQ,
-        scalar0: *a,
-        scalar1: *b,
-        scalar2: carry_in,
-        arg0: *c,
-        arg1: carry_out,
-        value: sum29,
-        ret_ty: RET_WFF_AND,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_U29_ADD_EQ, scalar0: *a, scalar1: *b, scalar2: carry_in, arg0: *c, arg1: carry_out, value: sum29, ret_ty: RET_WFF_AND, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::U24AddEq(a, b, cin, c) => {
       let carry_in = *cin as u32;
+      let key = (OP_U24_ADD_EQ, 0, 0, 0, *a, *b, carry_in);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let total = *a + *b + carry_in;
       let sum24 = total & ((1u32 << 24) - 1);
       let carry_out = if total >= (1u32 << 24) { 1 } else { 0 };
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_U24_ADD_EQ,
-        scalar0: *a,
-        scalar1: *b,
-        scalar2: carry_in,
-        arg0: *c,
-        arg1: carry_out,
-        value: sum24,
-        ret_ty: RET_WFF_AND,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_U24_ADD_EQ, scalar0: *a, scalar1: *b, scalar2: carry_in, arg0: *c, arg1: carry_out, value: sum24, ret_ty: RET_WFF_AND, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::U15MulEq(a, b) => {
+      let key = (OP_U15_MUL_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let total = *a as u32 * *b as u32;
       let lo = total & 0x7FFF;
       let hi = total >> 15;
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_U15_MUL_EQ,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        scalar2: 0,
-        arg0: hi,
-        value: lo,
-        ret_ty: RET_WFF_AND,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_U15_MUL_EQ, scalar0: *a as u32, scalar1: *b as u32, scalar2: 0, arg0: hi, value: lo, ret_ty: RET_WFF_AND, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::ByteAddThirdCongruence(p, a, b) => {
-      let pi = compile_proof_inner(p, rows);
+      let pi = compile_proof_inner(p, rows, memo);
+      let key = (OP_BYTE_ADD_THIRD_CONGRUENCE, pi, 0, 0, *a as u32, *b as u32, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_ADD_THIRD_CONGRUENCE,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        arg0: pi,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_ADD_THIRD_CONGRUENCE, scalar0: *a as u32, scalar1: *b as u32, arg0: pi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::ByteAddCarryThirdCongruence(p, a, b) => {
-      let pi = compile_proof_inner(p, rows);
+      let pi = compile_proof_inner(p, rows, memo);
+      let key = (OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, pi, 0, 0, *a as u32, *b as u32, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        arg0: pi,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, scalar0: *a as u32, scalar1: *b as u32, arg0: pi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::IteTrueEq(a, b) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_ITE_TRUE_EQ, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_ITE_TRUE_EQ,
-        arg0: ai,
-        arg1: bi,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_ITE_TRUE_EQ, arg0: ai, arg1: bi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::IteFalseEq(a, b) => {
-      let ai = compile_term_inner(a, rows);
-      let bi = compile_term_inner(b, rows);
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_ITE_FALSE_EQ, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_ITE_FALSE_EQ,
-        arg0: ai,
-        arg1: bi,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_ITE_FALSE_EQ, arg0: ai, arg1: bi, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::ByteMulLowEq(a, b) => {
+      let key = (OP_BYTE_MUL_LOW_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_MUL_LOW_EQ,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        value: (*a as u32 * *b as u32) & 0xFF,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_MUL_LOW_EQ, scalar0: *a as u32, scalar1: *b as u32, value: (*a as u32 * *b as u32) & 0xFF, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
     Proof::ByteMulHighEq(a, b) => {
+      let key = (OP_BYTE_MUL_HIGH_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
       let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_BYTE_MUL_HIGH_EQ,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        value: (*a as u32 * *b as u32) >> 8,
-        ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
+      rows.push(ProofRow { op: OP_BYTE_MUL_HIGH_EQ, scalar0: *a as u32, scalar1: *b as u32, value: (*a as u32 * *b as u32) >> 8, ret_ty: RET_WFF_EQ, ..Default::default() });
+      memo.insert(key, idx);
       idx
     }
   }
@@ -2733,14 +2622,16 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
 /// Flatten a [`Proof`] tree into a `Vec<ProofRow>` (post-order).
 pub fn compile_proof(proof: &Proof) -> Vec<ProofRow> {
   let mut rows = Vec::new();
-  compile_proof_inner(proof, &mut rows);
+  let mut memo = Memo::new();
+  compile_proof_inner(proof, &mut rows, &mut memo);
   rows
 }
 
-/// Flatten a [`Term`] tree into a `Vec<ProofRow>` (post-order).
+/// Flatten a [`Term`] tree into a `Vec<ProofRow>` (post-order, CSE-deduplicated).
 pub fn compile_term(term: &Term) -> Vec<ProofRow> {
   let mut rows = Vec::new();
-  compile_term_inner(term, &mut rows);
+  let mut memo = Memo::new();
+  compile_term_inner(term, &mut rows, &mut memo);
   rows
 }
 

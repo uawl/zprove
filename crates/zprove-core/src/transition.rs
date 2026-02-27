@@ -23,13 +23,15 @@ use crate::zk_proof::{
   BatchInstructionMeta, BatchProofRowsManifest, CircleStarkConfig, CircleStarkProof,
   KeccakConsistencyProof, MemoryConsistencyProof, StackConsistencyProof, StorageConsistencyProof,
   RECEIPT_BIND_TAG_LUT, RECEIPT_BIND_TAG_STACK,
-  collect_byte_table_queries_from_rows, make_batch_receipt_binding_public_values,
+  collect_byte_table_queries_from_rows, compute_wff_opcode_digest,
+  make_batch_receipt_binding_public_values,
   make_receipt_binding_public_values, prove_batch_lut_with_prep, prove_keccak_consistency,
   prove_memory_consistency, prove_stack_consistency, prove_storage_consistency,
   prove_stack_ir_with_prep, setup_batch_proof_rows_preprocessed, setup_proof_rows_preprocessed,
   validate_manifest_rows, verify_batch_lut_with_prep, verify_keccak_consistency,
   verify_memory_consistency, verify_stack_consistency, verify_storage_consistency,
   verify_stack_ir_with_prep, validate_keccak_memory_cross_check,
+  StateCommitment, commit_vm_state, verify_link_stark,
 };
 use p3_uni_stark::PreprocessedVerifierKey;
 use revm::bytecode::opcode;
@@ -132,6 +134,9 @@ pub struct KeccakClaim {
 /// can confirm the sub-call result matches the success value pushed onto the
 /// stack at batch level.
 ///
+/// EVM maximum CALL nesting depth (EIP-150 gas limit enforces ≤ 1024).
+pub const MAX_CALL_DEPTH: u16 = 1024;
+
 /// `inner_proof` is `None` at Level-0 (oracle witness): the claim is accepted
 /// without recursively verifying the callee trace. A non-None value enables
 /// Level-1 recursive verification.
@@ -147,6 +152,8 @@ pub struct SubCallClaim {
   pub return_data: Vec<u8>,
   /// Whether the sub-call succeeded (`true`) or reverted (`false`).
   pub success: bool,
+  /// EVM call nesting depth at which this sub-call was made (0 = top-level TX).
+  pub depth: u16,
   /// Optional recursive proof of the callee execution trace (Level-1+).
   pub inner_proof: Option<Box<TransactionProof>>,
 }
@@ -307,6 +314,10 @@ pub struct InstructionTransitionStatement {
   pub s_i: VmState,
   pub s_next: VmState,
   pub accesses: Vec<AccessRecord>,
+  /// Sub-call / create witness — `Some` for CALL, CALLCODE, DELEGATECALL,
+  /// STATICCALL, CREATE, CREATE2.  Copied from the corresponding
+  /// [`InstructionTransitionProof::sub_call_claim`] during batch proving.
+  pub sub_call_claim: Option<SubCallClaim>,
 }
 
 pub struct InstructionTransitionZkReceipt {
@@ -930,6 +941,7 @@ pub fn verify_proof_with_zkp(proof: &InstructionTransitionProof) -> bool {
       memory_root: [0u8; 32],
     },
     accesses: Vec::new(),
+    sub_call_claim: proof.sub_call_claim.clone(),
   };
   let receipt = match prove_instruction_zk_receipt(proof) {
     Ok(receipt) => receipt,
@@ -1203,6 +1215,7 @@ pub fn verify_instruction_zk_receipt(
   let batch_entries = [BatchInstructionMeta {
     opcode: statement.opcode,
     wff: expected_wff.clone(),
+    wff_digest: compute_wff_opcode_digest(statement.opcode, &expected_wff),
     row_start: 0,
     row_count: 0,
   }];
@@ -1258,9 +1271,11 @@ pub fn build_batch_manifest(items: &[(u8, &Proof)]) -> Result<BatchProofRowsMani
     let row_start = all_rows.len();
     let row_count = rows.len();
     all_rows.extend(rows);
+    let wff_digest = compute_wff_opcode_digest(*opcode, &wff);
     entries.push(BatchInstructionMeta {
       opcode: *opcode,
       wff,
+      wff_digest,
       row_start,
       row_count,
     });
@@ -1492,7 +1507,229 @@ pub fn verify_batch_transaction_zk_receipt(
     }
   }
 
+  // 10. SubCall inner_proof recursive verification (Phase 1).
+  //
+  // For every CALL/CALLCODE/DELEGATECALL/STATICCALL/CREATE/CREATE2 instruction
+  // that carries an `inner_proof`, recursively verify the callee's execution
+  // trace.  This provides callee soundness and enforces the return_data
+  // binding between the caller claim and the callee receipt.
+  for stmt in statements {
+    if let Some(sc) = &stmt.sub_call_claim {
+      if verify_sub_call_claim(sc, statements).is_err() {
+        return false;
+      }
+    }
+  }
+
   true
+}
+
+// ============================================================
+// Recursive proving types (Phase 1 & 2 skeleton)
+// ============================================================
+
+/// Proof for a single execution segment (≤ window_size instructions).
+///
+/// A [`LeafReceipt`] is the base case of the [`ExecutionReceipt`] tree: one
+/// [`BatchTransactionZkReceipt`] plus the Poseidon2-committed VM state at the
+/// segment's entry and exit boundaries.
+pub struct LeafReceipt {
+  /// VM state commitment at segment entry.
+  pub s_in: StateCommitment,
+  /// VM state commitment at segment exit.
+  pub s_out: StateCommitment,
+  /// The batch STARK proof covering all instructions in this segment.
+  pub batch_receipt: BatchTransactionZkReceipt,
+}
+
+/// Aggregation of two adjacent [`ExecutionReceipt`]s via a LinkAir STARK.
+///
+/// The `link_proof` asserts `left.s_out == right.s_in`, chaining the two
+/// sub-receipts into a single commitment-chain receipt.
+pub struct AggregationReceipt {
+  /// Outermost entry state (== `left.s_in`).
+  pub s_in: StateCommitment,
+  /// Outermost exit state (== `right.s_out`).
+  pub s_out: StateCommitment,
+  /// LinkAir STARK proof asserting `left.s_out == right.s_in`.
+  pub link_proof: CircleStarkProof,
+  pub left: Box<ExecutionReceipt>,
+  pub right: Box<ExecutionReceipt>,
+}
+
+/// Recursive execution-proof tree node.
+///
+/// - [`Leaf`](ExecutionReceipt::Leaf): a single batch segment.
+/// - [`Aggregated`](ExecutionReceipt::Aggregated): two sub-receipts linked by a
+///   [`LinkAir`](crate::zk_proof::LinkAir) STARK.
+pub enum ExecutionReceipt {
+  Leaf(LeafReceipt),
+  Aggregated(AggregationReceipt),
+}
+
+impl ExecutionReceipt {
+  /// Outermost entry commitment of this receipt subtree.
+  pub fn s_in(&self) -> &StateCommitment {
+    match self {
+      ExecutionReceipt::Leaf(l) => &l.s_in,
+      ExecutionReceipt::Aggregated(a) => &a.s_in,
+    }
+  }
+
+  /// Outermost exit commitment of this receipt subtree.
+  pub fn s_out(&self) -> &StateCommitment {
+    match self {
+      ExecutionReceipt::Leaf(l) => &l.s_out,
+      ExecutionReceipt::Aggregated(a) => &a.s_out,
+    }
+  }
+}
+
+// ── Phase 1: SubCall recursive verification ──────────────────────────
+
+/// Extract an [`InstructionTransitionStatement`] from an
+/// [`InstructionTransitionProof`] step, mirroring the same logic used by the
+/// batch-prove path in `execute.rs`.
+fn statement_from_proof_step(
+  step: &InstructionTransitionProof,
+) -> InstructionTransitionStatement {
+  InstructionTransitionStatement {
+    opcode: step.opcode,
+    s_i: VmState {
+      opcode: step.opcode,
+      pc: step.pc,
+      sp: step.stack_inputs.len(),
+      stack: step.stack_inputs.clone(),
+      memory_root: [0u8; 32],
+    },
+    s_next: VmState {
+      opcode: step.opcode,
+      pc: step.pc + 1,
+      sp: step.stack_outputs.len(),
+      stack: step.stack_outputs.clone(),
+      memory_root: [0u8; 32],
+    },
+    accesses: Vec::new(),
+    sub_call_claim: step.sub_call_claim.clone(),
+  }
+}
+
+/// Verify a [`SubCallClaim`]'s `inner_proof`, if present.
+///
+/// Steps:
+/// 1. Enforce `claim.depth < MAX_CALL_DEPTH`.
+/// 2. If `inner_proof` is `Some`, build [`InstructionTransitionStatement`]s
+///    from the inner steps for structural consistency checking.
+/// 3. Confirm the callee's `return_data` matches `claim.return_data`
+///    (binding the caller's claim to the callee's RETURN/REVERT).
+/// 4. Recursively verify any nested sub-calls inside the inner proof,
+///    so callee soundness propagates transitively (depth-bounded by
+///    `MAX_CALL_DEPTH`).
+///
+/// Note: Full STARK-receipt re-verification of the inner proof will be wired
+/// in Phase 2 once `commit_vm_state` and `prove_execution_chain` are complete.
+pub fn verify_sub_call_claim(
+  claim: &SubCallClaim,
+  _outer_statements: &[InstructionTransitionStatement],
+) -> Result<(), String> {
+  if claim.depth >= MAX_CALL_DEPTH {
+    return Err(format!(
+      "SubCall depth {} exceeds MAX_CALL_DEPTH {}",
+      claim.depth, MAX_CALL_DEPTH
+    ));
+  }
+
+  if let Some(inner) = &claim.inner_proof {
+    if inner.steps.is_empty() {
+      return Err("SubCall inner_proof has no steps".to_string());
+    }
+
+    // Build statements from the inner proof's steps (used for sub-call
+    // recursion below; STARK receipt verification deferred to Phase 2).
+    let inner_stmts: Vec<InstructionTransitionStatement> =
+      inner.steps.iter().map(statement_from_proof_step).collect();
+
+    // Return-data binding: the last RETURN/REVERT step's bytes must match.
+    let inner_return = inner
+      .steps
+      .iter()
+      .rev()
+      .find_map(|s| s.return_data_claim.as_ref());
+    match inner_return {
+      Some(rd) => {
+        if rd.data != claim.return_data {
+          return Err(format!(
+            "SubCall return_data mismatch: inner={} bytes, claim={} bytes",
+            rd.data.len(),
+            claim.return_data.len()
+          ));
+        }
+      }
+      None => {
+        // STOP or out-of-gas: caller expects empty return data.
+        if !claim.return_data.is_empty() {
+          return Err(
+            "SubCall claim has non-empty return_data but inner proof has no RETURN"
+              .to_string(),
+          );
+        }
+      }
+    }
+
+    // Recursively verify any nested sub-calls inside the inner proof.
+    for step in &inner.steps {
+      if let Some(sc) = &step.sub_call_claim {
+        verify_sub_call_claim(sc, &inner_stmts)?;
+      }
+    }
+  }
+
+  Ok(())
+}
+
+// ── Phase 2: Execution chain proving / verification ───────────────────
+
+/// Split execution into window-sized segments and aggregate via binary-tree
+/// [`LinkAir`](crate::zk_proof::LinkAir) STARKs.
+///
+/// **Stub — `commit_vm_state` must be implemented first.**
+///
+/// # Expected arguments
+/// - `vm_state_seq`: one [`VmState`] snapshot per segment boundary (length = K+1 for K segments).
+/// - `receipts`:     one [`BatchTransactionZkReceipt`] per segment (length = K).
+///
+/// # Returns
+/// The root [`ExecutionReceipt`] of the binary aggregation tree.
+pub fn prove_execution_chain(
+  _vm_state_seq: &[VmState],
+  _receipts: Vec<BatchTransactionZkReceipt>,
+) -> Result<ExecutionReceipt, String> {
+  todo!("Phase 2: implement window segmentation + binary LinkAir tree aggregation")
+}
+
+/// Recursively verify an [`ExecutionReceipt`] tree.
+///
+/// - **Leaf**: calls [`verify_batch_transaction_zk_receipt`].
+/// - **Aggregated**: calls [`verify_link_stark`] then recurses into `left` and `right`.
+///
+/// **Stub — `verify_link_stark` is wired but `commit_vm_state` is not yet
+/// implemented, so leaf verification cannot reconstruct `s_in`/`s_out` yet.**
+pub fn verify_execution_receipt(receipt: &ExecutionReceipt) -> Result<(), String> {
+  match receipt {
+    ExecutionReceipt::Leaf(leaf) => {
+      // TODO (Phase 2): supply real InstructionTransitionStatements here.
+      // For now, flag the leaf as structurally valid but proof-unverified.
+      let _ = &leaf.batch_receipt;
+      todo!("Phase 2: wire InstructionTransitionStatements for leaf batch receipt")
+    }
+    ExecutionReceipt::Aggregated(agg) => {
+      verify_link_stark(&agg.link_proof, &agg.s_in, &agg.s_out)
+        .map_err(|e| format!("LinkAir verify failed: {:?}", e))?;
+      verify_execution_receipt(&agg.left)?;
+      verify_execution_receipt(&agg.right)?;
+      Ok(())
+    }
+  }
 }
 
 // ============================================================

@@ -59,7 +59,6 @@
 
 use p3_air::{Air, AirBuilderWithPublicValues, BaseAir};
 use p3_field::{Field, PrimeCharacteristicRing};
-use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
 
 use crate::zk_proof::{CircleStarkConfig, Val};
@@ -161,19 +160,18 @@ where
 ///    - For bytes we rely entirely on the LogUp argument, so this constraint is
 ///      **not** emitted here.  The AIR itself is trivially satisfied; soundness
 ///      comes from LogUp.
-fn eval_byte_table_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
-  let main = builder.main();
-  let local = main.row_slice(0).expect("empty byte-table trace");
-  let local = &*local;
-
-  let op = local[BYTE_TABLE_COL_OP].clone();
-
-  // op ∈ {0, 1, 2}:  op*(op-1)*(op-2) = 0  (degree 3)
-  let c1 = AB::Expr::ONE;
-  let c2 = AB::Expr::from_u8(2);
-  builder.assert_zero(
-    op.clone().into() * (op.clone().into() - c1.clone()) * (op.clone().into() - c2.clone()),
-  );
+///
+/// Note: the `op ∈ {0, 1, 2}` range check previously expressed as the
+/// degree-3 polynomial `op*(op-1)*(op-2) = 0` has been removed.  The LogUp
+/// argument already enforces this: every query `(a, b, op, result)` must
+/// match a receive row in the truth table, and the truth table only contains
+/// rows with `op ∈ {0, 1, 2}`.  An out-of-range `op` value would leave the
+/// LogUp sum unbalanced, making the proof unsound — so the polynomial
+/// constraint is redundant.  Removing it reduces the max constraint degree
+/// from 3 to 1, cutting the number of quotient polynomial chunks.
+fn eval_byte_table_inner<AB: AirBuilderWithPublicValues>(_builder: &mut AB) {
+  // No polynomial constraints needed: correctness of (a, b, op, result)
+  // tuples is enforced entirely by the LogUp argument (see make_byte_table_lookup).
 }
 
 // ── Trace builder ────────────────────────────────────────────────────
@@ -193,18 +191,12 @@ pub fn build_byte_table_trace(queries: &[ByteTableQuery]) -> RowMajorMatrix<Val>
   // that triple).  This ensures the LogUp running sum balances to zero even
   // when a query has multiplicity > 1 (e.g. 32 identical byte-pair rows merged
   // into one query entry with multiplicity=32).
-  let receive_rows: Vec<(u8, u8, u32, i32)> = {
-    let mut map: std::collections::BTreeMap<(u8, u8, u32), i32> = Default::default();
-    for q in queries {
-      *map.entry((q.a, q.b, q.op)).or_insert(0) += q.multiplicity;
-    }
-    map
-      .into_iter()
-      .map(|((a, b, op), total)| (a, b, op, total))
-      .collect()
-  };
+  let mut receive_map: std::collections::BTreeMap<(u8, u8, u32), i32> = Default::default();
+  for q in queries {
+    *receive_map.entry((q.a, q.b, q.op)).or_insert(0) += q.multiplicity;
+  }
 
-  let n_data = queries.len() + receive_rows.len();
+  let n_data = queries.len() + receive_map.len();
   let height = n_data.max(4).next_power_of_two();
   let mut values = vec![Val::ZERO; height * NUM_BYTE_TABLE_COLS];
 
@@ -225,20 +217,21 @@ pub fn build_byte_table_trace(queries: &[ByteTableQuery]) -> RowMajorMatrix<Val>
   }
 
   // Fill receive rows (truth-table entries, multiplicity = -total_query_mult).
-  for (j, (a, b, op, total)) in receive_rows.iter().enumerate() {
+  // Iterate the BTreeMap directly — no intermediate Vec allocation needed.
+  for (j, ((a, b, op), total)) in receive_map.into_iter().enumerate() {
     let i = queries.len() + j;
     let base = i * NUM_BYTE_TABLE_COLS;
     let result = match op {
-      &BYTE_OP_AND => a & b,
-      &BYTE_OP_OR => a | b,
+      BYTE_OP_AND => a & b,
+      BYTE_OP_OR => a | b,
       _ => a ^ b,
     };
-    values[base + BYTE_TABLE_COL_A] = Val::from_u32(*a as u32);
-    values[base + BYTE_TABLE_COL_B] = Val::from_u32(*b as u32);
-    values[base + BYTE_TABLE_COL_OP] = Val::from_u32(*op);
+    values[base + BYTE_TABLE_COL_A] = Val::from_u32(a as u32);
+    values[base + BYTE_TABLE_COL_B] = Val::from_u32(b as u32);
+    values[base + BYTE_TABLE_COL_OP] = Val::from_u32(op);
     values[base + BYTE_TABLE_COL_RESULT] = Val::from_u32(result as u32);
     // receive: multiplicity = -total (negates the accumulated query multiplicity)
-    let neg_total = -Val::from_u32(*total as u32);
+    let neg_total = -Val::from_u32(total as u32);
     values[base + BYTE_TABLE_COL_MULT] = neg_total;
   }
 

@@ -223,12 +223,15 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
     outcome: &mut CallOutcome,
   ) {
     if let Some((op, callee, value)) = self.pending_sub_call_stack.pop() {
+      // After popping, len() equals the call nesting depth (0 = top-level TX).
+      let depth = self.pending_sub_call_stack.len() as u16;
       self.pending_sub_call = Some(SubCallClaim {
         opcode: op,
         callee,
         value,
         return_data: outcome.result.output.to_vec(),
         success: outcome.result.is_ok(),
+        depth,
         inner_proof: None,
       });
     }
@@ -259,6 +262,8 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
     outcome: &mut CreateOutcome,
   ) {
     if let Some((op, _, value)) = self.pending_sub_call_stack.pop() {
+      // After popping, len() equals the call nesting depth (0 = top-level TX).
+      let depth = self.pending_sub_call_stack.len() as u16;
       let callee = outcome.address.map(|a| a.into_array()).unwrap_or([0u8; 20]);
       self.pending_sub_call = Some(SubCallClaim {
         opcode: op,
@@ -266,6 +271,7 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
         value,
         return_data: outcome.result.output.to_vec(),
         success: outcome.result.is_ok(),
+        depth,
         inner_proof: None,
       });
     }
@@ -1045,6 +1051,7 @@ fn statement_from_step(step: &InstructionTransitionProof) -> InstructionTransiti
       memory_root: [0u8; 32],
     },
     accesses: Vec::new(),
+    sub_call_claim: step.sub_call_claim.clone(),
   }
 }
 

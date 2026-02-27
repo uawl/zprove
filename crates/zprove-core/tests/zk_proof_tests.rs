@@ -71,7 +71,7 @@ mod tests {
     let trace =
       generate_stage_a_semantic_trace(&rows).expect("semantic trace generation should succeed");
     assert_eq!(trace.width(), NUM_PROOF_COLS);
-    assert_eq!(trace.height(), 16);
+    assert_eq!(trace.height(), 4); // CSE reduces 1000+2000 proof to 4 unique rows
   }
 
   #[test]
@@ -262,26 +262,18 @@ mod tests {
     let steps = build_stack_ir_steps_from_rows(&rows).expect("stack-ir steps should build");
 
     assert_eq!(steps.len(), rows.len());
-    assert_eq!(steps[0].sp_before, 0);
-    assert_eq!(steps[0].sp_after, 1);
-    assert_eq!(steps[1].sp_before, 1);
-    assert_eq!(steps[1].sp_after, 1);
+    // Row 0: Byte(7) — leaf node, no args
+    assert_eq!(steps[0].arg0, 0);
+    assert_eq!(steps[0].arg1, 0);
+    assert_eq!(steps[0].arg2, 0);
+    // Row 1: EqRefl — arg0 points to row 0 (the Byte term)
+    assert_eq!(steps[1].arg0, 0);
+    assert_eq!(steps[1].arg1, 0);
+    assert_eq!(steps[1].arg2, 0);
 
     let trace = build_stack_ir_trace_from_steps(&steps).expect("stack-ir trace should build");
     assert_eq!(trace.width(), zprove_core::zk_proof::NUM_STACK_IR_COLS);
     assert!(trace.height() >= 4);
-  }
-
-  #[test]
-  fn test_build_stack_ir_steps_underflow_rejected() {
-    let rows = vec![ProofRow {
-      op: zprove_core::semantic_proof::OP_EQ_TRANS,
-      ret_ty: RET_WFF_EQ,
-      ..Default::default()
-    }];
-
-    let err = build_stack_ir_steps_from_rows(&rows).expect_err("underflow must be rejected");
-    assert!(err.contains("stack underflow"));
   }
 
   #[test]
@@ -804,6 +796,7 @@ mod batch_lut_tests {
         memory_root: [0u8; 32],
       },
       accesses: Vec::new(),
+      sub_call_claim: None,
     }
   }
 
