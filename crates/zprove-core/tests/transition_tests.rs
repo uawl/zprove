@@ -33,6 +33,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -48,6 +56,14 @@ mod tests {
       stack_outputs: vec![u256_bytes(1)],
       semantic_proof: None,
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof_with_zkp(&itp));
   }
@@ -67,6 +83,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(forged),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     assert!(!verify_proof(&itp));
@@ -89,6 +113,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(forged),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     assert!(!verify_proof(&itp));
@@ -183,6 +215,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     let statement = InstructionTransitionStatement {
@@ -222,6 +262,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
@@ -264,6 +312,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(forged),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     assert!(prove_instruction_zk_receipt(&itp).is_err());
@@ -283,6 +339,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
@@ -325,6 +389,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
@@ -367,6 +439,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     let statement = InstructionTransitionStatement {
@@ -410,6 +490,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(semantic),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     let statement = InstructionTransitionStatement {
@@ -457,6 +545,14 @@ mod tests {
       stack_outputs: vec![c1],
       semantic_proof: Some(semantic1),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     let itp2 = InstructionTransitionProof {
       opcode: opcode::ADD,
@@ -465,6 +561,14 @@ mod tests {
       stack_outputs: vec![c2],
       semantic_proof: Some(semantic2),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     let statement1 = InstructionTransitionStatement {
@@ -512,6 +616,14 @@ mod tests {
       stack_outputs: vec![c1],
       semantic_proof: Some(semantic1),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     let itp2 = InstructionTransitionProof {
       opcode: opcode::ADD,
@@ -520,6 +632,14 @@ mod tests {
       stack_outputs: vec![c2],
       semantic_proof: Some(semantic2),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     let statement1 = InstructionTransitionStatement {
@@ -570,6 +690,14 @@ mod tests {
       stack_outputs: vec![c1],
       semantic_proof: Some(semantic1),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     let itp2 = InstructionTransitionProof {
       opcode: opcode::ADD,
@@ -578,6 +706,14 @@ mod tests {
       stack_outputs: vec![c2],
       semantic_proof: Some(semantic2),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     let statement1 = InstructionTransitionStatement {
@@ -731,6 +867,14 @@ mod tests {
       stack_outputs: vec![wrong_c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -751,6 +895,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -771,6 +923,14 @@ mod tests {
       stack_outputs: vec![wrong],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -791,6 +951,14 @@ mod tests {
       stack_outputs: vec![q],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -811,6 +979,14 @@ mod tests {
       stack_outputs: vec![wrong_q],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -831,6 +1007,14 @@ mod tests {
       stack_outputs: vec![r],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -851,6 +1035,14 @@ mod tests {
       stack_outputs: vec![wrong_r],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -871,6 +1063,14 @@ mod tests {
       stack_outputs: vec![z],
       semantic_proof: Some(div_proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&div_itp));
     assert!(verify_proof_with_zkp(&div_itp));
@@ -883,6 +1083,14 @@ mod tests {
       stack_outputs: vec![z],
       semantic_proof: Some(mod_proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&mod_itp));
     assert!(verify_proof_with_zkp(&mod_itp));
@@ -902,6 +1110,14 @@ mod tests {
       stack_outputs: vec![q],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -922,6 +1138,14 @@ mod tests {
       stack_outputs: vec![wrong_q],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -942,6 +1166,14 @@ mod tests {
       stack_outputs: vec![r],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -962,6 +1194,14 @@ mod tests {
       stack_outputs: vec![wrong_r],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&itp));
     assert!(!verify_proof_with_rows(&itp));
@@ -982,6 +1222,14 @@ mod tests {
       stack_outputs: vec![z],
       semantic_proof: Some(sdiv_proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&sdiv_itp));
     assert!(verify_proof_with_zkp(&sdiv_itp));
@@ -994,6 +1242,14 @@ mod tests {
       stack_outputs: vec![z],
       semantic_proof: Some(smod_proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&smod_itp));
     assert!(verify_proof_with_zkp(&smod_itp));
@@ -1015,6 +1271,14 @@ mod tests {
       stack_outputs: vec![expected],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1037,6 +1301,14 @@ mod tests {
       stack_outputs: vec![zero],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1057,6 +1329,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1077,6 +1357,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1097,6 +1385,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1116,6 +1412,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1135,6 +1439,14 @@ mod tests {
       stack_outputs: vec![wrong],
       semantic_proof: prove_instruction(opcode::AND, &[a, b], &[wrong]),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&and_itp));
     assert!(!verify_proof_with_rows(&and_itp));
@@ -1147,6 +1459,14 @@ mod tests {
       stack_outputs: vec![wrong],
       semantic_proof: prove_instruction(opcode::NOT, &[a], &[wrong]),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&not_itp));
     assert!(!verify_proof_with_rows(&not_itp));
@@ -1166,6 +1486,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
   }
@@ -1183,6 +1511,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof_with_zkp(&itp));
   }
@@ -1202,6 +1538,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
   }
@@ -1221,6 +1565,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
   }
@@ -1231,7 +1583,7 @@ mod tests {
     let b = u256_bytes(200);
     let wrong = u256_bytes(999); // incorrect result
     let proof = prove_instruction(opcode::ADD, &[a, b], &[wrong]);
-    // ByteAddEq should fail since the result is wrong
+    // Add-equality proof should fail since the result is wrong
     assert!(
       proof.is_none() || {
         let itp = InstructionTransitionProof {
@@ -1241,6 +1593,14 @@ mod tests {
           stack_outputs: vec![wrong],
           semantic_proof: proof,
           memory_claims: vec![],
+          storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
         };
         !verify_proof(&itp)
       }
@@ -1256,6 +1616,14 @@ mod tests {
       stack_outputs: vec![],
       semantic_proof: None,
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
   }
@@ -1269,6 +1637,14 @@ mod tests {
       stack_outputs: vec![u256_bytes(42)],
       semantic_proof: None,
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
   }
@@ -1282,6 +1658,14 @@ mod tests {
       stack_outputs: vec![],
       semantic_proof: None,
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&itp));
   }
@@ -1295,6 +1679,14 @@ mod tests {
       stack_outputs: vec![u256_bytes(42)],
       semantic_proof: None,
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&itp));
   }
@@ -1322,6 +1714,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     assert!(verify_proof_with_rows(&itp));
@@ -1342,6 +1742,14 @@ mod tests {
         stack_outputs: vec![wrong],
         semantic_proof: Some(proof),
         memory_claims: vec![],
+        storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
       };
       assert!(!verify_proof_with_rows(&itp));
     }
@@ -1364,6 +1772,14 @@ mod tests {
       stack_outputs: vec![c],
       semantic_proof: Some(p1),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     // Step 2: ADD(300, 50) = 350
@@ -1375,10 +1791,19 @@ mod tests {
       stack_outputs: vec![e],
       semantic_proof: Some(p2),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
 
     let tx = TransactionProof {
       steps: vec![step1, step2],
+      block_tx_context: Default::default(),
     };
     for step in &tx.steps {
       assert!(verify_proof(step));
@@ -1406,6 +1831,14 @@ mod tests {
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1423,6 +1856,14 @@ mod tests {
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1440,6 +1881,14 @@ mod tests {
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&itp));
   }
@@ -1455,6 +1904,14 @@ mod tests {
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1471,6 +1928,14 @@ mod tests {
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1488,6 +1953,14 @@ mod tests {
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1505,6 +1978,14 @@ mod tests {
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1521,6 +2002,14 @@ mod tests {
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
   }
@@ -1538,6 +2027,14 @@ mod tests {
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(!verify_proof(&itp));
   }
@@ -1554,6 +2051,14 @@ mod tests {
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1571,6 +2076,14 @@ mod tests {
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1588,6 +2101,14 @@ mod tests {
       stack_outputs: vec![bool_word(false)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1605,6 +2126,14 @@ mod tests {
       stack_outputs: vec![bool_word(true)],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     };
     assert!(verify_proof(&itp));
     assert!(verify_proof_with_rows(&itp));
@@ -1679,6 +2208,14 @@ mod tests {
         stack_outputs: vec![*output],
         semantic_proof: Some(proof),
         memory_claims: vec![],
+        storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
       };
       assert!(
         verify_proof(&itp),
@@ -1699,268 +2236,89 @@ mod tests {
 #[test]
 fn test_and_debug_internals() {
   use revm::bytecode::opcode;
-  use zprove_core::semantic_proof::compile_proof;
-  use zprove_core::transition::{prove_instruction, wff_instruction};
+  use zprove_core::transition::{build_batch_manifest, prove_instruction, wff_instruction};
   use zprove_core::zk_proof::{
     LutKernelAir, RECEIPT_BIND_TAG_LUT, RECEIPT_BIND_TAG_STACK,
     build_lut_steps_from_rows_bit_family, build_lut_trace_from_proof_rows, make_circle_config,
-    make_receipt_binding_public_values, prove_lut_kernel_stark_with_public_values,
-    prove_lut_with_prep_and_logup, prove_stack_ir_with_prep, setup_proof_rows_preprocessed,
-    verify_lut_kernel_stark_with_public_values, verify_lut_with_prep,
-    verify_lut_with_prep_and_logup, verify_stack_ir_with_prep,
+    make_batch_receipt_binding_public_values, make_receipt_binding_public_values,
+    prove_batch_lut_with_prep, prove_lut_kernel_stark_with_public_values,
+    prove_stack_ir_with_prep, setup_batch_proof_rows_preprocessed, setup_proof_rows_preprocessed,
+    verify_batch_lut_with_prep, verify_lut_kernel_stark_with_public_values,
+    verify_stack_ir_with_prep,
   };
-
-  // ── VERY EARLY byte_table fresh proof (before ANY other STARK calls) ────
-  {
-    use zprove_core::byte_table::{
-      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
-    };
-    let queries = vec![ByteTableQuery {
-      a: 0xAA,
-      b: 0x55,
-      op: BYTE_OP_AND,
-      result: 0x00,
-      multiplicity: 1,
-    }];
-    let fresh_proof_early = prove_byte_table(&queries);
-    let fresh_result_early = verify_byte_table(&fresh_proof_early);
-    eprintln!(
-      "VERY EARLY fresh byte_table proof verify: {:?}",
-      fresh_result_early.is_ok()
-    );
-  }
 
   let a = [0xAAu8; 32];
   let b = [0x55u8; 32];
   let c = [0x00u8; 32];
 
-  let proof = prove_instruction(opcode::AND, &[a, b], &[c]).unwrap();
-  let rows = compile_proof(&proof);
-  eprintln!("rows.len() = {}", rows.len());
-
+  let sem_proof = prove_instruction(opcode::AND, &[a, b], &[c]).unwrap();
   let expected_wff = wff_instruction(opcode::AND, &[a, b], &[c]).unwrap();
-  let stack_bind_pv =
-    make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, opcode::AND, &expected_wff);
-  let lut_bind_pv =
-    make_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, opcode::AND, &expected_wff);
 
-  // OLD path: bit-family steps => standalone LUT
-  let lut_steps = build_lut_steps_from_rows_bit_family(&rows).unwrap();
-  eprintln!("lut_steps.len() = {}", lut_steps.len());
-  let old_lut_proof = prove_lut_kernel_stark_with_public_values(&lut_steps, &lut_bind_pv).unwrap();
-  let old_lut_result = verify_lut_kernel_stark_with_public_values(&old_lut_proof, &lut_bind_pv);
-  eprintln!("OLD LUT verify: {:?}", old_lut_result.is_ok());
-  assert!(
-    old_lut_result.is_ok(),
-    "OLD LUT verify failed: {:?}",
-    old_lut_result.err()
-  );
-
-  // ── byte_table fresh proof AFTER old LUT prove ────
+  // ── StackIR proof (single-instruction setup, unchanged path) ──────────────
   {
-    use zprove_core::byte_table::{
-      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
-    };
-    let queries = vec![ByteTableQuery {
-      a: 0xAA,
-      b: 0x55,
-      op: BYTE_OP_AND,
-      result: 0x00,
-      multiplicity: 1,
-    }];
-    let fresh_proof = prove_byte_table(&queries);
-    eprintln!(
-      "After OLD LUT prove: fresh byte_table verify: {:?}",
-      verify_byte_table(&fresh_proof).is_ok()
+    use zprove_core::semantic_proof::compile_proof;
+    let rows = compile_proof(&sem_proof);
+    let stack_bind_pv =
+      make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, opcode::AND, &expected_wff);
+    let (prep_data, prep_vk) =
+      setup_proof_rows_preprocessed(&rows, &stack_bind_pv).unwrap();
+    let stack_proof =
+      prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv).unwrap();
+    let stack_result = verify_stack_ir_with_prep(&stack_proof, &prep_vk, &stack_bind_pv);
+    assert!(
+      stack_result.is_ok(),
+      "StackIR verify failed: {:?}",
+      stack_result.err()
     );
   }
 
-  let (prep_data, prep_vk) = setup_proof_rows_preprocessed(&rows, &stack_bind_pv).unwrap();
-
-  // ── byte_table fresh proof AFTER setup_prep ────
+  // ── Standalone LutKernelAir (no prep) path — still valid ─────────────────
   {
-    use zprove_core::byte_table::{
-      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
-    };
-    let queries = vec![ByteTableQuery {
-      a: 0xAA,
-      b: 0x55,
-      op: BYTE_OP_AND,
-      result: 0x00,
-      multiplicity: 1,
-    }];
-    let fresh_proof = prove_byte_table(&queries);
-    eprintln!(
-      "After setup_prep: fresh byte_table verify: {:?}",
-      verify_byte_table(&fresh_proof).is_ok()
+    use zprove_core::semantic_proof::compile_proof;
+    let rows = compile_proof(&sem_proof);
+    let lut_bind_pv =
+      make_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, opcode::AND, &expected_wff);
+    let lut_steps = build_lut_steps_from_rows_bit_family(&rows).unwrap();
+    let old_lut_proof =
+      prove_lut_kernel_stark_with_public_values(&lut_steps, &lut_bind_pv).unwrap();
+    let old_lut_result =
+      verify_lut_kernel_stark_with_public_values(&old_lut_proof, &lut_bind_pv);
+    assert!(
+      old_lut_result.is_ok(),
+      "Standalone LUT verify failed: {:?}",
+      old_lut_result.err()
     );
   }
 
-  let stack_proof = prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv).unwrap();
-  let stack_result = verify_stack_ir_with_prep(&stack_proof, &prep_vk, &stack_bind_pv);
-  eprintln!("Stack IR verify: {:?}", stack_result.is_ok());
-  assert!(
-    stack_result.is_ok(),
-    "stack IR verify failed: {:?}",
-    stack_result.err()
-  );
-
-  // ── byte_table fresh proof AFTER stack IR prove ────
+  // ── Batch LUT proof (N=1, BatchLutKernelAirWithPrep — the fixed path) ────
   {
-    use zprove_core::byte_table::{
-      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
-    };
-    let queries = vec![ByteTableQuery {
-      a: 0xAA,
-      b: 0x55,
-      op: BYTE_OP_AND,
-      result: 0x00,
-      multiplicity: 1,
-    }];
-    let fresh_proof = prove_byte_table(&queries);
-    eprintln!(
-      "After stack IR prove: fresh byte_table verify: {:?}",
-      verify_byte_table(&fresh_proof).is_ok()
+    let items: &[(u8, &zprove_core::semantic_proof::Proof)] = &[(opcode::AND, &sem_proof)];
+    let manifest = build_batch_manifest(items).unwrap();
+    let lut_bind_pv =
+      make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &manifest.entries);
+    let (lut_prep_data, lut_prep_vk) =
+      setup_batch_proof_rows_preprocessed(&manifest, &lut_bind_pv).unwrap();
+    let lut_proof =
+      prove_batch_lut_with_prep(&manifest, &lut_prep_data, &lut_bind_pv).unwrap();
+    let lut_result = verify_batch_lut_with_prep(&lut_proof, &lut_prep_vk, &lut_bind_pv);
+    assert!(
+      lut_result.is_ok(),
+      "Batch LUT (N=1) verify failed: {:?}",
+      lut_result.err()
     );
-  }
 
-  // DIAGNOSTIC: LutKernelAir + build_lut_trace_from_proof_rows + prove/verify (no prep)
-  // NOTE: This runs AFTER setup_prep and stack IR prove to test isolation
-  let diag_proof_for_lut = {
-    let trace = build_lut_trace_from_proof_rows(&rows).unwrap();
-    let config = make_circle_config();
-    let diag_proof = p3_uni_stark::prove(&config, &LutKernelAir, trace, &lut_bind_pv);
-    let diag_result = p3_uni_stark::verify(&config, &LutKernelAir, &diag_proof, &lut_bind_pv);
-    eprintln!(
-      "DIAG LUT verify (after stack prove, old air + new trace): {:?}",
-      diag_result.is_ok()
-    );
-    diag_proof
-  };
-
-  // ── byte_table fresh proof AFTER DIAG prove ────
-  {
-    use zprove_core::byte_table::{
-      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
-    };
-    let queries = vec![ByteTableQuery {
-      a: 0xAA,
-      b: 0x55,
-      op: BYTE_OP_AND,
-      result: 0x00,
-      multiplicity: 1,
-    }];
-    let fresh_proof = prove_byte_table(&queries);
-    eprintln!(
-      "After DIAG prove: fresh byte_table verify: {:?}",
-      verify_byte_table(&fresh_proof).is_ok()
-    );
-  }
-
-  let (lut_proof, byte_table_proof) =
-    prove_lut_with_prep_and_logup(&rows, &prep_data, &lut_bind_pv).unwrap();
-
-  // ── byte_table fresh proof AFTER prove_lut_with_prep_and_logup ────
-  {
-    use zprove_core::byte_table::{
-      BYTE_OP_AND, ByteTableQuery, prove_byte_table, verify_byte_table,
-    };
-    let queries = vec![ByteTableQuery {
-      a: 0xAA,
-      b: 0x55,
-      op: BYTE_OP_AND,
-      result: 0x00,
-      multiplicity: 1,
-    }];
-    let fresh_proof = prove_byte_table(&queries);
-    eprintln!(
-      "After prove_lut: fresh byte_table verify: {:?}",
-      verify_byte_table(&fresh_proof).is_ok()
-    );
-  }
-
-  // Compare proofs
-  eprintln!(
-    "diag_proof.degree_bits = {}",
-    diag_proof_for_lut.degree_bits
-  );
-  eprintln!("lut_proof.degree_bits  = {}", lut_proof.degree_bits);
-  eprintln!(
-    "diag trace_local len = {}",
-    diag_proof_for_lut.opened_values.trace_local.len()
-  );
-  eprintln!(
-    "lut  trace_local len = {}",
-    lut_proof.opened_values.trace_local.len()
-  );
-
-  // Try verifying DIAG proof with LUT verifier
-  let config = make_circle_config();
-  let diag_as_lut = p3_uni_stark::verify_with_preprocessed(
-    &config,
-    &LutKernelAir,
-    &diag_proof_for_lut,
-    &lut_bind_pv,
-    None,
-  );
-  eprintln!(
-    "DIAG proof verified with LUT verifier (after stack): {:?}",
-    diag_as_lut.is_ok()
-  );
-
-  // Try verifying LUT proof with p3_uni_stark::verify directly
-  let config2 = make_circle_config();
-  let lut_direct = p3_uni_stark::verify(&config2, &LutKernelAir, &lut_proof, &lut_bind_pv);
-  eprintln!(
-    "LUT proof verified with p3::verify directly: {:?}",
-    lut_direct.is_ok()
-  );
-
-  // Try verifying LUT proof with verify_lut_with_prep (which uses same args)
-  let lut_prep_result = verify_lut_with_prep(&lut_proof, &prep_vk, &lut_bind_pv);
-  eprintln!(
-    "LUT proof verify_lut_with_prep: {:?}",
-    lut_prep_result.is_ok()
-  );
-
-  // Directly test byte_table verify
-  eprintln!("byte_table_proof is Some: {:?}", byte_table_proof.is_some());
-  if let Some(ref bp) = byte_table_proof {
-    // Rebuild queries from rows and re-prove independently (BEFORE bt_result)
+    // Byte-table proof for AND/OR/XOR operations.
     use zprove_core::zk_proof::collect_byte_table_queries_from_rows;
-    let queries = collect_byte_table_queries_from_rows(&rows);
-    eprintln!("queries count: {}", queries.len());
-    let fresh_proof_before = zprove_core::byte_table::prove_byte_table(&queries);
-    let fresh_result_before = zprove_core::byte_table::verify_byte_table(&fresh_proof_before);
-    eprintln!(
-      "fresh byte_table proof verify BEFORE bt_result: {:?}",
-      fresh_result_before.is_ok()
-    );
-
-    let bt_result = zprove_core::byte_table::verify_byte_table(bp);
-    eprintln!("byte_table verify directly: {:?}", bt_result.is_ok());
-    eprintln!("byte_table verify err: {:?}", bt_result.err());
-
-    let fresh_proof = zprove_core::byte_table::prove_byte_table(&queries);
-    let fresh_result = zprove_core::byte_table::verify_byte_table(&fresh_proof);
-    eprintln!(
-      "fresh byte_table proof verify AFTER bt_result: {:?}",
-      fresh_result.is_ok()
+    let queries = collect_byte_table_queries_from_rows(&manifest.all_rows);
+    assert!(!queries.is_empty(), "AND must produce byte-table queries");
+    let bt_proof = zprove_core::byte_table::prove_byte_table(&queries);
+    let bt_result = zprove_core::byte_table::verify_byte_table(&bt_proof);
+    assert!(
+      bt_result.is_ok(),
+      "byte-table verify failed: {:?}",
+      bt_result.err()
     );
   }
-
-  let lut_result = verify_lut_with_prep_and_logup(
-    &lut_proof,
-    byte_table_proof.as_ref(),
-    &prep_vk,
-    &lut_bind_pv,
-  );
-  eprintln!("LUT verify: {:?}", lut_result.is_ok());
-  assert!(
-    lut_result.is_ok(),
-    "LUT verify failed: {:?}",
-    lut_result.err()
-  );
 }
 
 // ============================================================
@@ -1969,155 +2327,2471 @@ fn test_and_debug_internals() {
 
 #[cfg(test)]
 mod memory_consistency_tests {
-  use std::collections::HashMap;
   use zprove_core::transition::MemAccessClaim;
-  use zprove_core::zk_proof::{prove_memory_consistency, verify_memory_consistency};
-
-  /// Compute correct `write_version` values for a sequence of claims.
-  ///
-  /// Each claim's wv = number of writes to the same address *before* this
-  /// claim in the sequence (i.e. zero-indexed write count so far).
-  fn assign_write_versions(claims: &mut Vec<MemAccessClaim>) {
-    let mut wv_map: HashMap<u64, u32> = HashMap::new();
-    for c in claims.iter_mut() {
-      let wv = *wv_map.get(&c.addr).unwrap_or(&0);
-      c.write_version = wv;
-      if c.is_write {
-        *wv_map.entry(c.addr).or_insert(0) += 1;
-      }
-    }
-  }
+  use zprove_core::zk_proof::{
+    aggregate_proofs_tree, prove_memory_consistency, verify_memory_consistency,
+  };
 
   fn mwrite(addr: u64, rw: u64, val: u8) -> MemAccessClaim {
     let mut value = [0u8; 32];
     value[31] = val;
-    MemAccessClaim {
-      rw_counter: rw,
-      addr,
-      is_write: true,
-      value,
-      write_version: 0,
-    }
+    MemAccessClaim { rw_counter: rw, addr, is_write: true, value }
   }
 
   fn mread(addr: u64, rw: u64, val: u8) -> MemAccessClaim {
     let mut value = [0u8; 32];
     value[31] = val;
-    MemAccessClaim {
-      rw_counter: rw,
-      addr,
-      is_write: false,
-      value,
-      write_version: 0,
-    }
+    MemAccessClaim { rw_counter: rw, addr, is_write: false, value }
   }
+
+  // ── Single-batch tests ──────────────────────────────────────────────
 
   #[test]
   fn test_memory_consistency_single_write() {
-    let mut claims = vec![mwrite(0, 1, 42)];
-    assign_write_versions(&mut claims);
+    let claims = vec![mwrite(0, 1, 42)];
     let proof = prove_memory_consistency(&claims).expect("prove failed");
-    assert!(verify_memory_consistency(&proof, &claims));
+    assert!(verify_memory_consistency(&proof));
   }
 
   #[test]
   fn test_memory_consistency_write_then_read_same_value() {
-    let mut claims = vec![mwrite(0, 1, 99), mread(0, 2, 99)];
-    assign_write_versions(&mut claims);
+    let claims = vec![mwrite(0, 1, 99), mread(0, 2, 99)];
     let proof = prove_memory_consistency(&claims).expect("prove failed");
-    assert!(verify_memory_consistency(&proof, &claims));
+    assert!(verify_memory_consistency(&proof));
   }
 
   #[test]
   fn test_memory_consistency_read_uninitialized_zero() {
-    // Reading an address never written: value must be 0.
-    let mut claims = vec![mread(64, 1, 0)];
-    assign_write_versions(&mut claims);
+    let claims = vec![mread(64, 1, 0)];
     let proof = prove_memory_consistency(&claims).expect("prove failed");
-    assert!(verify_memory_consistency(&proof, &claims));
+    assert!(verify_memory_consistency(&proof));
   }
 
   #[test]
   fn test_memory_consistency_multiple_addresses() {
-    let mut claims = vec![
-      mwrite(0, 1, 11),
-      mwrite(32, 2, 22),
-      mread(0, 3, 11),
-      mread(32, 4, 22),
-    ];
-    assign_write_versions(&mut claims);
+    let claims =
+      vec![mwrite(0, 1, 11), mwrite(32, 2, 22), mread(0, 3, 11), mread(32, 4, 22)];
     let proof = prove_memory_consistency(&claims).expect("prove failed");
-    assert!(verify_memory_consistency(&proof, &claims));
+    assert!(verify_memory_consistency(&proof));
   }
 
   #[test]
   fn test_memory_consistency_overwrite_same_address() {
-    let mut claims = vec![
-      mwrite(0, 1, 10),
-      mwrite(0, 2, 20),
-      mread(0, 3, 20), // reads the overwritten value
-    ];
-    assign_write_versions(&mut claims);
+    let claims = vec![mwrite(0, 1, 10), mwrite(0, 2, 20), mread(0, 3, 20)];
     let proof = prove_memory_consistency(&claims).expect("prove failed");
-    assert!(verify_memory_consistency(&proof, &claims));
+    assert!(verify_memory_consistency(&proof));
   }
 
   #[test]
   fn test_memory_consistency_proof_fails_bad_read() {
-    // Read reports wrong value for an unwritten address.
-    let mut claims = vec![mread(0, 1, 7)]; // 7 != 0 (uninitialised)
-    assign_write_versions(&mut claims);
-    let result = prove_memory_consistency(&claims);
-    assert!(
-      result.is_err(),
-      "expected prove to fail for inconsistent read"
-    );
+    // In the read/write set design, a genesis read IS valid — it is a cross-batch
+    // dependency recorded in read_set.  The "bad" proves are write→wrong-value-read
+    // (tested elsewhere).  Here we just confirm the genesis read round-trips.
+    let claims = vec![mread(0, 1, 7)];
+    let proof = prove_memory_consistency(&claims).expect("genesis read should succeed");
+    assert!(verify_memory_consistency(&proof));
+    let mut expected = [0u8; 32]; expected[31] = 7;
+    assert_eq!(proof.read_set.get(&0), Some(&expected));
+    assert!(proof.write_set.is_empty());
   }
 
   #[test]
   fn test_memory_consistency_proof_fails_stale_read() {
-    // Read after newer overwrite sees old value — should fail.
-    let mut claims = vec![
-      mwrite(0, 1, 10),
-      mwrite(0, 2, 20),
-      mread(0, 3, 10), // stale: should read 20
-    ];
-    assign_write_versions(&mut claims);
+    // After two writes to addr=0 (val 10 then 20), reading the stale value 10 should fail.
+    let claims = vec![mwrite(0, 1, 10), mwrite(0, 2, 20), mread(0, 3, 10)];
     let result = prove_memory_consistency(&claims);
     assert!(result.is_err(), "expected prove to fail for stale read");
   }
 
   #[test]
   fn test_memory_consistency_proof_fails_wrong_read_after_write() {
-    // Write 5, then read 6 (wrong).
-    let mut claims = vec![mwrite(0, 1, 5), mread(0, 2, 6)];
-    assign_write_versions(&mut claims);
+    let claims = vec![mwrite(0, 1, 5), mread(0, 2, 6)];
     let result = prove_memory_consistency(&claims);
-    assert!(
-      result.is_err(),
-      "expected prove to fail for wrong read value"
-    );
+    assert!(result.is_err(), "expected prove to fail for wrong read value");
   }
 
   #[test]
   fn test_memory_consistency_proof_roundtrip_larger() {
-    // Prove → verify roundtrip with several addresses and values.
-    let mut claims = vec![
+    let claims = vec![
       mwrite(0, 1, 1),
       mwrite(32, 2, 2),
-      mwrite(0, 3, 3), // overwrite addr 0
-      mread(0, 4, 3),  // reads overwritten value
+      mwrite(0, 3, 3),
+      mread(0, 4, 3),
       mread(32, 5, 2),
     ];
-    assign_write_versions(&mut claims);
     let proof = prove_memory_consistency(&claims).expect("prove failed");
-    assert!(verify_memory_consistency(&proof, &claims));
+    assert!(verify_memory_consistency(&proof));
   }
 
   #[test]
   fn test_memory_consistency_empty_claims() {
     let claims: Vec<MemAccessClaim> = vec![];
     let proof = prove_memory_consistency(&claims).expect("prove failed");
-    assert!(verify_memory_consistency(&proof, &claims));
+    assert!(verify_memory_consistency(&proof));
   }
+
+  // ── Cross-batch read/write set aggregation tests ───────────────────
+  //
+  // These tests exercise the read/write set intersection design:
+  // - Each leaf proof exposes `write_set` (final writes) and `read_set`
+  //   (cross-batch dependencies).
+  // - Aggregation checks R.read_set ∩ L.write_set for value consistency.
+  // - All leaf proofs are fully independent (no prev-snapshot param).
+
+  /// Two batches where batch-2 reads a value written by batch-1.
+  /// The aggregation must pass the intersection check.
+  #[test]
+  fn test_rw_set_two_batches_cross_read() {
+    // Batch 1: write addr=0 → 42  (write_set = {0→42}, read_set = {})
+    let batch1 = vec![mwrite(0, 1, 42)];
+    let proof1 = prove_memory_consistency(&batch1).expect("batch1 prove failed");
+    assert_eq!(proof1.write_set.len(), 1);
+    assert!(proof1.read_set.is_empty());
+
+    // Batch 2: read addr=0 → 42  (write_set = {}, read_set = {0→42})
+    let batch2 = vec![mread(0, 2, 42)];
+    let proof2 = prove_memory_consistency(&batch2).expect("batch2 prove failed");
+    assert!(proof2.write_set.is_empty());
+    assert_eq!(proof2.read_set.len(), 1);
+
+    // Aggregate: R.read_set ∩ L.write_set = {0} → values match ✓
+    let agg = aggregate_proofs_tree(&[proof1, proof2]).expect("aggregation failed");
+    // After merging: write_set={0→42} (from batch1), read_set={} (batch2's read resolved)
+    assert_eq!(agg.write_set.len(), 1);
+    assert!(agg.read_set.is_empty(), "root read_set should be empty (genesis satisfies nothing)");
+  }
+
+  /// Four batches aggregated in a binary tree (two levels).
+  /// All leaf proofs are independent — no prev-snapshot needed.
+  #[test]
+  fn test_rw_set_four_batches_binary_tree() {
+    // Batch 1: write addr=0 → 1
+    let p1 = prove_memory_consistency(&[mwrite(0, 1, 1)]).expect("b1");
+    // Batch 2: overwrite addr=0 → 2
+    let p2 = prove_memory_consistency(&[mwrite(0, 2, 2)]).expect("b2");
+    // Batch 3: write addr=32 → 3
+    let p3 = prove_memory_consistency(&[mwrite(32, 3, 3)]).expect("b3");
+    // Batch 4: read addr=0 → 2, read addr=32 → 3 (both cross-batch)
+    let p4 = prove_memory_consistency(&[mread(0, 4, 2), mread(32, 5, 3)]).expect("b4");
+
+    // Each leaf proof is stand-alone — verify individually.
+    assert!(verify_memory_consistency(&p1));
+    assert!(verify_memory_consistency(&p2));
+    assert!(verify_memory_consistency(&p3));
+    assert!(verify_memory_consistency(&p4));
+
+    // Binary-tree aggregation (two levels).
+    let agg = aggregate_proofs_tree(&[p1, p2, p3, p4]).expect("aggregation");
+
+    // Final write_set: {addr=0→2, addr=32→3}  (later batch wins for addr=0)
+    let mut w0 = [0u8; 32]; w0[31] = 2;
+    let mut w32 = [0u8; 32]; w32[31] = 3;
+    assert_eq!(agg.write_set.get(&0), Some(&w0));
+    assert_eq!(agg.write_set.get(&32), Some(&w32));
+    // read_set at root: batch4's reads were resolved by batch2/3 in the tree.
+    assert!(agg.read_set.is_empty());
+  }
+}
+
+// ============================================================
+// Storage consistency tests
+// ============================================================
+
+#[cfg(test)]
+mod storage_consistency_tests {
+  use zprove_core::transition::StorageAccessClaim;
+  use zprove_core::zk_proof::{
+    StorageKey, StorageSet,
+    prove_storage_consistency, verify_storage_consistency,
+    aggregate_storage_proofs, aggregate_storage_proofs_tree,
+  };
+
+  // ── Helpers ──────────────────────────────────────────────────────────
+
+  fn contract(seed: u8) -> [u8; 20] {
+    let mut c = [0u8; 20];
+    c[19] = seed; // last byte distinguishes contracts
+    c
+  }
+
+  fn slot(n: u64) -> [u8; 32] {
+    let mut s = [0u8; 32];
+    s[24..32].copy_from_slice(&n.to_be_bytes());
+    s
+  }
+
+  fn val(v: u64) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    b[24..32].copy_from_slice(&v.to_be_bytes());
+    b
+  }
+
+  fn swrite(c: [u8; 20], sl: [u8; 32], rw: u64, v: [u8; 32]) -> StorageAccessClaim {
+    StorageAccessClaim { rw_counter: rw, contract: c, slot: sl, is_write: true, value: v }
+  }
+
+  fn sread(c: [u8; 20], sl: [u8; 32], rw: u64, v: [u8; 32]) -> StorageAccessClaim {
+    StorageAccessClaim { rw_counter: rw, contract: c, slot: sl, is_write: false, value: v }
+  }
+
+  fn key(c: [u8; 20], sl: [u8; 32]) -> StorageKey { (c, sl) }
+
+  // ── Single-batch tests ────────────────────────────────────────────────
+
+  #[test]
+  fn stor_empty_batch_proves_and_verifies() {
+    let p = prove_storage_consistency(&[]).expect("prove");
+    assert!(verify_storage_consistency(&p));
+    assert!(p.write_set.is_empty());
+    assert!(p.read_set.is_empty());
+  }
+
+  #[test]
+  fn stor_single_write_proves_and_verifies() {
+    let c0 = contract(0);
+    let s0 = slot(0);
+    let v1 = val(1);
+    let claims = vec![swrite(c0, s0, 1, v1)];
+    let p = prove_storage_consistency(&claims).expect("prove");
+    assert!(verify_storage_consistency(&p));
+    assert_eq!(p.write_set.get(&key(c0, s0)), Some(&v1));
+    assert!(p.read_set.is_empty());
+  }
+
+  #[test]
+  fn stor_single_read_goes_to_read_set() {
+    let c0 = contract(0);
+    let s0 = slot(0);
+    let v42 = val(42);
+    let claims = vec![sread(c0, s0, 1, v42)];
+    let p = prove_storage_consistency(&claims).expect("prove");
+    assert!(verify_storage_consistency(&p));
+    assert!(p.write_set.is_empty());
+    assert_eq!(p.read_set.get(&key(c0, s0)), Some(&v42));
+  }
+
+  #[test]
+  fn stor_write_then_read_stays_in_write_set_only() {
+    let c0 = contract(0);
+    let s0 = slot(0);
+    let v7 = val(7);
+    let claims = vec![
+      swrite(c0, s0, 1, v7),
+      sread(c0, s0, 2, v7),
+    ];
+    let p = prove_storage_consistency(&claims).expect("prove");
+    assert!(verify_storage_consistency(&p));
+    assert_eq!(p.write_set.get(&key(c0, s0)), Some(&v7));
+    assert!(p.read_set.is_empty());
+  }
+
+  #[test]
+  fn stor_last_write_wins() {
+    let c0 = contract(0);
+    let s0 = slot(0);
+    let v1 = val(1);
+    let v2 = val(2);
+    let claims = vec![
+      swrite(c0, s0, 1, v1),
+      swrite(c0, s0, 2, v2),
+    ];
+    let p = prove_storage_consistency(&claims).expect("prove");
+    assert!(verify_storage_consistency(&p));
+    assert_eq!(p.write_set.get(&key(c0, s0)), Some(&v2));
+    assert!(p.read_set.is_empty());
+  }
+
+  #[test]
+  fn stor_multiple_slots_and_contracts() {
+    let c0 = contract(0);
+    let c1 = contract(1);
+    let s0 = slot(0);
+    let s1 = slot(1);
+    let v10 = val(10);
+    let v20 = val(20);
+    let v30 = val(30);
+    let claims = vec![
+      swrite(c0, s0, 1, v10),
+      swrite(c1, s0, 2, v20),
+      sread(c0, s1, 3, v30),
+    ];
+    let p = prove_storage_consistency(&claims).expect("prove");
+    assert!(verify_storage_consistency(&p));
+    assert_eq!(p.write_set.get(&key(c0, s0)), Some(&v10));
+    assert_eq!(p.write_set.get(&key(c1, s0)), Some(&v20));
+    assert_eq!(p.write_set.len(), 2);
+    assert_eq!(p.read_set.get(&key(c0, s1)), Some(&v30));
+    assert_eq!(p.read_set.len(), 1);
+  }
+
+  #[test]
+  fn stor_read_before_write_is_in_read_set() {
+    let c0 = contract(0);
+    let s0 = slot(0);
+    let v_old = val(99);
+    let v_new = val(100);
+    let claims = vec![
+      sread(c0, s0, 1, v_old),   // genesis read
+      swrite(c0, s0, 2, v_new),  // overwrites locally
+    ];
+    let p = prove_storage_consistency(&claims).expect("prove");
+    assert!(verify_storage_consistency(&p));
+    assert_eq!(p.write_set.get(&key(c0, s0)), Some(&v_new));
+    assert_eq!(p.read_set.get(&key(c0, s0)), Some(&v_old));
+  }
+
+  #[test]
+  fn stor_invalid_read_after_write_mismatch_fails() {
+    let c0 = contract(0);
+    let s0 = slot(0);
+    let v1 = val(1);
+    let v2 = val(2);
+    let claims = vec![
+      swrite(c0, s0, 1, v1),
+      sread(c0, s0, 2, v2), // mismatch: v2 != v1
+    ];
+    assert!(prove_storage_consistency(&claims).is_err());
+  }
+
+  #[test]
+  fn stor_contradictory_reads_fail() {
+    let c0 = contract(0);
+    let s0 = slot(0);
+    let v1 = val(1);
+    let v2 = val(2);
+    let claims = vec![
+      sread(c0, s0, 1, v1),
+      sread(c0, s0, 2, v2), // same slot, different value
+    ];
+    assert!(prove_storage_consistency(&claims).is_err());
+  }
+
+  #[test]
+  fn stor_repeated_consistent_reads_pass() {
+    let c0 = contract(0);
+    let s0 = slot(0);
+    let v5 = val(5);
+    let claims = vec![
+      sread(c0, s0, 1, v5),
+      sread(c0, s0, 2, v5), // same value → OK
+    ];
+    let p = prove_storage_consistency(&claims).expect("prove");
+    assert!(verify_storage_consistency(&p));
+    assert_eq!(p.read_set.get(&key(c0, s0)), Some(&v5));
+  }
+
+  #[test]
+  fn stor_writes_in_multiple_batches_no_cross_batch_dep() {
+    let c0 = contract(0);
+    let s0 = slot(0);
+    let s1 = slot(1);
+    let v1 = val(1);
+    let v2 = val(2);
+    let batch1 = vec![swrite(c0, s0, 1, v1)];
+    let batch2 = vec![swrite(c0, s1, 2, v2)];
+    let p1 = prove_storage_consistency(&batch1).expect("prove b1");
+    let p2 = prove_storage_consistency(&batch2).expect("prove b2");
+    assert!(verify_storage_consistency(&p1));
+    assert!(verify_storage_consistency(&p2));
+    assert_eq!(p1.write_set.get(&key(c0, s0)), Some(&v1));
+    assert_eq!(p2.write_set.get(&key(c0, s1)), Some(&v2));
+  }
+
+  #[test]
+  fn stor_large_batch_proves_and_verifies() {
+    let mut claims = Vec::new();
+    for i in 0u64..64 {
+      let c = contract((i % 4) as u8);
+      let s = slot(i);
+      let v = val(i * 10);
+      claims.push(swrite(c, s, i * 2 + 1, v));
+      claims.push(sread(c, s, i * 2 + 2, v));
+    }
+    let p = prove_storage_consistency(&claims).expect("prove large");
+    assert!(verify_storage_consistency(&p));
+    assert_eq!(p.write_set.len(), 64);
+    assert!(p.read_set.is_empty());
+  }
+
+  // ── Cross-batch aggregation tests ─────────────────────────────────────
+
+  #[test]
+  fn stor_aggregate_two_batches_cross_dep() {
+    // batch2 reads a slot that batch1 wrote.
+    let c0 = contract(0);
+    let s0 = slot(0);
+    let v7 = val(7);
+
+    let batch1 = vec![swrite(c0, s0, 1, v7)];
+    let batch2 = vec![sread(c0, s0, 2, v7)];
+    let p1 = prove_storage_consistency(&batch1).expect("p1");
+    let p2 = prove_storage_consistency(&batch2).expect("p2");
+
+    let agg = aggregate_storage_proofs(&p1, &p2).expect("agg");
+    assert_eq!(agg.write_set.get(&key(c0, s0)), Some(&v7));
+    assert!(agg.read_set.is_empty()); // resolved by batch1
+  }
+
+  #[test]
+  fn stor_aggregate_tree_four_batches() {
+    let c0 = contract(0);
+    let c1 = contract(1);
+    let s0 = slot(0);
+    let v1 = val(1);
+    let v2 = val(2);
+    let v3 = val(3);
+
+    // batch1: write c0/s0 = 1
+    // Redesigned so ALL reads are resolved within the tree:
+    // batch1: write c0/s0 = 1
+    // batch2: write c0/s0 = 2, write c1/s0 = 3
+    // batch3: (empty — used as a trivial separator)
+    // batch4: read c0/s0 = 2, read c1/s0 = 3  (both resolved by batch2)
+    let p1 = prove_storage_consistency(&[swrite(c0, s0, 1, v1)]).expect("p1");
+    let p2 = prove_storage_consistency(&[
+      swrite(c0, s0, 2, v2),
+      swrite(c1, s0, 4, v3),
+    ]).expect("p2");
+    let p3 = prove_storage_consistency(&[swrite(c1, s0, 5, v3)]).expect("p3");
+    let p4 = prove_storage_consistency(&[
+      sread(c0, s0, 6, v2),
+      sread(c1, s0, 7, v3),
+    ]).expect("p4");
+
+    let agg = aggregate_storage_proofs_tree(&[p1, p2, p3, p4]).expect("tree agg");
+
+    // Final writes: c0/s0=2 (batch2 overwrites batch1), c1/s0=3 (batch3 overwrites batch2)
+    assert_eq!(agg.write_set.get(&key(c0, s0)), Some(&v2));
+    assert_eq!(agg.write_set.get(&key(c1, s0)), Some(&v3));
+    // All reads in batch4 are resolved within the tree — no genesis dependencies.
+    assert!(agg.read_set.is_empty());
+  }
+}
+
+// ============================================================
+// SHL / SHR / SAR semantic proof tests
+// ============================================================
+#[cfg(test)]
+mod shift_tests {
+  use revm::bytecode::opcode;
+  use zprove_core::semantic_proof::infer_proof;
+  use zprove_core::transition::{
+    CallContextClaim, InstructionTransitionProof, KeccakClaim, ReturnDataClaim,
+    StorageAccessClaim, opcode_input_count, opcode_output_count,
+    prove_instruction, verify_proof, verify_proof_with_rows, wff_instruction,
+  };
+
+  fn u256(val: u128) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    b[16..32].copy_from_slice(&val.to_be_bytes());
+    b
+  }
+
+  /// Reference implementation for EVM SHL.
+  fn evm_shl(shift: u64, value: &[u8; 32]) -> [u8; 32] {
+    if shift >= 256 {
+      return [0u8; 32];
+    }
+    let byte_shift = (shift / 8) as usize;
+    let bit_shift = (shift % 8) as u32;
+    let mut result = [0u8; 32];
+    for k in 0..32usize {
+      if k + byte_shift < 32 {
+        result[k] |= value[k + byte_shift] << bit_shift;
+      }
+      if bit_shift > 0 && k + byte_shift + 1 < 32 {
+        result[k] |= value[k + byte_shift + 1] >> (8 - bit_shift);
+      }
+    }
+    result
+  }
+
+  /// Reference implementation for EVM SHR (logical).
+  fn evm_shr(shift: u64, value: &[u8; 32]) -> [u8; 32] {
+    if shift >= 256 {
+      return [0u8; 32];
+    }
+    let byte_shift = (shift / 8) as usize;
+    let bit_shift = (shift % 8) as u32;
+    let mut result = [0u8; 32];
+    for k in 0..32usize {
+      if k >= byte_shift {
+        result[k] |= value[k - byte_shift] >> bit_shift;
+      }
+      if bit_shift > 0 && k > byte_shift {
+        result[k] |= value[k - byte_shift - 1] << (8 - bit_shift);
+      }
+    }
+    result
+  }
+
+  /// Reference implementation for EVM SAR (arithmetic).
+  fn evm_sar(shift: u64, value: &[u8; 32]) -> [u8; 32] {
+    let sign_fill = if (value[0] & 0x80) != 0 { 0xFF_u8 } else { 0_u8 };
+    if shift >= 256 {
+      return [sign_fill; 32];
+    }
+    let byte_shift = (shift / 8) as usize;
+    let bit_shift = (shift % 8) as u32;
+    let mut result = [0u8; 32];
+    for k in 0..32usize {
+      let src = if k >= byte_shift { value[k - byte_shift] } else { sign_fill };
+      let prev = if k > byte_shift {
+        value[k - byte_shift - 1]
+      } else if k == byte_shift && byte_shift > 0 {
+        sign_fill
+      } else {
+        sign_fill
+      };
+      result[k] = src >> bit_shift;
+      if bit_shift > 0 {
+        result[k] |= ((prev as u16) << (8 - bit_shift)) as u8;
+      }
+    }
+    if bit_shift > 0 && byte_shift == 0 {
+      result[0] = ((value[0] as i8) >> bit_shift) as u8;
+    }
+    result
+  }
+
+  fn make_itp(op: u8, shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32])
+    -> InstructionTransitionProof
+  {
+    let proof = prove_instruction(op, &[*shift, *value], &[*result])
+      .expect("shift opcode must prove");
+    InstructionTransitionProof {
+      opcode: op,
+      pc: 0,
+      stack_inputs: vec![*shift, *value],
+      stack_outputs: vec![*result],
+      semantic_proof: Some(proof),
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    }
+  }
+
+  // ── SHL ──
+
+  #[test]
+  fn test_shl_zero_shift() {
+    let value = u256(0xABCD);
+    let result = evm_shl(0, &value);
+    let itp = make_itp(opcode::SHL, &u256(0), &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_shl_exact_byte_shift() {
+    let value = u256(0x00FF);
+    let result = evm_shl(8, &value);
+    let itp = make_itp(opcode::SHL, &u256(8), &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_shl_sub_byte_shift() {
+    // shift=3, n=0, m=3
+    let value = u256(0b0001_0001);
+    let result = evm_shl(3, &value);
+    let itp = make_itp(opcode::SHL, &u256(3), &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_shl_mixed_8n_plus_m() {
+    // shift=19 = 8*2 + 3
+    let value = u256(0xDEAD_BEEF);
+    let result = evm_shl(19, &value);
+    let itp = make_itp(opcode::SHL, &u256(19), &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_shl_overflow_shift_gives_zero() {
+    let mut shift = [0u8; 32];
+    shift[30] = 1; // = 256
+    let value = u256(0xDEAD);
+    let result = [0u8; 32];
+    let itp = make_itp(opcode::SHL, &shift, &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_shl_wrong_result_rejected() {
+    let value = u256(1);
+    let correct = evm_shl(8, &value);
+    let mut wrong = correct;
+    wrong[31] ^= 1;
+    let itp = make_itp(opcode::SHL, &u256(8), &value, &wrong);
+    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_rows(&itp));
+  }
+
+  // ── SHR ──
+
+  #[test]
+  fn test_shr_zero_shift() {
+    let value = u256(0xABCD_0000);
+    let result = evm_shr(0, &value);
+    let itp = make_itp(opcode::SHR, &u256(0), &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_shr_exact_byte_shift() {
+    let value = u256(0xFF00);
+    let result = evm_shr(8, &value);
+    let itp = make_itp(opcode::SHR, &u256(8), &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_shr_mixed_8n_plus_m() {
+    // shift=11 = 8*1 + 3
+    let value = u256(0xDEAD_BEEF);
+    let result = evm_shr(11, &value);
+    let itp = make_itp(opcode::SHR, &u256(11), &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_shr_overflow_shift_gives_zero() {
+    let mut shift = [0u8; 32];
+    shift[30] = 1; // 256
+    let value = u256(0xFFFF);
+    let result = [0u8; 32];
+    let itp = make_itp(opcode::SHR, &shift, &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_shr_wrong_result_rejected() {
+    let value = u256(0x1F0);
+    let correct = evm_shr(4, &value);
+    let mut wrong = correct;
+    wrong[31] ^= 2;
+    let itp = make_itp(opcode::SHR, &u256(4), &value, &wrong);
+    assert!(!verify_proof(&itp));
+    assert!(!verify_proof_with_rows(&itp));
+  }
+
+  // ── SAR ──
+
+  #[test]
+  fn test_sar_positive_number() {
+    let value = u256(0x00F0);
+    let result = evm_sar(4, &value);
+    let itp = make_itp(opcode::SAR, &u256(4), &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_sar_negative_number_fills_ones() {
+    // value = 0xFF00...00 (negative), shift by 8 → 0xFFFF00...00
+    let mut value = [0u8; 32];
+    value[0] = 0xFF;
+    let result = evm_sar(8, &value);
+    assert_eq!(result[0], 0xFF, "sign fill must propagate");
+    let itp = make_itp(opcode::SAR, &u256(8), &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_sar_overflow_shift_negative_gives_all_ones() {
+    let mut shift = [0u8; 32];
+    shift[30] = 1; // 256
+    let mut value = [0u8; 32];
+    value[0] = 0x80; // negative
+    let result = [0xFF; 32];
+    let itp = make_itp(opcode::SAR, &shift, &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_sar_overflow_shift_positive_gives_zero() {
+    let mut shift = [0u8; 32];
+    shift[30] = 1; // 256
+    let value = u256(0x1234);
+    let result = [0u8; 32];
+    let itp = make_itp(opcode::SAR, &shift, &value, &result);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  // ── WFF ↔ prove roundtrip ──
+
+  #[test]
+  fn test_shift_wff_infer_roundtrip() {
+    let neg_value = { let mut v = [0u8; 32]; v[0] = 0x80; v };
+    let cases: Vec<(u8, u64, [u8; 32])> = vec![
+      (opcode::SHL, 3,  u256(0b1000_0001)),
+      (opcode::SHL, 8,  u256(0xABCD)),
+      (opcode::SHL, 16, u256(0x00FF)),
+      (opcode::SHR, 4,  u256(0xF0)),
+      (opcode::SHR, 8,  u256(0xFF00)),
+      (opcode::SHR, 11, u256(0xDEAD_BEEF)),
+      (opcode::SAR, 1,  neg_value),
+      (opcode::SAR, 8,  u256(0x00FF)),
+    ];
+    for (op, shift_u64, value) in cases {
+      let shift = u256(shift_u64 as u128);
+      let result = match op {
+        o if o == opcode::SHL => evm_shl(shift_u64, &value),
+        o if o == opcode::SHR => evm_shr(shift_u64, &value),
+        _ => evm_sar(shift_u64, &value),
+      };
+      let proof = prove_instruction(op, &[shift, value], &[result])
+        .expect("shift opcode must prove");
+      let inferred = infer_proof(&proof).expect("infer must succeed");
+      let expected = wff_instruction(op, &[shift, value], &[result])
+        .expect("wff must exist");
+      assert_eq!(
+        inferred, expected,
+        "opcode 0x{op:02x} shift={shift_u64} inferred WFF must match expected"
+      );
+    }
+  }
+
+  // ============================================================
+  // New arithmetic opcodes: BYTE, SIGNEXTEND, ADDMOD, MULMOD, EXP
+  // ============================================================
+
+  fn make_arith_itp(op: u8, inputs: &[[u8; 32]], output: [u8; 32]) -> InstructionTransitionProof {
+    let proof = prove_instruction(op, inputs, &[output]).expect("proof must exist");
+    InstructionTransitionProof {
+      opcode: op,
+      pc: 0,
+      stack_inputs: inputs.to_vec(),
+      stack_outputs: vec![output],
+      semantic_proof: Some(proof),
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    }
+  }
+
+  #[test]
+  fn test_byte_opcode() {
+    // BYTE(2, 0xAA_BB_CC...) => 0x00..CC in byte 31
+    let mut value = [0u8; 32];
+    for (i, b) in value.iter_mut().enumerate() {
+      *b = i as u8;
+    }
+    for idx in 0u8..32 {
+      let i_word = u256(idx as u128);
+      let expected_byte = value[idx as usize];
+      let mut out = [0u8; 32];
+      out[31] = expected_byte;
+      let itp = make_arith_itp(opcode::BYTE, &[i_word, value], out);
+      assert!(verify_proof(&itp), "BYTE({idx}) proof failed");
+      assert!(verify_proof_with_rows(&itp), "BYTE({idx}) rows failed");
+    }
+  }
+
+  #[test]
+  fn test_byte_out_of_range() {
+    let value = u256(0xDEAD_BEEF);
+    // i = 32 → result = 0
+    let i_word = u256(32);
+    let itp = make_arith_itp(opcode::BYTE, &[i_word, value], [0u8; 32]);
+    assert!(verify_proof(&itp), "BYTE(32) should yield 0");
+  }
+
+  #[test]
+  fn test_signextend_positive() {
+    // SIGNEXTEND(0, 0x7F) = 0x000...7F (positive, no fill)
+    let b = u256(0);
+    let x = u256(0x7F);
+    let expected = u256(0x7F);
+    let itp = make_arith_itp(opcode::SIGNEXTEND, &[b, x], expected);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_signextend_negative() {
+    // SIGNEXTEND(0, 0x80) = 0xFFFF...80 (negative, fill with 0xFF)
+    let b = u256(0);
+    let x = u256(0x80);
+    let mut expected = [0xFF_u8; 32];
+    expected[31] = 0x80;
+    let itp = make_arith_itp(opcode::SIGNEXTEND, &[b, x], expected);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_signextend_passthrough() {
+    // SIGNEXTEND(31, x) = x unchanged
+    let b = u256(31);
+    let x = u256(0x0102_0304);
+    let itp = make_arith_itp(opcode::SIGNEXTEND, &[b, x], x);
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn test_addmod_basic() {
+    // ADDMOD(10, 10, 8) = 4
+    let a = u256(10);
+    let b = u256(10);
+    let n = u256(8);
+    let out = u256(4);
+    let itp = make_arith_itp(opcode::ADDMOD, &[a, b, n], out);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_addmod_zero_modulus() {
+    // ADDMOD(a, b, 0) = 0
+    let a = u256(100);
+    let b = u256(200);
+    let n = u256(0);
+    let itp = make_arith_itp(opcode::ADDMOD, &[a, b, n], u256(0));
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn test_addmod_large() {
+    // ADDMOD(2^128, 2^128, 3) = (2^129) mod 3
+    // 2^128 mod 3: 2^1 = 2, 2^2 = 1, 2^4 = 1... 2^128 = 1 (mod 3)
+    // so 2^128 + 2^128 = 2*2^128 = 2 (mod 3)? Actually 2^128 mod 3 = 1 (since 2^even = 1 mod 3)
+    // 1 + 1 = 2
+    let two128: u128 = 1u128 << 127; // top bit of u128 = 2^127... let's use a simpler case
+    let a = u256(1_000_000_007);
+    let b = u256(999_999_999);
+    let n = u256(1_000_000_007);
+    // a + b = 2_000_000_006, mod 1_000_000_007 = 999_999_999
+    let out = u256(999_999_999);
+    let itp = make_arith_itp(opcode::ADDMOD, &[a, b, n], out);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_mulmod_basic() {
+    // MULMOD(10, 10, 8) = 100 mod 8 = 4
+    let a = u256(10);
+    let b = u256(10);
+    let n = u256(8);
+    let out = u256(4);
+    let itp = make_arith_itp(opcode::MULMOD, &[a, b, n], out);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_mulmod_zero_modulus() {
+    // MULMOD(a, b, 0) = 0
+    let a = u256(100);
+    let b = u256(200);
+    let n = u256(0);
+    let itp = make_arith_itp(opcode::MULMOD, &[a, b, n], u256(0));
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn test_mulmod_large() {
+    // MULMOD(9, 9, 11) = 81 mod 11 = 4
+    let a = u256(9);
+    let b = u256(9);
+    let n = u256(11);
+    let out = u256(4);
+    let itp = make_arith_itp(opcode::MULMOD, &[a, b, n], out);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_exp_basic() {
+    // EXP(2, 10) = 1024
+    let a = u256(2);
+    let b = u256(10);
+    let out = u256(1024);
+    let itp = make_arith_itp(opcode::EXP, &[a, b], out);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_exp_zero_exponent() {
+    // EXP(a, 0) = 1
+    let a = u256(12345);
+    let b = u256(0);
+    let out = u256(1);
+    let itp = make_arith_itp(opcode::EXP, &[a, b], out);
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn test_exp_zero_base() {
+    // EXP(0, n) = 0 for n > 0
+    let a = u256(0);
+    let b = u256(5);
+    let out = u256(0);
+    let itp = make_arith_itp(opcode::EXP, &[a, b], out);
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn test_exp_mod_overflow() {
+    // EXP(2, 256) mod 2^256 = 0  (since 2^256 overflows u256 to 0)
+    let a = u256(2);
+    let b = u256(256);
+    let out = u256(0);
+    let itp = make_arith_itp(opcode::EXP, &[a, b], out);
+    assert!(verify_proof(&itp));
+    assert!(verify_proof_with_rows(&itp));
+  }
+
+  #[test]
+  fn test_arithmetic_wff_consistency() {
+    // Verify inferred WFF matches wff_instruction for all new opcodes.
+    let cases: &[(u8, &[[u8; 32]], [u8; 32])] = &[
+      // BYTE(31, 0xABCDEF): byte at index 31 (LSB) = 0xEF
+      (opcode::BYTE, &[u256(31), u256(0xABCDEF)], {
+        let mut o = [0u8; 32]; o[31] = 0xEF; o
+      }),
+      (opcode::SIGNEXTEND, &[u256(0), u256(0x80)], { let mut o = [0xFF_u8; 32]; o[31] = 0x80; o }),
+      (opcode::ADDMOD, &[u256(5), u256(7), u256(6)], u256(0)),
+      (opcode::MULMOD, &[u256(5), u256(7), u256(6)], u256(5)),
+      (opcode::EXP, &[u256(3), u256(4)], u256(81)),
+    ];
+    for &(op, inputs, out) in cases {
+      let proof = prove_instruction(op, inputs, &[out]).expect("proof");
+      let inferred = infer_proof(&proof).expect("infer");
+      let expected = wff_instruction(op, inputs, &[out]).expect("wff");
+      assert_eq!(inferred, expected, "opcode 0x{op:02x} WFF mismatch");
+    }
+  }
+
+  // ============================================================
+  // RETURN / REVERT
+  // ============================================================
+
+  #[test]
+  fn test_return_verify_proof_accepts() {
+    // RETURN pops 2 (offset, size), pushes 0.
+    let offset = u256(0);
+    let size = u256(32);
+    let data = vec![0xABu8; 32];
+    let itp = InstructionTransitionProof {
+      opcode: opcode::RETURN,
+      pc: 0,
+      stack_inputs: vec![offset, size],
+      stack_outputs: vec![],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: Some(ReturnDataClaim {
+        is_revert: false,
+        offset: 0,
+        size: 32,
+        data: data.clone(),
+      }),
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "RETURN should pass verify_proof");
+    assert!(verify_proof_with_rows(&itp), "RETURN should pass verify_proof_with_rows");
+  }
+
+  #[test]
+  fn test_revert_verify_proof_accepts() {
+    // REVERT pops 2 (offset, size), pushes 0.
+    let offset = u256(0);
+    let size = u256(0);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::REVERT,
+      pc: 0,
+      stack_inputs: vec![offset, size],
+      stack_outputs: vec![],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: Some(ReturnDataClaim {
+        is_revert: true,
+        offset: 0,
+        size: 0,
+        data: vec![],
+      }),
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "REVERT(0,0) should pass verify_proof");
+  }
+
+  #[test]
+  fn test_return_wrong_arity_rejected() {
+    // Only 1 stack input instead of required 2 → arity check fails.
+    let offset = u256(0);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::RETURN,
+      pc: 0,
+      stack_inputs: vec![offset],  // wrong: needs 2
+      stack_outputs: vec![],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(!verify_proof(&itp), "RETURN with wrong arity must be rejected");
+  }
+
+  #[test]
+  fn test_return_opcode_arity() {
+    assert_eq!(opcode_input_count(opcode::RETURN), 2);
+    assert_eq!(opcode_output_count(opcode::RETURN), 0);
+    assert_eq!(opcode_input_count(opcode::REVERT), 2);
+    assert_eq!(opcode_output_count(opcode::REVERT), 0);
+  }
+
+  // ── SLOAD / SSTORE tests ───────────────────────────────────────────────────
+
+  #[test]
+  fn test_sload_verify_proof_accepts() {
+    let slot = u256(42);
+    let value = u256(1234);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::SLOAD,
+      pc: 0,
+      stack_inputs: vec![slot],
+      stack_outputs: vec![value],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![StorageAccessClaim {
+        rw_counter: 1,
+        contract: [0u8; 20],
+        slot,
+        is_write: false,
+        value,
+      }],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "SLOAD should pass verify_proof");
+    assert!(verify_proof_with_rows(&itp), "SLOAD should pass verify_proof_with_rows");
+  }
+
+  #[test]
+  fn test_sstore_verify_proof_accepts() {
+    let slot = u256(42);
+    let value = u256(9999);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::SSTORE,
+      pc: 0,
+      stack_inputs: vec![slot, value],
+      stack_outputs: vec![],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![StorageAccessClaim {
+        rw_counter: 1,
+        contract: [0u8; 20],
+        slot,
+        is_write: true,
+        value,
+      }],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "SSTORE should pass verify_proof");
+    assert!(verify_proof_with_rows(&itp), "SSTORE should pass verify_proof_with_rows");
+  }
+
+  #[test]
+  fn test_sload_wrong_arity_rejected() {
+    // No stack inputs → arity mismatch
+    let itp = InstructionTransitionProof {
+      opcode: opcode::SLOAD,
+      pc: 0,
+      stack_inputs: vec![],
+      stack_outputs: vec![u256(1)],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(!verify_proof(&itp), "SLOAD with missing slot input must be rejected");
+  }
+
+  #[test]
+  fn test_sstore_wrong_arity_rejected() {
+    // Only 1 input instead of 2 → arity mismatch
+    let itp = InstructionTransitionProof {
+      opcode: opcode::SSTORE,
+      pc: 0,
+      stack_inputs: vec![u256(42)],
+      stack_outputs: vec![],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(!verify_proof(&itp), "SSTORE with only 1 input must be rejected");
+  }
+
+  #[test]
+  fn test_sload_sstore_opcode_arity() {
+    assert_eq!(opcode_input_count(opcode::SLOAD), 1);
+    assert_eq!(opcode_output_count(opcode::SLOAD), 1);
+    assert_eq!(opcode_input_count(opcode::SSTORE), 2);
+    assert_eq!(opcode_output_count(opcode::SSTORE), 0);
+  }
+
+  // ── CALLER / CALLVALUE / CALLDATALOAD / CALLDATASIZE tests ─────────────────
+
+  fn caller_claim(op: u8, offset: u64, val: [u8; 32]) -> CallContextClaim {
+    CallContextClaim { opcode: op, calldata_offset: offset, output_value: val }
+  }
+
+  #[test]
+  fn test_caller_verify_proof_accepts() {
+    // CALLER: 0 inputs, 1 output (20-byte sender address padded to 32)
+    let mut addr = [0u8; 32];
+    addr[12..32].copy_from_slice(&[0xABu8; 20]);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::CALLER,
+      pc: 0,
+      stack_inputs: vec![],
+      stack_outputs: vec![addr],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: Some(caller_claim(opcode::CALLER, 0, addr)),
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "CALLER should pass verify_proof");
+    assert!(verify_proof_with_rows(&itp), "CALLER should pass verify_proof_with_rows");
+  }
+
+  #[test]
+  fn test_callvalue_verify_proof_accepts() {
+    // CALLVALUE: 0 inputs, 1 output (ETH value as U256)
+    let value = u256(1_000_000_000); // 1 Gwei
+    let itp = InstructionTransitionProof {
+      opcode: opcode::CALLVALUE,
+      pc: 0,
+      stack_inputs: vec![],
+      stack_outputs: vec![value],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: Some(caller_claim(opcode::CALLVALUE, 0, value)),
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "CALLVALUE should pass verify_proof");
+    assert!(verify_proof_with_rows(&itp), "CALLVALUE should pass verify_proof_with_rows");
+  }
+
+  #[test]
+  fn test_calldataload_verify_proof_accepts() {
+    // CALLDATALOAD: 1 input (offset), 1 output (32 bytes of calldata)
+    let offset = u256(0);
+    let data_word = u256(0xDEADBEEF);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::CALLDATALOAD,
+      pc: 0,
+      stack_inputs: vec![offset],
+      stack_outputs: vec![data_word],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: Some(caller_claim(opcode::CALLDATALOAD, 0, data_word)),
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "CALLDATALOAD should pass verify_proof");
+    assert!(verify_proof_with_rows(&itp), "CALLDATALOAD should pass verify_proof_with_rows");
+  }
+
+  #[test]
+  fn test_calldatasize_verify_proof_accepts() {
+    // CALLDATASIZE: 0 inputs, 1 output (calldata length)
+    let size = u256(68); // typical function call calldata length
+    let itp = InstructionTransitionProof {
+      opcode: opcode::CALLDATASIZE,
+      pc: 0,
+      stack_inputs: vec![],
+      stack_outputs: vec![size],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: Some(caller_claim(opcode::CALLDATASIZE, 0, size)),
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "CALLDATASIZE should pass verify_proof");
+    assert!(verify_proof_with_rows(&itp), "CALLDATASIZE should pass verify_proof_with_rows");
+  }
+
+  #[test]
+  fn test_calldataload_wrong_arity_rejected() {
+    // CALLDATALOAD needs exactly 1 input (offset); 0 inputs → rejected
+    let itp = InstructionTransitionProof {
+      opcode: opcode::CALLDATALOAD,
+      pc: 0,
+      stack_inputs: vec![],
+      stack_outputs: vec![u256(0)],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(!verify_proof(&itp), "CALLDATALOAD with no offset input must be rejected");
+  }
+
+  #[test]
+  fn test_caller_wrong_output_count_rejected() {
+    // CALLER pushes exactly 1 value; 0 outputs → rejected
+    let itp = InstructionTransitionProof {
+      opcode: opcode::CALLER,
+      pc: 0,
+      stack_inputs: vec![],
+      stack_outputs: vec![],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(!verify_proof(&itp), "CALLER with no outputs must be rejected");
+  }
+
+  #[test]
+  fn test_env_opcode_arity() {
+    assert_eq!(opcode_input_count(opcode::CALLER), 0);
+    assert_eq!(opcode_output_count(opcode::CALLER), 1);
+    assert_eq!(opcode_input_count(opcode::CALLVALUE), 0);
+    assert_eq!(opcode_output_count(opcode::CALLVALUE), 1);
+    assert_eq!(opcode_input_count(opcode::CALLDATALOAD), 1);
+    assert_eq!(opcode_output_count(opcode::CALLDATALOAD), 1);
+    assert_eq!(opcode_input_count(opcode::CALLDATASIZE), 0);
+    assert_eq!(opcode_output_count(opcode::CALLDATASIZE), 1);
+  }
+
+  // ── KECCAK256 tests ─────────────────────────────────────────────────────────
+
+  /// keccak256([]) = 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
+  fn keccak256_empty() -> [u8; 32] {
+    [
+      0xc5, 0xd2, 0x46, 0x01, 0x86, 0xf7, 0x23, 0x3c, 0x92, 0x7e, 0x7d, 0xb2, 0xdc, 0xc7, 0x03,
+      0xc0, 0xe5, 0x00, 0xb6, 0x53, 0xca, 0x82, 0x27, 0x3b, 0x7b, 0xfa, 0xd8, 0x04, 0x5d, 0x85,
+      0xa4, 0x70,
+    ]
+  }
+
+  /// keccak256([0x61, 0x62, 0x63]) = keccak256("abc")
+  /// = 0x4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45
+  fn keccak256_abc() -> [u8; 32] {
+    [
+      0x4e, 0x03, 0x65, 0x7a, 0xea, 0x45, 0xa9, 0x4f, 0xc7, 0xd4, 0x7b, 0xa8, 0x26, 0xc8, 0xd6,
+      0x67, 0xc0, 0xd1, 0xe6, 0xe3, 0x3a, 0x64, 0xa0, 0x36, 0xec, 0x44, 0xf5, 0x8f, 0xa1, 0x2d,
+      0x6c, 0x45,
+    ]
+  }
+
+  #[test]
+  fn test_keccak256_opcode_arity() {
+    assert_eq!(opcode_input_count(opcode::KECCAK256), 2);
+    assert_eq!(opcode_output_count(opcode::KECCAK256), 1);
+  }
+
+  #[test]
+  fn test_keccak256_verify_proof_empty_input_accepts() {
+    let offset = u256(0);
+    let size = u256(0);
+    let hash = keccak256_empty();
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&hash);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::KECCAK256,
+      pc: 0,
+      stack_inputs: vec![offset, size],
+      stack_outputs: vec![output],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: Some(KeccakClaim {
+        offset: 0,
+        size: 0,
+        input_bytes: vec![],
+        output_hash: hash,
+      }),
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "KECCAK256 with empty input must be accepted");
+  }
+
+  #[test]
+  fn test_keccak256_verify_proof_abc_accepts() {
+    let offset = u256(0);
+    let size = u256(3);
+    let hash = keccak256_abc();
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&hash);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::KECCAK256,
+      pc: 0,
+      stack_inputs: vec![offset, size],
+      stack_outputs: vec![output],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: Some(KeccakClaim {
+        offset: 0,
+        size: 3,
+        input_bytes: vec![0x61, 0x62, 0x63],
+        output_hash: hash,
+      }),
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "KECCAK256 with 'abc' input must be accepted");
+  }
+
+  #[test]
+  fn test_keccak256_verify_proof_missing_claim_rejected() {
+    // KECCAK256 without keccak_claim must be rejected
+    let offset = u256(0);
+    let size = u256(0);
+    let hash = keccak256_empty();
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&hash);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::KECCAK256,
+      pc: 0,
+      stack_inputs: vec![offset, size],
+      stack_outputs: vec![output],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(!verify_proof(&itp), "KECCAK256 without keccak_claim must be rejected");
+  }
+
+  #[test]
+  fn test_keccak256_verify_proof_wrong_output_rejected() {
+    // Correct claim but wrong stack output
+    let offset = u256(0);
+    let size = u256(0);
+    let hash = keccak256_empty();
+    let wrong_output = [0xde, 0xad, 0xbe, 0xef, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let itp = InstructionTransitionProof {
+      opcode: opcode::KECCAK256,
+      pc: 0,
+      stack_inputs: vec![offset, size],
+      stack_outputs: vec![wrong_output],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: Some(KeccakClaim {
+        offset: 0,
+        size: 0,
+        input_bytes: vec![],
+        output_hash: hash,
+      }),
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(!verify_proof(&itp), "KECCAK256 with wrong stack output must be rejected");
+  }
+
+  #[test]
+  fn test_keccak256_verify_proof_wrong_arity_rejected() {
+    let hash = keccak256_empty();
+    let mut output = [0u8; 32];
+    output.copy_from_slice(&hash);
+    // Only 1 input instead of 2
+    let itp = InstructionTransitionProof {
+      opcode: opcode::KECCAK256,
+      pc: 0,
+      stack_inputs: vec![u256(0)],
+      stack_outputs: vec![output],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: Some(KeccakClaim {
+        offset: 0,
+        size: 0,
+        input_bytes: vec![],
+        output_hash: hash,
+      }),
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(!verify_proof(&itp), "KECCAK256 with 1 input must be rejected");
+  }
+
+  // ── PC / MSIZE / GAS tests ───────────────────────────────────────────────
+
+  #[test]
+  fn test_pc_msize_gas_opcode_arity() {
+    assert_eq!(opcode_input_count(opcode::PC), 0);
+    assert_eq!(opcode_output_count(opcode::PC), 1);
+    assert_eq!(opcode_input_count(opcode::MSIZE), 0);
+    assert_eq!(opcode_output_count(opcode::MSIZE), 1);
+    assert_eq!(opcode_input_count(opcode::GAS), 0);
+    assert_eq!(opcode_output_count(opcode::GAS), 1);
+  }
+
+  #[test]
+  fn test_pc_verify_proof_accepts() {
+    // PC: 0 inputs, 1 output (program counter as U256)
+    let pc_val = u256(42);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::PC,
+      pc: 42,
+      stack_inputs: vec![],
+      stack_outputs: vec![pc_val],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: Some(CallContextClaim {
+        opcode: opcode::PC,
+        calldata_offset: 0,
+        output_value: pc_val,
+      }),
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "PC should pass verify_proof");
+    assert!(verify_proof_with_rows(&itp), "PC should pass verify_proof_with_rows");
+  }
+
+  #[test]
+  fn test_msize_verify_proof_accepts() {
+    // MSIZE: 0 inputs, 1 output (memory size in bytes, multiple of 32)
+    let msize_val = u256(64); // 2 × 32-byte words
+    let itp = InstructionTransitionProof {
+      opcode: opcode::MSIZE,
+      pc: 0,
+      stack_inputs: vec![],
+      stack_outputs: vec![msize_val],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: Some(CallContextClaim {
+        opcode: opcode::MSIZE,
+        calldata_offset: 0,
+        output_value: msize_val,
+      }),
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "MSIZE should pass verify_proof");
+    assert!(verify_proof_with_rows(&itp), "MSIZE should pass verify_proof_with_rows");
+  }
+
+  #[test]
+  fn test_gas_verify_proof_accepts() {
+    // GAS: 0 inputs, 1 output (remaining gas as U256)
+    let gas_left = u256(99_000);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::GAS,
+      pc: 0,
+      stack_inputs: vec![],
+      stack_outputs: vec![gas_left],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: Some(CallContextClaim {
+        opcode: opcode::GAS,
+        calldata_offset: 0,
+        output_value: gas_left,
+      }),
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "GAS should pass verify_proof");
+    assert!(verify_proof_with_rows(&itp), "GAS should pass verify_proof_with_rows");
+  }
+
+  #[test]
+  fn test_pc_wrong_output_count_rejected() {
+    // PC must push exactly 1 value
+    let itp = InstructionTransitionProof {
+      opcode: opcode::PC,
+      pc: 0,
+      stack_inputs: vec![],
+      stack_outputs: vec![],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(!verify_proof(&itp), "PC with no outputs must be rejected");
+  }
+
+  #[test]
+  fn test_gas_wrong_input_count_rejected() {
+    // GAS takes no inputs
+    let itp = InstructionTransitionProof {
+      opcode: opcode::GAS,
+      pc: 0,
+      stack_inputs: vec![u256(1)],
+      stack_outputs: vec![u256(99_000)],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(!verify_proof(&itp), "GAS with 1 input must be rejected");
+  }
+
+  // ── Tier 1: block / tx context opcodes ─────────────────────────────────────
+
+  #[test]
+  fn test_tier1_opcode_arity() {
+    // All Tier 1 opcodes are 0-input / 1-output.
+    let tier1 = [
+      opcode::ADDRESS,
+      opcode::ORIGIN,
+      opcode::GASPRICE,
+      opcode::CODESIZE,
+      opcode::RETURNDATASIZE,
+      opcode::COINBASE,
+      opcode::TIMESTAMP,
+      opcode::NUMBER,
+      opcode::DIFFICULTY, // PREVRANDAO in post-Merge terminology
+      opcode::GASLIMIT,
+      opcode::CHAINID,
+      opcode::SELFBALANCE,
+      opcode::BASEFEE,
+    ];
+    for op in tier1 {
+      assert_eq!(
+        opcode_input_count(op),
+        0,
+        "opcode 0x{op:02x} should have 0 inputs"
+      );
+      assert_eq!(
+        opcode_output_count(op),
+        1,
+        "opcode 0x{op:02x} should have 1 output"
+      );
+    }
+  }
+
+  #[test]
+  fn test_address_verify_proof_accepts() {
+    let addr_value = u256(0xDEAD_BEEF_u128);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::ADDRESS,
+      pc: 10,
+      stack_inputs: vec![],
+      stack_outputs: vec![addr_value],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: Some(CallContextClaim {
+        opcode: opcode::ADDRESS,
+        calldata_offset: 0,
+        output_value: addr_value,
+      }),
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "ADDRESS with valid claim must be accepted");
+  }
+
+  #[test]
+  fn test_coinbase_verify_proof_accepts() {
+    let beneficiary = u256(0x1111_2222_u128);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::COINBASE,
+      pc: 20,
+      stack_inputs: vec![],
+      stack_outputs: vec![beneficiary],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: Some(CallContextClaim {
+        opcode: opcode::COINBASE,
+        calldata_offset: 0,
+        output_value: beneficiary,
+      }),
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "COINBASE with valid claim must be accepted");
+  }
+
+  #[test]
+  fn test_chainid_verify_proof_accepts() {
+    let chain_id = u256(1); // mainnet
+    let itp = InstructionTransitionProof {
+      opcode: opcode::CHAINID,
+      pc: 30,
+      stack_inputs: vec![],
+      stack_outputs: vec![chain_id],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: Some(CallContextClaim {
+        opcode: opcode::CHAINID,
+        calldata_offset: 0,
+        output_value: chain_id,
+      }),
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(verify_proof(&itp), "CHAINID with valid claim must be accepted");
+  }
+
+  #[test]
+  fn test_tier1_wrong_input_count_rejected() {
+    // Tier 1 opcodes take 0 stack inputs; supplying one must be rejected.
+    let tier1 = [
+      opcode::ADDRESS,
+      opcode::TIMESTAMP,
+      opcode::CHAINID,
+      opcode::BASEFEE,
+    ];
+    for op in tier1 {
+      let val = u256(1);
+      let itp = InstructionTransitionProof {
+        opcode: op,
+        pc: 0,
+        stack_inputs: vec![val],
+        stack_outputs: vec![val],
+        semantic_proof: None,
+        memory_claims: vec![],
+        storage_claims: vec![],
+        stack_claims: vec![],
+        return_data_claim: None,
+        call_context_claim: Some(CallContextClaim {
+          opcode: op,
+          calldata_offset: 0,
+          output_value: val,
+        }),
+        keccak_claim: None,
+
+        external_state_claim: None,
+        sub_call_claim: None,
+      };
+      assert!(
+        !verify_proof(&itp),
+        "opcode 0x{op:02x} with 1 input must be rejected"
+      );
+    }
+  }
+}
+
+// ============================================================
+// Memory-copy opcode tests (RETURNDATACOPY, EXTCODECOPY, MCOPY)
+// ============================================================
+
+#[cfg(test)]
+mod mem_copy_opcode_tests {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof,
+  };
+
+  fn u256(v: u128) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    b[16..32].copy_from_slice(&v.to_be_bytes());
+    b
+  }
+
+  fn itp_mem_copy(op: u8, inputs: Vec<[u8; 32]>) -> InstructionTransitionProof {
+    InstructionTransitionProof {
+      opcode: op,
+      pc: 0,
+      stack_inputs: inputs,
+      stack_outputs: vec![],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+      external_state_claim: None,
+      sub_call_claim: None,
+    }
+  }
+
+  // ── Arity ────────────────────────────────────────────────────────────
+
+  #[test]
+  fn mem_copy_arity_returndatacopy() {
+    assert_eq!(opcode_input_count(opcode::RETURNDATACOPY), 3);
+    assert_eq!(opcode_output_count(opcode::RETURNDATACOPY), 0);
+  }
+
+  #[test]
+  fn mem_copy_arity_extcodecopy() {
+    assert_eq!(opcode_input_count(opcode::EXTCODECOPY), 4);
+    assert_eq!(opcode_output_count(opcode::EXTCODECOPY), 0);
+  }
+
+  #[test]
+  fn mem_copy_arity_mcopy() {
+    assert_eq!(opcode_input_count(opcode::MCOPY), 3);
+    assert_eq!(opcode_output_count(opcode::MCOPY), 0);
+  }
+
+  // ── verify_proof accepts correct arity proof ─────────────────────────
+
+  #[test]
+  fn returndatacopy_verify_proof_accepts() {
+    let itp = itp_mem_copy(
+      opcode::RETURNDATACOPY,
+      vec![u256(64), u256(0), u256(32)], // dest=64, src_in_rd=0, size=32
+    );
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn extcodecopy_verify_proof_accepts() {
+    let mut addr = [0u8; 32];
+    addr[31] = 0xAB; // some address in low bytes
+    let itp = itp_mem_copy(
+      opcode::EXTCODECOPY,
+      vec![addr, u256(0), u256(0), u256(32)], // address, dest=0, src=0, size=32
+    );
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn mcopy_verify_proof_accepts() {
+    let itp = itp_mem_copy(
+      opcode::MCOPY,
+      vec![u256(64), u256(0), u256(32)], // dest=64, src=0, size=32
+    );
+    assert!(verify_proof(&itp));
+  }
+
+  // ── verify_proof rejects wrong arity ─────────────────────────────────
+
+  #[test]
+  fn returndatacopy_wrong_arity_rejected() {
+    // Only 2 inputs instead of 3.
+    let itp = itp_mem_copy(opcode::RETURNDATACOPY, vec![u256(0), u256(32)]);
+    assert!(!verify_proof(&itp));
+  }
+
+  #[test]
+  fn extcodecopy_wrong_arity_rejected() {
+    // Only 3 inputs instead of 4.
+    let itp = itp_mem_copy(opcode::EXTCODECOPY, vec![u256(0), u256(0), u256(32)]);
+    assert!(!verify_proof(&itp));
+  }
+
+  #[test]
+  fn mcopy_wrong_arity_rejected() {
+    // Only 2 inputs instead of 3.
+    let itp = itp_mem_copy(opcode::MCOPY, vec![u256(0), u256(32)]);
+    assert!(!verify_proof(&itp));
+  }
+
+  // ── verify_proof rejects unexpected stack output ─────────────────────
+
+  #[test]
+  fn returndatacopy_output_rejected() {
+    // These opcodes push 0 values; any stack output is wrong.
+    let mut itp = itp_mem_copy(
+      opcode::RETURNDATACOPY,
+      vec![u256(64), u256(0), u256(32)],
+    );
+    itp.stack_outputs = vec![u256(1)]; // unexpected output
+    assert!(!verify_proof(&itp));
+  }
+}
+
+// ============================================================
+// Sub-call / create opcode tests
+// ============================================================
+
+#[cfg(test)]
+mod subcall_opcode_tests {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    InstructionTransitionProof, SubCallClaim,
+    opcode_input_count, opcode_output_count, verify_proof,
+  };
+
+  fn u256(v: u128) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    b[16..32].copy_from_slice(&v.to_be_bytes());
+    b
+  }
+
+  fn addr(seed: u8) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    b[31] = seed;
+    b
+  }
+
+  fn itp_subcall(
+    op: u8,
+    inputs: Vec<[u8; 32]>,
+    outputs: Vec<[u8; 32]>,
+    claim: Option<SubCallClaim>,
+  ) -> InstructionTransitionProof {
+    InstructionTransitionProof {
+      opcode: op,
+      pc: 0,
+      stack_inputs: inputs,
+      stack_outputs: outputs,
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+      external_state_claim: None,
+      sub_call_claim: claim,
+    }
+  }
+
+  fn make_claim(op: u8) -> SubCallClaim {
+    SubCallClaim {
+      opcode: op,
+      callee: [0xABu8; 20],
+      value: u256(0),
+      return_data: vec![],
+      success: true,
+      inner_proof: None,
+    }
+  }
+
+  // ── Arity ────────────────────────────────────────────────────────────
+
+  #[test]
+  fn arity_call() {
+    assert_eq!(opcode_input_count(opcode::CALL), 7);
+    assert_eq!(opcode_output_count(opcode::CALL), 1);
+  }
+
+  #[test]
+  fn arity_callcode() {
+    assert_eq!(opcode_input_count(opcode::CALLCODE), 7);
+    assert_eq!(opcode_output_count(opcode::CALLCODE), 1);
+  }
+
+  #[test]
+  fn arity_delegatecall() {
+    assert_eq!(opcode_input_count(opcode::DELEGATECALL), 6);
+    assert_eq!(opcode_output_count(opcode::DELEGATECALL), 1);
+  }
+
+  #[test]
+  fn arity_staticcall() {
+    assert_eq!(opcode_input_count(opcode::STATICCALL), 6);
+    assert_eq!(opcode_output_count(opcode::STATICCALL), 1);
+  }
+
+  #[test]
+  fn arity_create() {
+    assert_eq!(opcode_input_count(opcode::CREATE), 3);
+    assert_eq!(opcode_output_count(opcode::CREATE), 1);
+  }
+
+  #[test]
+  fn arity_create2() {
+    assert_eq!(opcode_input_count(opcode::CREATE2), 4);
+    assert_eq!(opcode_output_count(opcode::CREATE2), 1);
+  }
+
+  #[test]
+  fn arity_selfdestruct() {
+    assert_eq!(opcode_input_count(opcode::SELFDESTRUCT), 1);
+    assert_eq!(opcode_output_count(opcode::SELFDESTRUCT), 0);
+  }
+
+  // ── verify_proof accepts correct arity ────────────────────────────────
+
+  #[test]
+  fn call_verify_accepts() {
+    let inputs = vec![u256(0), addr(1), u256(0), u256(0), u256(0), u256(0), u256(0)];
+    let itp = itp_subcall(opcode::CALL, inputs, vec![u256(1)], Some(make_claim(opcode::CALL)));
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn delegatecall_verify_accepts() {
+    let inputs = vec![u256(0), addr(1), u256(0), u256(0), u256(0), u256(0)];
+    let itp = itp_subcall(
+      opcode::DELEGATECALL, inputs, vec![u256(1)],
+      Some(make_claim(opcode::DELEGATECALL)),
+    );
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn create_verify_accepts() {
+    let inputs = vec![u256(0), u256(0), u256(0)];
+    let itp = itp_subcall(
+      opcode::CREATE, inputs, vec![addr(0xAB)],
+      Some(make_claim(opcode::CREATE)),
+    );
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn create2_verify_accepts() {
+    let inputs = vec![u256(0), u256(0), u256(0), u256(0xDEAD)];
+    let itp = itp_subcall(
+      opcode::CREATE2, inputs, vec![addr(0xAB)],
+      Some(make_claim(opcode::CREATE2)),
+    );
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn selfdestruct_verify_accepts() {
+    let itp = itp_subcall(opcode::SELFDESTRUCT, vec![addr(1)], vec![], None);
+    assert!(verify_proof(&itp));
+  }
+
+  // ── verify_proof rejects wrong arity ─────────────────────────────────
+
+  #[test]
+  fn call_wrong_arity_rejected() {
+    // 6 inputs instead of 7
+    let inputs = vec![u256(0); 6];
+    let itp = itp_subcall(opcode::CALL, inputs, vec![u256(1)], Some(make_claim(opcode::CALL)));
+    assert!(!verify_proof(&itp));
+  }
+
+  #[test]
+  fn create_wrong_output_rejected() {
+    // 0 stack outputs instead of 1
+    let inputs = vec![u256(0), u256(0), u256(0)];
+    let itp = itp_subcall(opcode::CREATE, inputs, vec![], Some(make_claim(opcode::CREATE)));
+    assert!(!verify_proof(&itp));
+  }
+}
+
+// ============================================================
+// TLOAD / TSTORE (EIP-1153 transient storage) tests
+// ============================================================
+
+#[cfg(test)]
+mod tload_tstore_tests {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof,
+  };
+
+  fn u256(v: u128) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    b[16..32].copy_from_slice(&v.to_be_bytes());
+    b
+  }
+
+  fn base_itp(op: u8, inputs: Vec<[u8; 32]>, outputs: Vec<[u8; 32]>) -> InstructionTransitionProof {
+    InstructionTransitionProof {
+      opcode: op,
+      pc: 0,
+      stack_inputs: inputs,
+      stack_outputs: outputs,
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+      external_state_claim: None,
+      sub_call_claim: None,
+    }
+  }
+
+  #[test]
+  fn arity_tload() {
+    assert_eq!(opcode_input_count(opcode::TLOAD), 1);
+    assert_eq!(opcode_output_count(opcode::TLOAD), 1);
+  }
+
+  #[test]
+  fn arity_tstore() {
+    assert_eq!(opcode_input_count(opcode::TSTORE), 2);
+    assert_eq!(opcode_output_count(opcode::TSTORE), 0);
+  }
+
+  #[test]
+  fn tload_verify_accepts() {
+    let itp = base_itp(opcode::TLOAD, vec![u256(42)], vec![u256(99)]);
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn tstore_verify_accepts() {
+    let itp = base_itp(opcode::TSTORE, vec![u256(42), u256(99)], vec![]);
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn tload_wrong_arity_rejected() {
+    // 0 inputs instead of 1
+    let itp = base_itp(opcode::TLOAD, vec![], vec![u256(0)]);
+    assert!(!verify_proof(&itp));
+  }
+
+  #[test]
+  fn tstore_wrong_arity_rejected() {
+    // 3 inputs instead of 2
+    let itp = base_itp(opcode::TSTORE, vec![u256(0), u256(0), u256(0)], vec![]);
+    assert!(!verify_proof(&itp));
+  }
+}
+
+// ============================================================
+// LOG0 ~ LOG4 (event log opcodes) tests
+// ============================================================
+
+#[cfg(test)]
+mod log_opcode_tests {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof,
+  };
+
+  fn u256(v: u128) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    b[16..32].copy_from_slice(&v.to_be_bytes());
+    b
+  }
+
+  fn base_itp(op: u8, inputs: Vec<[u8; 32]>) -> InstructionTransitionProof {
+    InstructionTransitionProof {
+      opcode: op,
+      pc: 0,
+      stack_inputs: inputs,
+      stack_outputs: vec![],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+      external_state_claim: None,
+      sub_call_claim: None,
+    }
+  }
+
+  #[test]
+  fn arity_log0() {
+    assert_eq!(opcode_input_count(opcode::LOG0), 2);
+    assert_eq!(opcode_output_count(opcode::LOG0), 0);
+  }
+
+  #[test]
+  fn arity_log1() {
+    assert_eq!(opcode_input_count(opcode::LOG1), 3);
+    assert_eq!(opcode_output_count(opcode::LOG1), 0);
+  }
+
+  #[test]
+  fn arity_log2() {
+    assert_eq!(opcode_input_count(opcode::LOG2), 4);
+    assert_eq!(opcode_output_count(opcode::LOG2), 0);
+  }
+
+  #[test]
+  fn arity_log3() {
+    assert_eq!(opcode_input_count(opcode::LOG3), 5);
+    assert_eq!(opcode_output_count(opcode::LOG3), 0);
+  }
+
+  #[test]
+  fn arity_log4() {
+    assert_eq!(opcode_input_count(opcode::LOG4), 6);
+    assert_eq!(opcode_output_count(opcode::LOG4), 0);
+  }
+
+  #[test]
+  fn log0_verify_accepts() {
+    let itp = base_itp(opcode::LOG0, vec![u256(0), u256(32)]);
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn log1_verify_accepts() {
+    let itp = base_itp(opcode::LOG1, vec![u256(0), u256(32), u256(0xDEAD)]);
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn log4_verify_accepts() {
+    let itp = base_itp(
+      opcode::LOG4,
+      vec![u256(0), u256(32), u256(1), u256(2), u256(3), u256(4)],
+    );
+    assert!(verify_proof(&itp));
+  }
+
+  #[test]
+  fn log2_wrong_arity_rejected() {
+    // 3 inputs instead of 4
+    let itp = base_itp(opcode::LOG2, vec![u256(0), u256(32), u256(1)]);
+    assert!(!verify_proof(&itp));
+  }
+
+  #[test]
+  fn log0_unexpected_output_rejected() {
+    // LOG0 should produce 0 outputs
+    InstructionTransitionProof {
+      opcode: opcode::LOG0,
+      pc: 0,
+      stack_inputs: vec![u256(0), u256(32)],
+      stack_outputs: vec![u256(1)],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    // wrong arity — verify_proof returns false
+    let itp = InstructionTransitionProof {
+      opcode: opcode::LOG0,
+      pc: 0,
+      stack_inputs: vec![u256(0), u256(32)],
+      stack_outputs: vec![u256(1)], // unexpected output
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+      external_state_claim: None,
+      sub_call_claim: None,
+    };
+    assert!(!verify_proof(&itp));
+  }
+}
+
+// ============================================================
+// INVALID opcode tests
+// ============================================================
+
+#[cfg(test)]
+mod invalid_opcode_tests {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof,
+  };
+
+  fn base_itp() -> InstructionTransitionProof {
+    InstructionTransitionProof {
+      opcode: opcode::INVALID,
+      pc: 0,
+      stack_inputs: vec![],
+      stack_outputs: vec![],
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+      external_state_claim: None,
+      sub_call_claim: None,
+    }
+  }
+
+  #[test]
+  fn arity_invalid() {
+    assert_eq!(opcode_input_count(opcode::INVALID), 0);
+    assert_eq!(opcode_output_count(opcode::INVALID), 0);
+  }
+
+  #[test]
+  fn invalid_verify_accepts() {
+    assert!(verify_proof(&base_itp()));
+  }
+}
+
+// ============================================================
+// BALANCE, CALLDATACOPY, CODECOPY, BLOBHASH tests
+// ============================================================
+
+#[cfg(test)]
+mod remaining_opcode_tests {
+  use revm::bytecode::opcode;
+  use zprove_core::transition::{
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof,
+  };
+
+  fn u256(v: u128) -> [u8; 32] {
+    let mut b = [0u8; 32];
+    b[16..32].copy_from_slice(&v.to_be_bytes());
+    b
+  }
+
+  fn itp(op: u8, inputs: Vec<[u8; 32]>, outputs: Vec<[u8; 32]>) -> InstructionTransitionProof {
+    InstructionTransitionProof {
+      opcode: op,
+      pc: 0,
+      stack_inputs: inputs,
+      stack_outputs: outputs,
+      semantic_proof: None,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+      external_state_claim: None,
+      sub_call_claim: None,
+    }
+  }
+
+  // ── BALANCE ─────────────────────────────────────────────────────────
+
+  #[test]
+  fn arity_balance() {
+    assert_eq!(opcode_input_count(opcode::BALANCE), 1);
+    assert_eq!(opcode_output_count(opcode::BALANCE), 1);
+  }
+
+  #[test]
+  fn balance_verify_accepts() {
+    let addr = {
+      let mut b = [0u8; 32];
+      b[12..32].copy_from_slice(&[0xABu8; 20]);
+      b
+    };
+    let pi = itp(opcode::BALANCE, vec![addr], vec![u256(1_000_000)]);
+    assert!(verify_proof(&pi));
+  }
+
+  #[test]
+  fn balance_wrong_arity_rejected() {
+    let pi = itp(opcode::BALANCE, vec![], vec![u256(0)]);
+    assert!(!verify_proof(&pi));
+  }
+
+  // ── CALLDATACOPY ────────────────────────────────────────────────────
+
+  #[test]
+  fn arity_calldatacopy() {
+    assert_eq!(opcode_input_count(opcode::CALLDATACOPY), 3);
+    assert_eq!(opcode_output_count(opcode::CALLDATACOPY), 0);
+  }
+
+  #[test]
+  fn calldatacopy_verify_accepts() {
+    let pi = itp(opcode::CALLDATACOPY, vec![u256(0), u256(0), u256(32)], vec![]);
+    assert!(verify_proof(&pi));
+  }
+
+  #[test]
+  fn calldatacopy_wrong_arity_rejected() {
+    // 2 inputs instead of 3
+    let pi = itp(opcode::CALLDATACOPY, vec![u256(0), u256(0)], vec![]);
+    assert!(!verify_proof(&pi));
+  }
+
+  // ── CODECOPY ────────────────────────────────────────────────────────
+
+  #[test]
+  fn arity_codecopy() {
+    assert_eq!(opcode_input_count(opcode::CODECOPY), 3);
+    assert_eq!(opcode_output_count(opcode::CODECOPY), 0);
+  }
+
+  #[test]
+  fn codecopy_verify_accepts() {
+    let pi = itp(opcode::CODECOPY, vec![u256(0), u256(0), u256(64)], vec![]);
+    assert!(verify_proof(&pi));
+  }
+
+  #[test]
+  fn codecopy_wrong_arity_rejected() {
+    let pi = itp(opcode::CODECOPY, vec![u256(0)], vec![]);
+    assert!(!verify_proof(&pi));
+  }
+
+  // ── BLOBHASH ────────────────────────────────────────────────────────
+
+  #[test]
+  fn arity_blobhash() {
+    assert_eq!(opcode_input_count(opcode::BLOBHASH), 1);
+    assert_eq!(opcode_output_count(opcode::BLOBHASH), 1);
+  }
+
+  #[test]
+  fn blobhash_verify_accepts() {
+    let pi = itp(opcode::BLOBHASH, vec![u256(0)], vec![u256(0xDEAD)]);
+    assert!(verify_proof(&pi));
+  }
+
+  #[test]
+  fn blobhash_wrong_arity_rejected() {
+    // 0 inputs instead of 1
+    let pi = itp(opcode::BLOBHASH, vec![], vec![u256(0)]);
+    assert!(!verify_proof(&pi));
+  }
+}
+
+#[test]
+fn test_stack_consistency_intra_batch_logup() {
+  use zprove_core::transition::StackAccessClaim;
+  use zprove_core::zk_proof::{prove_stack_consistency, verify_stack_consistency};
+  let val = [42u8; 32];
+  let claims = vec![
+    StackAccessClaim { rw_counter: 1, depth_after: 1, is_push: true, value: val },
+    StackAccessClaim { rw_counter: 2, depth_after: 0, is_push: false, value: val },
+  ];
+  let proof = prove_stack_consistency(&claims).expect("prove failed");
+  let ok = verify_stack_consistency(&proof);
+  assert!(ok, "stack LogUp intra-batch push-pop must verify");
 }

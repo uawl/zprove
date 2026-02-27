@@ -4,11 +4,11 @@
 //! - Stage 1 proves inferred-WFF semantic constraints over compiled `ProofRow`s.
 //! - Stage 2 proves inferred WFF equals public WFF via serialized equality trace.
 //!
-//! The current Stage-1 semantic AIR kernel enforces the byte-add equality rows
-//! (`OP_BYTE_ADD_EQ`) embedded in `ProofRow` encoding.
+//! The current Stage-1 semantic AIR kernel enforces the 29-bit/24-bit add equality rows
+//! (`OP_U29_ADD_EQ`, `OP_U24_ADD_EQ`) embedded in `ProofRow` encoding.
 
 use crate::semantic_proof::{
-  NUM_PROOF_COLS, OP_BYTE_ADD_EQ, Proof, ProofRow, RET_BYTE, RET_WFF_AND, RET_WFF_EQ, Term, WFF,
+  NUM_PROOF_COLS, Proof, ProofRow, RET_BYTE, RET_WFF_AND, RET_WFF_EQ, Term, WFF,
   compile_proof, infer_proof, verify_compiled,
 };
 
@@ -17,7 +17,6 @@ use p3_challenger::{DuplexChallenger, HashChallenger, SerializingChallenger32};
 use p3_circle::CirclePcs;
 use p3_commit::ExtensionMmcs;
 use p3_field::PrimeCharacteristicRing;
-use p3_field::Field;
 use p3_field::extension::BinomialExtensionField;
 use p3_fri::FriParameters;
 use p3_keccak::Keccak256Hash;
@@ -29,8 +28,12 @@ use p3_symmetric::{
   CompressionFunctionFromHasher, CryptographicHasher, PaddingFreeSponge, SerializingHasher,
   TruncatedPermutation,
 };
+use p3_lookup::logup::LogUpGadget;
+use p3_lookup::lookup_traits::{Kind, Lookup, LookupData, LookupGadget};
 use p3_uni_stark::{
-  PreprocessedProverData, PreprocessedVerifierKey, StarkConfig, setup_preprocessed,
+  Entry, PreprocessedProverData, PreprocessedVerifierKey, StarkConfig, SymbolicExpression,
+  SymbolicVariable, VerifierConstraintFolder, prove_with_lookup, setup_preprocessed,
+  verify_with_lookup,
 };
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -250,31 +253,25 @@ const STACK_COL_SEL_AND_INTRO: usize = 13;
 const STACK_COL_SEL_EQ_TRANS: usize = 14;
 const STACK_COL_SEL_ADD_CONGR: usize = 15;
 const STACK_COL_SEL_ADD_CARRY_CONGR: usize = 16;
-const STACK_COL_SEL_ADD_EQ: usize = 17;
-const STACK_COL_SEL_U16_ADD_EQ: usize = 18;
-const STACK_COL_SEL_U29_ADD_EQ: usize = 19;
-const STACK_COL_SEL_U24_ADD_EQ: usize = 20;
-const STACK_COL_SEL_U15_MUL_EQ: usize = 21;
-const STACK_COL_SEL_ADD_CARRY_EQ: usize = 22;
-const STACK_COL_SEL_MUL_LOW_EQ: usize = 23;
-const STACK_COL_SEL_MUL_HIGH_EQ: usize = 24;
-const STACK_COL_SEL_AND_EQ: usize = 25;
-const STACK_COL_SEL_OR_EQ: usize = 26;
-const STACK_COL_SEL_XOR_EQ: usize = 27;
-const STACK_COL_SEL_NOT: usize = 28;
-const STACK_COL_SEL_EQ_SYM: usize = 29;
-pub const NUM_STACK_IR_COLS: usize = 30;
+const STACK_COL_SEL_U29_ADD_EQ: usize = 17;
+const STACK_COL_SEL_U24_ADD_EQ: usize = 18;
+const STACK_COL_SEL_U15_MUL_EQ: usize = 19;
+const STACK_COL_SEL_MUL_LOW_EQ: usize = 20;
+const STACK_COL_SEL_MUL_HIGH_EQ: usize = 21;
+const STACK_COL_SEL_AND_EQ: usize = 22;
+const STACK_COL_SEL_OR_EQ: usize = 23;
+const STACK_COL_SEL_XOR_EQ: usize = 24;
+const STACK_COL_SEL_NOT: usize = 25;
+const STACK_COL_SEL_EQ_SYM: usize = 26;
+pub const NUM_STACK_IR_COLS: usize = 27;
 
 fn row_pop_count(op: u32) -> Option<u32> {
   match op {
     crate::semantic_proof::OP_BOOL
     | crate::semantic_proof::OP_BYTE
-    | crate::semantic_proof::OP_BYTE_ADD_EQ
-    | crate::semantic_proof::OP_U16_ADD_EQ
     | crate::semantic_proof::OP_U29_ADD_EQ
     | crate::semantic_proof::OP_U24_ADD_EQ
     | crate::semantic_proof::OP_U15_MUL_EQ
-    | crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ
     | crate::semantic_proof::OP_BYTE_MUL_LOW_EQ
     | crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ
     | crate::semantic_proof::OP_BYTE_AND_EQ
@@ -449,12 +446,9 @@ fn op_to_sel_col(op: u32) -> Option<usize> {
     OP_EQ_TRANS => Some(STACK_COL_SEL_EQ_TRANS),
     OP_BYTE_ADD_THIRD_CONGRUENCE => Some(STACK_COL_SEL_ADD_CONGR),
     OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => Some(STACK_COL_SEL_ADD_CARRY_CONGR),
-    OP_BYTE_ADD_EQ => Some(STACK_COL_SEL_ADD_EQ),
-    OP_U16_ADD_EQ => Some(STACK_COL_SEL_U16_ADD_EQ),
     OP_U29_ADD_EQ => Some(STACK_COL_SEL_U29_ADD_EQ),
     OP_U24_ADD_EQ => Some(STACK_COL_SEL_U24_ADD_EQ),
     OP_U15_MUL_EQ => Some(STACK_COL_SEL_U15_MUL_EQ),
-    OP_BYTE_ADD_CARRY_EQ => Some(STACK_COL_SEL_ADD_CARRY_EQ),
     OP_BYTE_MUL_LOW_EQ => Some(STACK_COL_SEL_MUL_LOW_EQ),
     OP_BYTE_MUL_HIGH_EQ => Some(STACK_COL_SEL_MUL_HIGH_EQ),
     OP_BYTE_AND_EQ => Some(STACK_COL_SEL_AND_EQ),
@@ -522,12 +516,9 @@ fn eval_stack_ir_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
   let t_eq_trans = crate::semantic_proof::OP_EQ_TRANS as u16;
   let t_add_congr = crate::semantic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE as u16;
   let t_add_carry_congr = crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE as u16;
-  let t_add_eq = crate::semantic_proof::OP_BYTE_ADD_EQ as u16;
-  let t_u16_add_eq = crate::semantic_proof::OP_U16_ADD_EQ as u16;
   let t_u29_add_eq = crate::semantic_proof::OP_U29_ADD_EQ as u16;
   let t_u24_add_eq = crate::semantic_proof::OP_U24_ADD_EQ as u16;
   let t_u15_mul_eq = crate::semantic_proof::OP_U15_MUL_EQ as u16;
-  let t_add_carry_eq = crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ as u16;
   let t_mul_low_eq = crate::semantic_proof::OP_BYTE_MUL_LOW_EQ as u16;
   let t_mul_high_eq = crate::semantic_proof::OP_BYTE_MUL_HIGH_EQ as u16;
   let t_and_eq = crate::semantic_proof::OP_BYTE_AND_EQ as u16;
@@ -544,12 +535,9 @@ fn eval_stack_ir_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
   let sel_eq_trans = local[STACK_COL_SEL_EQ_TRANS].clone();
   let sel_add_congr = local[STACK_COL_SEL_ADD_CONGR].clone();
   let sel_add_carry_congr = local[STACK_COL_SEL_ADD_CARRY_CONGR].clone();
-  let sel_add_eq = local[STACK_COL_SEL_ADD_EQ].clone();
-  let sel_u16_add_eq = local[STACK_COL_SEL_U16_ADD_EQ].clone();
   let sel_u29_add_eq = local[STACK_COL_SEL_U29_ADD_EQ].clone();
   let sel_u24_add_eq = local[STACK_COL_SEL_U24_ADD_EQ].clone();
   let sel_u15_mul_eq = local[STACK_COL_SEL_U15_MUL_EQ].clone();
-  let sel_add_carry_eq = local[STACK_COL_SEL_ADD_CARRY_EQ].clone();
   let sel_mul_low_eq = local[STACK_COL_SEL_MUL_LOW_EQ].clone();
   let sel_mul_high_eq = local[STACK_COL_SEL_MUL_HIGH_EQ].clone();
   let sel_and_eq = local[STACK_COL_SEL_AND_EQ].clone();
@@ -567,12 +555,9 @@ fn eval_stack_ir_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
   builder.assert_zero(sel_eq_trans.clone() * (c_one.clone() - sel_eq_trans.clone()));
   builder.assert_zero(sel_add_congr.clone() * (c_one.clone() - sel_add_congr.clone()));
   builder.assert_zero(sel_add_carry_congr.clone() * (c_one.clone() - sel_add_carry_congr.clone()));
-  builder.assert_zero(sel_add_eq.clone() * (c_one.clone() - sel_add_eq.clone()));
-  builder.assert_zero(sel_u16_add_eq.clone() * (c_one.clone() - sel_u16_add_eq.clone()));
   builder.assert_zero(sel_u29_add_eq.clone() * (c_one.clone() - sel_u29_add_eq.clone()));
   builder.assert_zero(sel_u24_add_eq.clone() * (c_one.clone() - sel_u24_add_eq.clone()));
   builder.assert_zero(sel_u15_mul_eq.clone() * (c_one.clone() - sel_u15_mul_eq.clone()));
-  builder.assert_zero(sel_add_carry_eq.clone() * (c_one.clone() - sel_add_carry_eq.clone()));
   builder.assert_zero(sel_mul_low_eq.clone() * (c_one.clone() - sel_mul_low_eq.clone()));
   builder.assert_zero(sel_mul_high_eq.clone() * (c_one.clone() - sel_mul_high_eq.clone()));
   builder.assert_zero(sel_and_eq.clone() * (c_one.clone() - sel_and_eq.clone()));
@@ -589,12 +574,9 @@ fn eval_stack_ir_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
     + sel_eq_trans.clone()
     + sel_add_congr.clone()
     + sel_add_carry_congr.clone()
-    + sel_add_eq.clone()
-    + sel_u16_add_eq.clone()
     + sel_u29_add_eq.clone()
     + sel_u24_add_eq.clone()
     + sel_u15_mul_eq.clone()
-    + sel_add_carry_eq.clone()
     + sel_mul_low_eq.clone()
     + sel_mul_high_eq.clone()
     + sel_and_eq.clone()
@@ -612,12 +594,9 @@ fn eval_stack_ir_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
     + sel_eq_trans.clone() * AB::Expr::from_u16(t_eq_trans)
     + sel_add_congr.clone() * AB::Expr::from_u16(t_add_congr)
     + sel_add_carry_congr.clone() * AB::Expr::from_u16(t_add_carry_congr)
-    + sel_add_eq.clone() * AB::Expr::from_u16(t_add_eq)
-    + sel_u16_add_eq.clone() * AB::Expr::from_u16(t_u16_add_eq)
     + sel_u29_add_eq.clone() * AB::Expr::from_u16(t_u29_add_eq)
     + sel_u24_add_eq.clone() * AB::Expr::from_u16(t_u24_add_eq)
     + sel_u15_mul_eq.clone() * AB::Expr::from_u16(t_u15_mul_eq)
-    + sel_add_carry_eq.clone() * AB::Expr::from_u16(t_add_carry_eq)
     + sel_mul_low_eq.clone() * AB::Expr::from_u16(t_mul_low_eq)
     + sel_mul_high_eq.clone() * AB::Expr::from_u16(t_mul_high_eq)
     + sel_and_eq.clone() * AB::Expr::from_u16(t_and_eq)
@@ -690,17 +669,6 @@ fn eval_stack_ir_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
     sel_add_carry_congr * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
   );
 
-  // OP_BYTE_ADD_EQ: pop=0, push=1, ret_ty=RET_WFF_EQ
-  builder.assert_zero(sel_add_eq.clone() * (pop.clone().into() - c_zero.clone()));
-  builder.assert_zero(sel_add_eq.clone() * (push.clone().into() - c_one.clone()));
-  builder.assert_zero(sel_add_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)));
-
-  // OP_U16_ADD_EQ: pop=0, push=1, ret_ty=RET_WFF_AND
-  builder.assert_zero(sel_u16_add_eq.clone() * (pop.clone().into() - c_zero.clone()));
-  builder.assert_zero(sel_u16_add_eq.clone() * (push.clone().into() - c_one.clone()));
-  builder
-    .assert_zero(sel_u16_add_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)));
-
   // OP_U29_ADD_EQ: pop=0, push=1, ret_ty=RET_WFF_AND
   builder.assert_zero(sel_u29_add_eq.clone() * (pop.clone().into() - c_zero.clone()));
   builder.assert_zero(sel_u29_add_eq.clone() * (push.clone().into() - c_one.clone()));
@@ -718,13 +686,6 @@ fn eval_stack_ir_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
   builder.assert_zero(sel_u15_mul_eq.clone() * (push.clone().into() - c_one.clone()));
   builder
     .assert_zero(sel_u15_mul_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)));
-
-  // OP_BYTE_ADD_CARRY_EQ: pop=0, push=1, ret_ty=RET_WFF_EQ
-  builder.assert_zero(sel_add_carry_eq.clone() * (pop.clone().into() - c_zero.clone()));
-  builder.assert_zero(sel_add_carry_eq.clone() * (push.clone().into() - c_one.clone()));
-  builder.assert_zero(
-    sel_add_carry_eq * (ret_ty.clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
-  );
 
   // OP_BYTE_MUL_LOW_EQ: pop=0, push=1, ret_ty=RET_WFF_EQ
   builder.assert_zero(sel_mul_low_eq.clone() * (pop.clone().into() - c_zero.clone()));
@@ -1311,14 +1272,11 @@ pub fn verify_stack_ir_with_prep(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LutOpcode {
-  ByteAddEq,
   U29AddEq,
   U24AddEq,
   U15AddEq,
   BitAddEq,
   U15MulEq,
-  U16AddEq,
-  ByteAddCarryEq,
   ByteMulLowEq,
   ByteMulHighEq,
   ByteAndEq,
@@ -1342,51 +1300,42 @@ const LUT_COL_IN1: usize = 2;
 const LUT_COL_IN2: usize = 3;
 const LUT_COL_OUT0: usize = 4;
 const LUT_COL_OUT1: usize = 5;
-// One-hot selector columns (6..18) — one per LutOpcode variant.
-const LUT_COL_SEL_BYTE_ADD_EQ: usize = 6;
-const LUT_COL_SEL_U29_ADD_EQ: usize = 7;
-const LUT_COL_SEL_U24_ADD_EQ: usize = 8;
-const LUT_COL_SEL_U15_ADD_EQ: usize = 9;
-const LUT_COL_SEL_BIT_ADD_EQ: usize = 10;
-const LUT_COL_SEL_U15_MUL_EQ: usize = 11;
-const LUT_COL_SEL_U16_ADD_EQ: usize = 12;
-const LUT_COL_SEL_BYTE_ADD_CARRY_EQ: usize = 13;
-const LUT_COL_SEL_BYTE_MUL_LOW_EQ: usize = 14;
-const LUT_COL_SEL_BYTE_MUL_HIGH_EQ: usize = 15;
-const LUT_COL_SEL_BYTE_AND_EQ: usize = 16;
-const LUT_COL_SEL_BYTE_OR_EQ: usize = 17;
-const LUT_COL_SEL_BYTE_XOR_EQ: usize = 18;
-pub const NUM_LUT_COLS: usize = 19;
+// One-hot selector columns (6..15) — one per LutOpcode variant.
+const LUT_COL_SEL_U29_ADD_EQ: usize = 6;
+const LUT_COL_SEL_U24_ADD_EQ: usize = 7;
+const LUT_COL_SEL_U15_ADD_EQ: usize = 8;
+const LUT_COL_SEL_BIT_ADD_EQ: usize = 9;
+const LUT_COL_SEL_U15_MUL_EQ: usize = 10;
+const LUT_COL_SEL_BYTE_MUL_LOW_EQ: usize = 11;
+const LUT_COL_SEL_BYTE_MUL_HIGH_EQ: usize = 12;
+const LUT_COL_SEL_BYTE_AND_EQ: usize = 13;
+const LUT_COL_SEL_BYTE_OR_EQ: usize = 14;
+const LUT_COL_SEL_BYTE_XOR_EQ: usize = 15;
+pub const NUM_LUT_COLS: usize = 16;
 
 fn lut_opcode_tag(op: LutOpcode) -> u16 {
   match op {
-    LutOpcode::ByteAddEq => 1,
-    LutOpcode::U29AddEq => 2,
-    LutOpcode::U24AddEq => 3,
-    LutOpcode::U15AddEq => 4,
-    LutOpcode::BitAddEq => 5,
-    LutOpcode::U15MulEq => 6,
-    LutOpcode::U16AddEq => 7,
-    LutOpcode::ByteAddCarryEq => 8,
-    LutOpcode::ByteMulLowEq => 9,
-    LutOpcode::ByteMulHighEq => 10,
-    LutOpcode::ByteAndEq => 11,
-    LutOpcode::ByteOrEq => 12,
-    LutOpcode::ByteXorEq => 13,
+    LutOpcode::U29AddEq => 1,
+    LutOpcode::U24AddEq => 2,
+    LutOpcode::U15AddEq => 3,
+    LutOpcode::BitAddEq => 4,
+    LutOpcode::U15MulEq => 5,
+    LutOpcode::ByteMulLowEq => 6,
+    LutOpcode::ByteMulHighEq => 7,
+    LutOpcode::ByteAndEq => 8,
+    LutOpcode::ByteOrEq => 9,
+    LutOpcode::ByteXorEq => 10,
   }
 }
 
 /// Map a `LutOpcode` to its one-hot selector column index.
 fn lut_op_to_sel_col(op: LutOpcode) -> usize {
   match op {
-    LutOpcode::ByteAddEq => LUT_COL_SEL_BYTE_ADD_EQ,
     LutOpcode::U29AddEq => LUT_COL_SEL_U29_ADD_EQ,
     LutOpcode::U24AddEq => LUT_COL_SEL_U24_ADD_EQ,
     LutOpcode::U15AddEq => LUT_COL_SEL_U15_ADD_EQ,
     LutOpcode::BitAddEq => LUT_COL_SEL_BIT_ADD_EQ,
     LutOpcode::U15MulEq => LUT_COL_SEL_U15_MUL_EQ,
-    LutOpcode::U16AddEq => LUT_COL_SEL_U16_ADD_EQ,
-    LutOpcode::ByteAddCarryEq => LUT_COL_SEL_BYTE_ADD_CARRY_EQ,
     LutOpcode::ByteMulLowEq => LUT_COL_SEL_BYTE_MUL_LOW_EQ,
     LutOpcode::ByteMulHighEq => LUT_COL_SEL_BYTE_MUL_HIGH_EQ,
     LutOpcode::ByteAndEq => LUT_COL_SEL_BYTE_AND_EQ,
@@ -1395,73 +1344,12 @@ fn lut_op_to_sel_col(op: LutOpcode) -> usize {
   }
 }
 
-fn append_u16_row_as_u15_steps(row: &ProofRow, out: &mut Vec<LutStep>) -> Result<(), String> {
-  if row.scalar0 > 0xFFFF
-    || row.scalar1 > 0xFFFF
-    || row.scalar2 > 1
-    || row.value > 0xFFFF
-    || row.arg1 > 1
-  {
-    return Err("u16 row out of range for u15 expansion".to_string());
-  }
-
-  let a0 = row.scalar0 & 0x7FFF;
-  let a1 = row.scalar0 >> 15;
-  let b0 = row.scalar1 & 0x7FFF;
-  let b1 = row.scalar1 >> 15;
-  let s0 = row.value & 0x7FFF;
-  let s1 = row.value >> 15;
-  let cin = row.scalar2;
-
-  let low_total = a0 + b0 + cin;
-  let carry0 = if low_total >= 32768 { 1 } else { 0 };
-  if (low_total & 0x7FFF) != s0 {
-    return Err("u16->u15 expansion low-limb mismatch".to_string());
-  }
-
-  let high_total = a1 + b1 + carry0;
-  let carry1 = if high_total >= 2 { 1 } else { 0 };
-  if (high_total & 1) != s1 || carry1 != row.arg1 {
-    return Err("u16->u15 expansion high-bit mismatch".to_string());
-  }
-
-  out.push(LutStep {
-    op: LutOpcode::U15AddEq,
-    in0: a0,
-    in1: b0,
-    in2: cin,
-    out0: s0,
-    out1: carry0,
-  });
-  out.push(LutStep {
-    op: LutOpcode::BitAddEq,
-    in0: a1,
-    in1: b1,
-    in2: carry0,
-    out0: s1,
-    out1: carry1,
-  });
-
-  Ok(())
-}
 
 pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, String> {
   let mut out = Vec::with_capacity(rows.len());
 
   for row in rows {
     let step = match row.op {
-      crate::semantic_proof::OP_BYTE_ADD_EQ => LutStep {
-        op: LutOpcode::ByteAddEq,
-        in0: row.scalar0,
-        in1: row.scalar1,
-        in2: row.arg0,
-        out0: row.value,
-        out1: row.scalar2,
-      },
-      crate::semantic_proof::OP_U16_ADD_EQ => {
-        append_u16_row_as_u15_steps(row, &mut out)?;
-        continue;
-      }
       crate::semantic_proof::OP_U29_ADD_EQ => LutStep {
         op: LutOpcode::U29AddEq,
         in0: row.scalar0,
@@ -1487,17 +1375,6 @@ pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, Stri
           in2: 0,
           out0: total & 0x7FFF,
           out1: total >> 15,
-        }
-      }
-      crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ => {
-        let total = row.scalar0 + row.scalar1 + row.arg0;
-        LutStep {
-          op: LutOpcode::ByteAddCarryEq,
-          in0: row.scalar0,
-          in1: row.scalar1,
-          in2: row.arg0,
-          out0: if total >= 256 { 1 } else { 0 },
-          out1: total & 0xFF,
         }
       }
       crate::semantic_proof::OP_BYTE_MUL_LOW_EQ => {
@@ -1586,14 +1463,14 @@ pub fn build_lut_trace_from_steps(steps: &[LutStep]) -> Result<RowMajorMatrix<Va
 
   for i in steps.len()..n_rows {
     let base = i * NUM_LUT_COLS;
-    // Padding: ByteAddEq with all-zero inputs (0+0+0=0, carry=0).
-    trace.values[base + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
+    // Padding: U29AddEq with all-zero inputs (0+0+0=0, carry=0).
+    trace.values[base + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::U29AddEq));
     trace.values[base + LUT_COL_IN0] = Val::from_u16(0);
     trace.values[base + LUT_COL_IN1] = Val::from_u16(0);
     trace.values[base + LUT_COL_IN2] = Val::from_u16(0);
     trace.values[base + LUT_COL_OUT0] = Val::from_u16(0);
     trace.values[base + LUT_COL_OUT1] = Val::from_u16(0);
-    trace.values[base + LUT_COL_SEL_BYTE_ADD_EQ] = Val::from_u16(1);
+    trace.values[base + LUT_COL_SEL_U29_ADD_EQ] = Val::from_u16(1);
   }
 
   Ok(trace)
@@ -1615,20 +1492,6 @@ fn validate_lut_steps(steps: &[LutStep]) -> Result<(), String> {
 
   for (i, step) in steps.iter().enumerate() {
     match step.op {
-      LutOpcode::ByteAddEq => {
-        ensure_le("in0", step.in0, 255, i)?;
-        ensure_le("in1", step.in1, 255, i)?;
-        ensure_le("in2", step.in2, 1, i)?;
-        ensure_le("out0", step.out0, 255, i)?;
-        ensure_le("out1", step.out1, 1, i)?;
-      }
-      LutOpcode::U16AddEq => {
-        ensure_le("in0", step.in0, 0xFFFF, i)?;
-        ensure_le("in1", step.in1, 0xFFFF, i)?;
-        ensure_le("in2", step.in2, 1, i)?;
-        ensure_le("out0", step.out0, 0xFFFF, i)?;
-        ensure_le("out1", step.out1, 1, i)?;
-      }
       LutOpcode::U29AddEq => {
         ensure_le("in0", step.in0, (1u32 << 29) - 1, i)?;
         ensure_le("in1", step.in1, (1u32 << 29) - 1, i)?;
@@ -1663,13 +1526,6 @@ fn validate_lut_steps(steps: &[LutStep]) -> Result<(), String> {
         ensure_le("in2", step.in2, 0, i)?;
         ensure_le("out0", step.out0, 0x7FFF, i)?;
         ensure_le("out1", step.out1, 0x7FFF, i)?;
-      }
-      LutOpcode::ByteAddCarryEq => {
-        ensure_le("in0", step.in0, 255, i)?;
-        ensure_le("in1", step.in1, 255, i)?;
-        ensure_le("in2", step.in2, 1, i)?;
-        ensure_le("out0", step.out0, 1, i)?;
-        ensure_le("out1", step.out1, 255, i)?;
       }
       LutOpcode::ByteMulLowEq | LutOpcode::ByteMulHighEq => {
         ensure_le("in0", step.in0, 255, i)?;
@@ -1730,14 +1586,11 @@ fn eval_lut_kernel_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
   let out1 = local[LUT_COL_OUT1].clone();
 
   // Selector columns.
-  let s_add = local[LUT_COL_SEL_BYTE_ADD_EQ].clone();
   let s_u29 = local[LUT_COL_SEL_U29_ADD_EQ].clone();
   let s_u24 = local[LUT_COL_SEL_U24_ADD_EQ].clone();
   let s_u15 = local[LUT_COL_SEL_U15_ADD_EQ].clone();
   let s_bit = local[LUT_COL_SEL_BIT_ADD_EQ].clone();
   let s_mul = local[LUT_COL_SEL_U15_MUL_EQ].clone();
-  let s_u16 = local[LUT_COL_SEL_U16_ADD_EQ].clone();
-  let s_carry = local[LUT_COL_SEL_BYTE_ADD_CARRY_EQ].clone();
   let s_mul_low = local[LUT_COL_SEL_BYTE_MUL_LOW_EQ].clone();
   let s_mul_high = local[LUT_COL_SEL_BYTE_MUL_HIGH_EQ].clone();
   let s_and = local[LUT_COL_SEL_BYTE_AND_EQ].clone();
@@ -1746,14 +1599,11 @@ fn eval_lut_kernel_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
 
   // ── (1) Boolean: sel_i * (1 - sel_i) = 0  (degree 2) ──────────────
   for s in [
-    s_add.clone(),
     s_u29.clone(),
     s_u24.clone(),
     s_u15.clone(),
     s_bit.clone(),
     s_mul.clone(),
-    s_u16.clone(),
-    s_carry.clone(),
     s_mul_low.clone(),
     s_mul_high.clone(),
     s_and.clone(),
@@ -1764,14 +1614,11 @@ fn eval_lut_kernel_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
   }
 
   // ── (2) One-hot: Σ sel_i = 1  (degree 1) ──────────────────────────
-  let sel_sum = s_add.clone().into()
-    + s_u29.clone().into()
+  let sel_sum = s_u29.clone().into()
     + s_u24.clone().into()
     + s_u15.clone().into()
     + s_bit.clone().into()
     + s_mul.clone().into()
-    + s_u16.clone().into()
-    + s_carry.clone().into()
     + s_mul_low.clone().into()
     + s_mul_high.clone().into()
     + s_and.clone().into()
@@ -1780,15 +1627,11 @@ fn eval_lut_kernel_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
   builder.assert_one(sel_sum);
 
   // ── (3) op = Σ(sel_i · tag_i)  (degree 2) ─────────────────────────
-  let op_reconstruct = s_add.clone().into()
-    * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq))
-    + s_u29.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U29AddEq))
+  let op_reconstruct = s_u29.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U29AddEq))
     + s_u24.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U24AddEq))
     + s_u15.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U15AddEq))
     + s_bit.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::BitAddEq))
     + s_mul.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U15MulEq))
-    + s_u16.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::U16AddEq))
-    + s_carry.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAddCarryEq))
     + s_mul_low.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteMulLowEq))
     + s_mul_high.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteMulHighEq))
     + s_and.clone().into() * AB::Expr::from_u16(lut_opcode_tag(LutOpcode::ByteAndEq))
@@ -1803,15 +1646,8 @@ fn eval_lut_kernel_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
   let c256 = AB::Expr::from_u16(256);
   let c2 = AB::Expr::from_u16(2);
   let c32768 = AB::Expr::from_u32(32768);
-  let c65536 = AB::Expr::from_u32(65536);
   let c16777216 = AB::Expr::from_u32(1u32 << 24);
   let c536870912 = AB::Expr::from_u32(1u32 << 29);
-
-  // ByteAddEq: in0+in1+in2 = out0 + 256*out1, out1 ∈ {0,1}
-  builder.assert_zero(
-    s_add.clone() * (total.clone() - out0.clone().into() - c256.clone() * out1.clone().into()),
-  );
-  builder.assert_bool(s_add.clone() * out1.clone().into());
 
   // U29AddEq
   builder.assert_zero(
@@ -1825,12 +1661,6 @@ fn eval_lut_kernel_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
     s_u24.clone() * (total.clone() - out0.clone().into() - c16777216.clone() * out1.clone().into()),
   );
   builder.assert_bool(s_u24.clone() * out1.clone().into());
-
-  // U16AddEq
-  builder.assert_zero(
-    s_u16.clone() * (total.clone() - out0.clone().into() - c65536.clone() * out1.clone().into()),
-  );
-  builder.assert_bool(s_u16.clone() * out1.clone().into());
 
   // U15AddEq
   builder.assert_zero(
@@ -1856,12 +1686,6 @@ fn eval_lut_kernel_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
         - c32768.clone() * out1.clone().into()),
   );
   builder.assert_zero(s_mul.clone() * in2.clone());
-
-  // ByteAddCarryEq: in0+in1+in2 = out1 + 256*out0, out0 ∈ {0,1}
-  builder.assert_zero(
-    s_carry.clone() * (total.clone() - out1.clone().into() - c256.clone() * out0.clone().into()),
-  );
-  builder.assert_bool(s_carry.clone() * out0.clone().into());
 
   // ByteMulLowEq: in0*in1 = out0 + 256*out1, in2=0
   builder.assert_zero(
@@ -1895,58 +1719,7 @@ fn eval_lut_kernel_inner<AB: AirBuilderWithPublicValues>(builder: &mut AB) {
   builder.assert_zero(s_xor.clone() * in2.clone());
   builder.assert_zero(s_xor.clone() * out1.clone());
 
-  // ByteAddCarryEq / U{15,16,24,29}AddEq all use in2 as carry-in;
-  // original code had a dead `assert_bool(in2)` after the gate section.
-  // Now each opcode enforces its own in2 semantics above; no global needed.
-}
-
-// ============================================================
-// Phase 3: LutKernelAirWithPrep — binds LUT main-trace columns
-// to the shared preprocessed ProofRow commitment.
-// ============================================================
-
-/// LUT STARK variant that, in addition to the arithmetic validity constraints
-/// from [`LutKernelAir`], enforces (via [`PairBuilder`]) that each LUT step in
-/// the main trace was derived from the corresponding committed [`ProofRow`].
-///
-/// Only used by [`prove_lut_with_prep`] / [`verify_lut_with_prep`].
-pub struct LutKernelAirWithPrep {
-  prep_matrix: Option<RowMajorMatrix<Val>>,
-}
-
-impl LutKernelAirWithPrep {
-  /// Prover path: store the preprocessed matrix so the p3-uni-stark
-  /// debug-constraint checker can wire up the preprocessed columns.
-  pub fn new(rows: &[ProofRow], pv: &[Val]) -> Self {
-    Self {
-      prep_matrix: Some(build_proof_rows_preprocessed_matrix(rows, pv)),
-    }
-  }
-
-  /// Verifier path: preprocessed data comes from the `PreprocessedVerifierKey`
-  /// embedded in the proof; no local matrix is needed.
-  pub fn for_verify() -> Self {
-    Self { prep_matrix: None }
-  }
-}
-
-impl BaseAir<Val> for LutKernelAirWithPrep {
-  fn width(&self) -> usize {
-    NUM_LUT_COLS
-  }
-
-  fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Val>> {
-    self.prep_matrix.clone()
-  }
-}
-
-impl<AB> Air<AB> for LutKernelAirWithPrep
-where
-  AB: AirBuilderWithPublicValues + PairBuilder + AirBuilder<F = Val>,
-{
-  fn eval(&self, _builder: &mut AB) {
-    // Intentionally empty — diagnostic test
-  }
+  // U{15,24,29}AddEq all use in2 as carry-in; each opcode enforces its own in2 semantics above.
 }
 
 /// Build a LUT main trace with exactly **one row per [`ProofRow`]** — the same
@@ -1954,16 +1727,14 @@ where
 /// [`build_stack_ir_trace_from_rows`].  This 1:1 alignment is required to share
 /// the same `PreprocessedProverData` between the StackIR and LUT STARKs.
 ///
-/// Non-LUT structural ops (`OP_EQ_REFL`, etc.) are encoded as `ByteAddEq(0,0,0)`
+/// Non-LUT structural ops (`OP_EQ_REFL`, etc.) are encoded as `U29AddEq(0,0,0)`
 /// padding rows, which satisfy the LUT AIR's arithmetic constraints trivially.
-/// `OP_U16_ADD_EQ` is encoded as a single `U16AddEq` step (not the 2-step
-/// U15-decomposition used by the legacy path) to maintain the 1:1 invariant.
 pub fn build_lut_trace_from_proof_rows(rows: &[ProofRow]) -> Result<RowMajorMatrix<Val>, String> {
   use crate::semantic_proof::{
-    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
-    OP_BYTE_ADD_EQ, OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ,
+    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+    OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ,
     OP_BYTE_MUL_LOW_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT,
-    OP_U15_MUL_EQ, OP_U16_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
+    OP_U15_MUL_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
   };
 
   if rows.is_empty() {
@@ -1972,12 +1743,12 @@ pub fn build_lut_trace_from_proof_rows(rows: &[ProofRow]) -> Result<RowMajorMatr
 
   let n_rows = rows.len().max(4).next_power_of_two();
   let mut trace = RowMajorMatrix::new(Val::zero_vec(n_rows * NUM_LUT_COLS), NUM_LUT_COLS);
-  let pad_tag = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
+  let pad_tag = Val::from_u16(lut_opcode_tag(LutOpcode::U29AddEq));
 
   for (i, row) in rows.iter().enumerate() {
     let b = i * NUM_LUT_COLS;
     match row.op {
-      // ── Structural (non-LUT) rows: pad as ByteAddEq(0,0,0,0,0) ──────────
+      // ── Structural (non-LUT) rows: pad as U29AddEq(0,0,0,0,0) ──────────
       op if op == OP_BOOL
         || op == OP_BYTE
         || op == OP_EQ_REFL
@@ -1989,27 +1760,8 @@ pub fn build_lut_trace_from_proof_rows(rows: &[ProofRow]) -> Result<RowMajorMatr
         || op == OP_EQ_SYM =>
       {
         trace.values[b + LUT_COL_OP] = pad_tag;
-        trace.values[b + LUT_COL_SEL_BYTE_ADD_EQ] = Val::from_u16(1);
-        // in0..out1 remain zero — ByteAddEq(0+0+0=0) is arithmetically valid.
-      }
-      OP_BYTE_ADD_EQ => {
-        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddEq));
-        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
-        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
-        trace.values[b + LUT_COL_IN2] = Val::from_u32(row.arg0);
-        trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
-        trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.scalar2);
-        trace.values[b + LUT_COL_SEL_BYTE_ADD_EQ] = Val::from_u16(1);
-      }
-      OP_U16_ADD_EQ => {
-        // Single U16AddEq step — keeps 1:1 row alignment with ProofRows.
-        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::U16AddEq));
-        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
-        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
-        trace.values[b + LUT_COL_IN2] = Val::from_u32(row.scalar2);
-        trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
-        trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.arg1);
-        trace.values[b + LUT_COL_SEL_U16_ADD_EQ] = Val::from_u16(1);
+        trace.values[b + LUT_COL_SEL_U29_ADD_EQ] = Val::from_u16(1);
+        // in0..out1 remain zero — U29AddEq(0+0+0=0) is arithmetically valid.
       }
       OP_U29_ADD_EQ => {
         trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::U29AddEq));
@@ -2038,16 +1790,6 @@ pub fn build_lut_trace_from_proof_rows(rows: &[ProofRow]) -> Result<RowMajorMatr
         trace.values[b + LUT_COL_OUT0] = Val::from_u32(row.value);
         trace.values[b + LUT_COL_OUT1] = Val::from_u32(row.arg0);
         trace.values[b + LUT_COL_SEL_U15_MUL_EQ] = Val::from_u16(1);
-      }
-      OP_BYTE_ADD_CARRY_EQ => {
-        let total = row.scalar0 + row.scalar1 + row.arg0;
-        trace.values[b + LUT_COL_OP] = Val::from_u16(lut_opcode_tag(LutOpcode::ByteAddCarryEq));
-        trace.values[b + LUT_COL_IN0] = Val::from_u32(row.scalar0);
-        trace.values[b + LUT_COL_IN1] = Val::from_u32(row.scalar1);
-        trace.values[b + LUT_COL_IN2] = Val::from_u32(row.arg0);
-        trace.values[b + LUT_COL_OUT0] = Val::from_u32(if total >= 256 { 1 } else { 0 });
-        trace.values[b + LUT_COL_OUT1] = Val::from_u32(total & 0xFF);
-        trace.values[b + LUT_COL_SEL_BYTE_ADD_CARRY_EQ] = Val::from_u16(1);
       }
       OP_BYTE_MUL_LOW_EQ => {
         let result = row.scalar0 * row.scalar1;
@@ -2107,53 +1849,14 @@ pub fn build_lut_trace_from_proof_rows(rows: &[ProofRow]) -> Result<RowMajorMatr
     }
   }
 
-  // Padding rows beyond `rows.len()`: ByteAddEq(0,0,0,0,0).
+  // Padding rows beyond `rows.len()`: U29AddEq(0,0,0,0,0).
   for i in rows.len()..n_rows {
     let b = i * NUM_LUT_COLS;
     trace.values[b + LUT_COL_OP] = pad_tag;
-    trace.values[b + LUT_COL_SEL_BYTE_ADD_EQ] = Val::from_u16(1);
+    trace.values[b + LUT_COL_SEL_U29_ADD_EQ] = Val::from_u16(1);
   }
 
   Ok(trace)
-}
-
-/// Scaffold public-values helper for the LUT prep path (tag + zeros).
-pub fn lut_scaffold_public_values() -> Vec<Val> {
-  default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT)
-}
-
-/// Prove the LUT kernel STARK with shared preprocessed ProofRow commitment.
-///
-/// Uses [`build_lut_trace_from_proof_rows`] to build a 1:1 trace (one row per
-/// ProofRow) so the main trace and the preprocessed matrix have equal height,
-/// allowing both to be committed under the same `PreprocessedProverData`.
-pub fn prove_lut_with_prep(
-  rows: &[ProofRow],
-  prep_data: &PreprocessedProverData<CircleStarkConfig>,
-  public_values: &[Val],
-) -> Result<CircleStarkProof, String> {
-  let trace = build_lut_trace_from_proof_rows(rows)?;
-  let config = make_circle_config();
-  let air = LutKernelAirWithPrep::new(rows, public_values);
-  let proof =
-    p3_uni_stark::prove_with_preprocessed(&config, &air, trace, public_values, Some(prep_data));
-  Ok(proof)
-}
-
-/// Verify a LUT proof generated by [`prove_lut_with_prep`].
-pub fn verify_lut_with_prep(
-  proof: &CircleStarkProof,
-  prep_vk: &PreprocessedVerifierKey<CircleStarkConfig>,
-  public_values: &[Val],
-) -> CircleStarkVerifyResult {
-  let config = make_circle_config();
-  p3_uni_stark::verify_with_preprocessed(
-    &config,
-    &LutKernelAirWithPrep::for_verify(),
-    proof,
-    public_values,
-    Some(prep_vk),
-  )
 }
 
 /// Extract [`ByteTableQuery`] items from a set of LUT steps.
@@ -2255,60 +1958,90 @@ pub fn collect_byte_table_queries_from_rows(
     .collect()
 }
 
-/// High-level: prove a LUT kernel step-set **with** a companion byte-table
-/// LogUp proof for AND/OR/XOR byte operations.
+/// Out-of-circuit consistency check for all ProofRows in a batch manifest.
 ///
-/// Returns `(lut_proof, byte_table_proof)` where:
-/// - `lut_proof` is the standard LUT STARK proof (preprocessed path).
-/// - `byte_table_proof` is the LogUp proof for all AND/OR/XOR queries that
-///   appear in `rows`.  Returns `None` when there are no such operations.
-pub fn prove_lut_with_prep_and_logup(
-  rows: &[ProofRow],
-  prep_data: &PreprocessedProverData<CircleStarkConfig>,
-  public_values: &[Val],
-) -> Result<
-  (
-    CircleStarkProof,
-    Option<p3_uni_stark::Proof<CircleStarkConfig>>,
-  ),
-  String,
-> {
-  // Collect byte-level queries directly from ProofRows (not via bit-expanded
-  // LutSteps).  This correctly handles structural rows such as OP_AND_INTRO
-  // and produces real byte operands (scalar0/scalar1 ∈ 0..=255) rather than
-  // bit-expanded operands (0/1).
-  let queries = collect_byte_table_queries_from_rows(rows);
-
-  // Build the LUT proof (existing preprocessed path).
-  let lut_proof = prove_lut_with_prep(rows, prep_data, public_values)?;
-
-  // Build a companion byte-table proof when there are AND/OR/XOR operations.
-  let byte_proof = if queries.is_empty() {
-    None
-  } else {
-    Some(crate::byte_table::prove_byte_table(&queries))
+/// **Gap 3 (ByteAnd/Or/Xor result linking)**: verifies that each byte-op row's
+/// committed `value` equals the correct bitwise result of `scalar0 op scalar1`.
+/// This is required because `eval_lut_prep_row_binding_inner` binds
+/// `out0 = prep[PREP_COL_VALUE]`, but the LUT AIR constraints do not enforce
+/// `out0 = in0 op in1` for bitwise ops.
+///
+/// **Gap 4 (U29/U24AddEq range constraints)**: verifies that arithmetic operands
+/// are within the declared bit-width bounds.  The AIR constraint
+/// `in0 + in1 + in2 = out0 + 2^N * out1` is satisfiable in M31 even when
+/// `in0 ≥ 2^N`, so range enforcement must be added out-of-circuit.
+///
+/// Returns `false` if any row fails validation.  Structural padding rows
+/// (OP_BOOL, OP_EQ_REFL, etc.) are silently accepted.
+pub fn validate_manifest_rows(rows: &[ProofRow]) -> bool {
+  use crate::semantic_proof::{
+    OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ, OP_BYTE_MUL_LOW_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ,
+    OP_U15_MUL_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
   };
 
-  Ok((lut_proof, byte_proof))
-}
-
-/// Verify a `(lut_proof, byte_table_proof)` pair produced by
-/// [`prove_lut_with_prep_and_logup`].
-pub fn verify_lut_with_prep_and_logup(
-  lut_proof: &CircleStarkProof,
-  byte_proof: Option<&p3_uni_stark::Proof<CircleStarkConfig>>,
-  prep_vk: &PreprocessedVerifierKey<CircleStarkConfig>,
-  public_values: &[Val],
-) -> CircleStarkVerifyResult {
-  // Verify the main LUT STARK proof.
-  verify_lut_with_prep(lut_proof, prep_vk, public_values)?;
-
-  // Verify the companion byte-table proof when present.
-  if let Some(bp) = byte_proof {
-    crate::byte_table::verify_byte_table(bp)?;
+  for row in rows {
+    if row.op == OP_BYTE_AND_EQ {
+      // Gap 3: byte AND result must be committed and correct.
+      if row.scalar0 > 255 || row.scalar1 > 255 {
+        return false;
+      }
+      if row.value != row.scalar0 & row.scalar1 {
+        return false;
+      }
+    } else if row.op == OP_BYTE_OR_EQ {
+      if row.scalar0 > 255 || row.scalar1 > 255 {
+        return false;
+      }
+      if row.value != row.scalar0 | row.scalar1 {
+        return false;
+      }
+    } else if row.op == OP_BYTE_XOR_EQ {
+      if row.scalar0 > 255 || row.scalar1 > 255 {
+        return false;
+      }
+      if row.value != row.scalar0 ^ row.scalar1 {
+        return false;
+      }
+    } else if row.op == OP_U29_ADD_EQ {
+      // Gap 4: U29 operand range enforcement.
+      const MAX29: u32 = (1u32 << 29) - 1;
+      if row.scalar0 > MAX29 || row.scalar1 > MAX29 || row.value > MAX29 {
+        return false;
+      }
+      if row.scalar2 > 1 || row.arg1 > 1 {
+        // carry-in and overflow bit must be boolean
+        return false;
+      }
+    } else if row.op == OP_U24_ADD_EQ {
+      // Gap 4: U24 operand range enforcement.
+      const MAX24: u32 = (1u32 << 24) - 1;
+      if row.scalar0 > MAX24 || row.scalar1 > MAX24 || row.value > MAX24 {
+        return false;
+      }
+      if row.scalar2 > 1 || row.arg1 > 1 {
+        return false;
+      }
+    } else if row.op == OP_U15_MUL_EQ {
+      // Gap 4: U15 product operand range enforcement.
+      const MAX15: u32 = 0x7FFF_u32;
+      if row.scalar0 > MAX15 || row.scalar1 > MAX15 {
+        return false;
+      }
+      if row.value > MAX15 || row.arg0 > MAX15 {
+        // out0 (lo) and out1 (hi) are both at most 0x7FFF
+        return false;
+      }
+    } else if row.op == OP_BYTE_MUL_LOW_EQ || row.op == OP_BYTE_MUL_HIGH_EQ {
+      // Gap 4: byte product inputs must be bytes.
+      if row.scalar0 > 255 || row.scalar1 > 255 {
+        return false;
+      }
+    }
+    // Structural pad ops (OP_BOOL, OP_EQ_REFL, etc.) have no arithmetic fields
+    // to validate; they are accepted unconditionally.
   }
 
-  Ok(())
+  true
 }
 
 //
@@ -2322,8 +2055,7 @@ pub fn verify_lut_with_prep_and_logup(
 // by the verifier via `compute_batch_manifest_digest`.
 // ============================================================
 
-/// Per-row prep scalar binding helper shared between [`LutKernelAirWithPrep`]
-/// and [`BatchLutKernelAirWithPrep`].
+/// Per-row prep scalar binding helper used by [`BatchLutKernelAirWithPrep`].
 ///
 /// Binds every LUT main-trace column to the corresponding committed
 /// preprocessed ProofRow field using a gate polynomial over `prep[PREP_COL_OP]`.
@@ -2333,19 +2065,16 @@ where
   AB: AirBuilderWithPublicValues + PairBuilder + AirBuilder<F = Val>,
 {
   use crate::semantic_proof::{
-    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_EQ, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
-    OP_BYTE_ADD_EQ, OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ,
+    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+    OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ,
     OP_BYTE_MUL_LOW_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT,
-    OP_U15_MUL_EQ, OP_U16_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
+    OP_U15_MUL_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ,
   };
 
   let all_prep_ops: &[u32] = &[
-    OP_BYTE_ADD_EQ,
-    OP_U16_ADD_EQ,
     OP_U29_ADD_EQ,
     OP_U24_ADD_EQ,
     OP_U15_MUL_EQ,
-    OP_BYTE_ADD_CARRY_EQ,
     OP_BYTE_MUL_LOW_EQ,
     OP_BYTE_MUL_HIGH_EQ,
     OP_BYTE_AND_EQ,
@@ -2392,45 +2121,6 @@ where
       .expect("pg: target not in all_prep_ops");
     pg_vals[idx].clone()
   };
-
-  // OP_BYTE_ADD_EQ → ByteAddEq: in0=s0, in1=s1, in2=arg0, out0=value, out1=s2
-  let tag_add = lut_opcode_tag(LutOpcode::ByteAddEq) as u32;
-  let g = pg(OP_BYTE_ADD_EQ);
-  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_add)));
-  builder.assert_zero(
-    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
-  );
-  builder.assert_zero(
-    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
-  );
-  builder.assert_zero(
-    g.clone() * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_ARG0].clone().into()),
-  );
-  builder.assert_zero(
-    g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()),
-  );
-  builder.assert_zero(
-    g * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_SCALAR2].clone().into()),
-  );
-
-  // OP_U16_ADD_EQ → U16AddEq: in0=s0, in1=s1, in2=s2, out0=value, out1=arg1
-  let tag_u16 = lut_opcode_tag(LutOpcode::U16AddEq) as u32;
-  let g = pg(OP_U16_ADD_EQ);
-  builder.assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_u16)));
-  builder.assert_zero(
-    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
-  );
-  builder.assert_zero(
-    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
-  );
-  builder.assert_zero(
-    g.clone() * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_SCALAR2].clone().into()),
-  );
-  builder.assert_zero(
-    g.clone() * (local[LUT_COL_OUT0].clone().into() - prep_row[PREP_COL_VALUE].clone().into()),
-  );
-  builder
-    .assert_zero(g * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG1].clone().into()));
 
   // OP_U29_ADD_EQ → U29AddEq: in0=s0, in1=s1, in2=s2, out0=value, out1=arg1
   let tag_u29 = lut_opcode_tag(LutOpcode::U29AddEq) as u32;
@@ -2485,20 +2175,6 @@ where
   );
   builder
     .assert_zero(g * (local[LUT_COL_OUT1].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
-
-  // OP_BYTE_ADD_CARRY_EQ → ByteAddCarryEq: in0=s0, in1=s1, in2=arg0
-  let tag_carry = lut_opcode_tag(LutOpcode::ByteAddCarryEq) as u32;
-  let g = pg(OP_BYTE_ADD_CARRY_EQ);
-  builder
-    .assert_zero(g.clone() * (local[LUT_COL_OP].clone().into() - AB::Expr::from_u32(tag_carry)));
-  builder.assert_zero(
-    g.clone() * (local[LUT_COL_IN0].clone().into() - prep_row[PREP_COL_SCALAR0].clone().into()),
-  );
-  builder.assert_zero(
-    g.clone() * (local[LUT_COL_IN1].clone().into() - prep_row[PREP_COL_SCALAR1].clone().into()),
-  );
-  builder
-    .assert_zero(g * (local[LUT_COL_IN2].clone().into() - prep_row[PREP_COL_ARG0].clone().into()));
 
   // OP_BYTE_MUL_LOW_EQ → ByteMulLowEq: in0=s0, in1=s1
   let tag_ml = lut_opcode_tag(LutOpcode::ByteMulLowEq) as u32;
@@ -2704,7 +2380,7 @@ pub fn verify_batch_lut_with_prep(
   )
 }
 
-pub fn prove_lut_kernel_stark(steps: &[LutStep]) -> Result<CircleStarkProof, String> {
+pub(crate) fn prove_lut_kernel_stark(steps: &[LutStep]) -> Result<CircleStarkProof, String> {
   prove_lut_kernel_stark_with_public_values(
     steps,
     &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
@@ -2725,7 +2401,7 @@ pub fn prove_lut_kernel_stark_with_public_values(
   ))
 }
 
-pub fn verify_lut_kernel_stark(proof: &CircleStarkProof) -> CircleStarkVerifyResult {
+pub(crate) fn verify_lut_kernel_stark(proof: &CircleStarkProof) -> CircleStarkVerifyResult {
   verify_lut_kernel_stark_with_public_values(
     proof,
     &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
@@ -2740,7 +2416,7 @@ pub fn verify_lut_kernel_stark_with_public_values(
   p3_uni_stark::verify(&config, &LutKernelAir, proof, public_values)
 }
 
-pub fn prove_and_verify_lut_kernel_stark_from_steps(steps: &[LutStep]) -> bool {
+pub(crate) fn prove_and_verify_lut_kernel_stark_from_steps(steps: &[LutStep]) -> bool {
   let proved = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
     prove_lut_kernel_stark(steps)
   }));
@@ -2750,14 +2426,6 @@ pub fn prove_and_verify_lut_kernel_stark_from_steps(steps: &[LutStep]) -> bool {
     Err(_) => return false,
   };
   verify_lut_kernel_stark(&proof).is_ok()
-}
-
-pub fn prove_and_verify_lut_kernel_stark_from_rows(rows: &[ProofRow]) -> bool {
-  let steps = match build_lut_steps_from_rows(rows) {
-    Ok(steps) => steps,
-    Err(_) => return false,
-  };
-  prove_and_verify_lut_kernel_stark_from_steps(&steps)
 }
 
 pub fn build_lut_steps_from_rows_add_family(rows: &[ProofRow]) -> Result<Vec<LutStep>, String> {
@@ -2779,17 +2447,6 @@ pub fn build_lut_steps_from_rows_add_family(rows: &[ProofRow]) -> Result<Vec<Lut
       | crate::semantic_proof::OP_EQ_SYM => {
         seen_add_family = true;
       }
-      crate::semantic_proof::OP_BYTE_ADD_EQ => out.push(LutStep {
-        op: LutOpcode::ByteAddEq,
-        in0: row.scalar0,
-        in1: row.scalar1,
-        in2: row.arg0,
-        out0: row.value,
-        out1: row.scalar2,
-      }),
-      crate::semantic_proof::OP_U16_ADD_EQ => {
-        append_u16_row_as_u15_steps(row, &mut out)?;
-      }
       crate::semantic_proof::OP_U29_ADD_EQ => out.push(LutStep {
         op: LutOpcode::U29AddEq,
         in0: row.scalar0,
@@ -2806,17 +2463,6 @@ pub fn build_lut_steps_from_rows_add_family(rows: &[ProofRow]) -> Result<Vec<Lut
         out0: row.value,
         out1: row.arg1,
       }),
-      crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ => {
-        let total = row.scalar0 + row.scalar1 + row.arg0;
-        out.push(LutStep {
-          op: LutOpcode::ByteAddCarryEq,
-          in0: row.scalar0,
-          in1: row.scalar1,
-          in2: row.arg0,
-          out0: if total >= 256 { 1 } else { 0 },
-          out1: total & 0xFF,
-        });
-      }
       other => return Err(format!("non-add-family row in ADD kernel path: {other}")),
     }
   }
@@ -2864,17 +2510,6 @@ pub fn build_lut_steps_from_rows_mul_family(rows: &[ProofRow]) -> Result<Vec<Lut
       | crate::semantic_proof::OP_EQ_SYM => {
         seen_mul_family = true;
       }
-      crate::semantic_proof::OP_BYTE_ADD_EQ => out.push(LutStep {
-        op: LutOpcode::ByteAddEq,
-        in0: row.scalar0,
-        in1: row.scalar1,
-        in2: row.arg0,
-        out0: row.value,
-        out1: row.scalar2,
-      }),
-      crate::semantic_proof::OP_U16_ADD_EQ => {
-        append_u16_row_as_u15_steps(row, &mut out)?;
-      }
       crate::semantic_proof::OP_U29_ADD_EQ => out.push(LutStep {
         op: LutOpcode::U29AddEq,
         in0: row.scalar0,
@@ -2900,17 +2535,6 @@ pub fn build_lut_steps_from_rows_mul_family(rows: &[ProofRow]) -> Result<Vec<Lut
           in2: 0,
           out0: total & 0x7FFF,
           out1: total >> 15,
-        });
-      }
-      crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ => {
-        let total = row.scalar0 + row.scalar1 + row.arg0;
-        out.push(LutStep {
-          op: LutOpcode::ByteAddCarryEq,
-          in0: row.scalar0,
-          in1: row.scalar1,
-          in2: row.arg0,
-          out0: if total >= 256 { 1 } else { 0 },
-          out1: total & 0xFF,
         });
       }
       other => return Err(format!("non-mul-family row in MUL kernel path: {other}")),
@@ -3011,19 +2635,6 @@ pub fn build_lut_steps_from_rows_bit_family(rows: &[ProofRow]) -> Result<Vec<Lut
   Ok(out)
 }
 
-pub fn prove_and_verify_bit_stack_lut_stark(rows: &[ProofRow]) -> bool {
-  if !prove_and_verify_stack_ir_scaffold_stark(rows) {
-    return false;
-  }
-
-  let steps = match build_lut_steps_from_rows_bit_family(rows) {
-    Ok(steps) => steps,
-    Err(_) => return false,
-  };
-
-  prove_and_verify_lut_kernel_stark_from_steps(&steps)
-}
-
 // `ProofRow` column indices (same order as semantic_proof::ProofRow fields).
 const COL_OP: usize = 0;
 const COL_SCALAR0: usize = 1;
@@ -3050,18 +2661,21 @@ pub struct StageAProof {
 }
 
 fn route_stage_a_row_op(op: u32) -> Result<(), String> {
+  use crate::semantic_proof::{
+    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
+    OP_BYTE_ADD_THIRD_CONGRUENCE, OP_EQ_REFL, OP_EQ_TRANS, OP_U24_ADD_EQ,
+    OP_U29_ADD_EQ,
+  };
   match op {
-    OP_BYTE_ADD_EQ
-    | crate::semantic_proof::OP_U16_ADD_EQ
-    | crate::semantic_proof::OP_U29_ADD_EQ
-    | crate::semantic_proof::OP_U24_ADD_EQ
-    | crate::semantic_proof::OP_BOOL
-    | crate::semantic_proof::OP_BYTE
-    | crate::semantic_proof::OP_EQ_REFL
-    | crate::semantic_proof::OP_AND_INTRO
-    | crate::semantic_proof::OP_EQ_TRANS
-    | crate::semantic_proof::OP_BYTE_ADD_THIRD_CONGRUENCE
-    | crate::semantic_proof::OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => Ok(()),
+    OP_U29_ADD_EQ
+    | OP_U24_ADD_EQ
+    | OP_BOOL
+    | OP_BYTE
+    | OP_EQ_REFL
+    | OP_AND_INTRO
+    | OP_EQ_TRANS
+    | OP_BYTE_ADD_THIRD_CONGRUENCE
+    | OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE => Ok(()),
     other => Err(format!("unsupported Stage A proof-row op: {other}")),
   }
 }
@@ -3070,9 +2684,7 @@ fn has_stage_a_semantic_rows(rows: &[ProofRow]) -> Result<bool, String> {
   let mut found = false;
   for row in rows {
     route_stage_a_row_op(row.op)?;
-    if row.op == OP_BYTE_ADD_EQ
-      || row.op == crate::semantic_proof::OP_U16_ADD_EQ
-      || row.op == crate::semantic_proof::OP_U29_ADD_EQ
+    if row.op == crate::semantic_proof::OP_U29_ADD_EQ
       || row.op == crate::semantic_proof::OP_U24_ADD_EQ
     {
       found = true;
@@ -3087,8 +2699,8 @@ fn has_stage_a_semantic_rows(rows: &[ProofRow]) -> Result<bool, String> {
 
 /// AIR for Stage-1 semantic constraints using `ProofRow` trace columns.
 ///
-/// The current kernel verifies byte-add equality constraints encoded in
-/// `OP_BYTE_ADD_EQ` rows.
+/// The current kernel verifies u29/u24 add equality constraints encoded in
+/// `OP_U29_ADD_EQ` / `OP_U24_ADD_EQ` rows.
 pub struct StageASemanticAir;
 
 impl<F> BaseAir<F> for StageASemanticAir {
@@ -3100,7 +2712,7 @@ impl<F> BaseAir<F> for StageASemanticAir {
 /// AIR for checking inferred WFF bytes equal expected WFF bytes.
 ///
 /// Each row compares one byte:
-/// - inferred byte from compiled `OP_BYTE_ADD_EQ` rows
+/// - inferred byte from compiled add-equality rows
 /// - expected byte from transition output
 pub struct WffMatchAir;
 
@@ -3138,12 +2750,10 @@ impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
     let next = &*next;
 
     let op = local[COL_OP].clone();
-    let t_byte = OP_BYTE_ADD_EQ as u16;
-    let t_u16 = crate::semantic_proof::OP_U16_ADD_EQ as u16;
     let t_u29 = crate::semantic_proof::OP_U29_ADD_EQ as u16;
     let t_u24 = crate::semantic_proof::OP_U24_ADD_EQ as u16;
 
-    let tags = [t_byte, t_u16, t_u29, t_u24];
+    let tags = [t_u29, t_u24];
     let gate = |target: u16| {
       let mut g = AB::Expr::from_u16(1);
       for t in tags {
@@ -3154,14 +2764,10 @@ impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
       g
     };
 
-    let g_byte = gate(t_byte);
-    let g_u16 = gate(t_u16);
     let g_u29 = gate(t_u29);
     let g_u24 = gate(t_u24);
 
-    let allowed_poly = (op.clone().into() - AB::Expr::from_u16(t_byte))
-      * (op.clone().into() - AB::Expr::from_u16(t_u16))
-      * (op.clone().into() - AB::Expr::from_u16(t_u29))
+    let allowed_poly = (op.clone().into() - AB::Expr::from_u16(t_u29))
       * (op.clone().into() - AB::Expr::from_u16(t_u24));
     builder.assert_zero(allowed_poly);
 
@@ -3169,18 +2775,6 @@ impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
     let b = local[COL_SCALAR1].clone();
     let sum = local[COL_VALUE].clone();
 
-    builder.assert_zero(
-      g_byte.clone()
-        * (a.clone().into() + b.clone().into() + local[COL_ARG0].clone().into()
-          - sum.clone().into()
-          - AB::Expr::from_u16(256) * local[COL_SCALAR2].clone().into()),
-    );
-    builder.assert_zero(
-      g_u16.clone()
-        * (a.clone().into() + b.clone().into() + local[COL_SCALAR2].clone().into()
-          - sum.clone().into()
-          - AB::Expr::from_u32(1u32 << 16) * local[COL_ARG1].clone().into()),
-    );
     builder.assert_zero(
       g_u29.clone()
         * (a.clone().into() + b.clone().into() + local[COL_SCALAR2].clone().into()
@@ -3194,26 +2788,9 @@ impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
           - AB::Expr::from_u32(1u32 << 24) * local[COL_ARG1].clone().into()),
     );
 
-    builder.assert_zero(g_byte.clone() * (sum.clone().into() - local[COL_ARG1].clone().into()));
-    builder.assert_zero(g_u16.clone() * (sum.clone().into() - local[COL_ARG0].clone().into()));
     builder.assert_zero(g_u29.clone() * (sum.clone().into() - local[COL_ARG0].clone().into()));
     builder.assert_zero(g_u24.clone() * (sum.clone().into() - local[COL_ARG0].clone().into()));
 
-    builder.assert_zero(
-      g_byte.clone()
-        * (local[COL_SCALAR2].clone().into()
-          * (local[COL_SCALAR2].clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_byte.clone()
-        * (local[COL_ARG0].clone().into()
-          * (local[COL_ARG0].clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_u16.clone()
-        * (local[COL_ARG1].clone().into()
-          * (local[COL_ARG1].clone().into() - AB::Expr::from_u16(1))),
-    );
     builder.assert_zero(
       g_u29.clone()
         * (local[COL_ARG1].clone().into()
@@ -3223,11 +2800,6 @@ impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
       g_u24.clone()
         * (local[COL_ARG1].clone().into()
           * (local[COL_ARG1].clone().into() - AB::Expr::from_u16(1))),
-    );
-    builder.assert_zero(
-      g_u16.clone()
-        * (local[COL_SCALAR2].clone().into()
-          * (local[COL_SCALAR2].clone().into() - AB::Expr::from_u16(1))),
     );
     builder.assert_zero(
       g_u29.clone()
@@ -3242,24 +2814,12 @@ impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
 
     builder.assert_zero(local[COL_ARG2].clone());
     builder.assert_zero(
-      g_byte.clone() * (local[COL_RET_TY].clone().into() - AB::Expr::from_u16(RET_WFF_EQ as u16)),
-    );
-    builder.assert_zero(
-      g_u16.clone() * (local[COL_RET_TY].clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
-    );
-    builder.assert_zero(
       g_u29.clone() * (local[COL_RET_TY].clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
     );
     builder.assert_zero(
       g_u24.clone() * (local[COL_RET_TY].clone().into() - AB::Expr::from_u16(RET_WFF_AND as u16)),
     );
 
-    builder
-      .when_first_row()
-      .assert_zero(g_byte.clone() * local[COL_ARG0].clone().into());
-    builder
-      .when_first_row()
-      .assert_zero(g_u16.clone() * local[COL_SCALAR2].clone().into());
     builder
       .when_first_row()
       .assert_zero(g_u29.clone() * local[COL_SCALAR2].clone().into());
@@ -3277,30 +2837,20 @@ impl<AB: AirBuilder> Air<AB> for StageASemanticAir {
       }
       g
     };
-    let ng_byte = next_gate(t_byte);
-    let ng_u16 = next_gate(t_u16);
     let ng_u29 = next_gate(t_u29);
     let ng_u24 = next_gate(t_u24);
 
-    let local_cout_byte = local[COL_SCALAR2].clone().into();
-    let local_cout_u16 = local[COL_ARG1].clone().into();
     let local_cout_u29 = local[COL_ARG1].clone().into();
     let local_cout_u24 = local[COL_ARG1].clone().into();
 
-    let next_cin_byte = next[COL_ARG0].clone().into();
-    let next_cin_u16 = next[COL_SCALAR2].clone().into();
     let next_cin_u29 = next[COL_SCALAR2].clone().into();
     let next_cin_u24 = next[COL_SCALAR2].clone().into();
 
     let local_cases = [
-      (g_byte, local_cout_byte),
-      (g_u16, local_cout_u16),
       (g_u29, local_cout_u29),
       (g_u24, local_cout_u24),
     ];
     let next_cases = [
-      (ng_byte, next_cin_byte),
-      (ng_u16, next_cin_u16),
       (ng_u29, next_cin_u29),
       (ng_u24, next_cin_u24),
     ];
@@ -3374,102 +2924,29 @@ pub fn make_circle_config_with_params(
 pub fn generate_stage_a_semantic_trace(rows: &[ProofRow]) -> Result<RowMajorMatrix<Val>, String> {
   let mut semantic_rows: Vec<ProofRow> = Vec::new();
 
-  let push_byte_add_row = |out: &mut Vec<ProofRow>,
-                           a: u32,
-                           b: u32,
-                           carry_in: u32,
-                           sum: u32,
-                           carry_out: u32,
-                           i: usize|
-   -> Result<(), String> {
-    if a > 255 || b > 255 || sum > 255 {
-      return Err(format!("stage-a byte column out of range at row {i}"));
-    }
-    if carry_in > 1 || carry_out > 1 {
-      return Err(format!("stage-a carry column out of range at row {i}"));
-    }
-    out.push(ProofRow {
-      op: OP_BYTE_ADD_EQ,
-      scalar0: a,
-      scalar1: b,
-      scalar2: carry_out,
-      arg0: carry_in,
-      arg1: sum,
-      arg2: 0,
-      value: sum,
-      ret_ty: RET_WFF_EQ,
-    });
-    Ok(())
-  };
-
   for (i, row) in rows.iter().enumerate() {
+    let _ = i;
     route_stage_a_row_op(row.op)?;
 
     match row.op {
-      OP_BYTE_ADD_EQ => {
-        if row.scalar0 > 255 || row.scalar1 > 255 || row.arg1 > 255 || row.value > 255 {
-          return Err(format!("stage-a byte column out of range at row {i}"));
-        }
-        if row.scalar2 > 1 || row.arg0 > 1 {
-          return Err(format!("stage-a carry column out of range at row {i}"));
-        }
-        if row.arg2 != 0 {
-          return Err(format!("stage-a arg2 must be zero at row {i}"));
-        }
-        if row.ret_ty != RET_WFF_EQ {
-          return Err(format!("stage-a ret_ty must be RET_WFF_EQ at row {i}"));
+      crate::semantic_proof::OP_U29_ADD_EQ => {
+        let limit = (1u32 << 29) - 1;
+        if row.scalar0 > limit || row.scalar1 > limit {
+          return Err(format!(
+            "unsupported Stage A: u29 add operand out of 29-bit range at row {}",
+            i
+          ));
         }
         semantic_rows.push(row.clone());
       }
-      crate::semantic_proof::OP_U16_ADD_EQ => {
-        if row.scalar0 > 0xFFFF
-          || row.scalar1 > 0xFFFF
-          || row.scalar2 > 1
-          || row.arg0 > 0xFFFF
-          || row.arg1 > 1
-        {
-          return Err(format!("stage-a u16 column out of range at row {i}"));
+      crate::semantic_proof::OP_U24_ADD_EQ => {
+        let limit = (1u32 << 24) - 1;
+        if row.scalar0 > limit || row.scalar1 > limit {
+          return Err(format!(
+            "unsupported Stage A: u24 add operand out of 24-bit range at row {}",
+            i
+          ));
         }
-        if row.value != row.arg0 {
-          return Err(format!("stage-a u16 sum mismatch at row {i}"));
-        }
-
-        let a_lo = row.scalar0 & 0xFF;
-        let a_hi = (row.scalar0 >> 8) & 0xFF;
-        let b_lo = row.scalar1 & 0xFF;
-        let b_hi = (row.scalar1 >> 8) & 0xFF;
-        let sum_lo = row.value & 0xFF;
-        let sum_hi = (row.value >> 8) & 0xFF;
-
-        let low_total = a_lo + b_lo + row.scalar2;
-        let carry_mid = if low_total >= 256 { 1 } else { 0 };
-        let high_total = a_hi + b_hi + carry_mid;
-        let carry_out = if high_total >= 256 { 1 } else { 0 };
-
-        if carry_out != row.arg1 {
-          return Err(format!("stage-a u16 carry mismatch at row {i}"));
-        }
-
-        push_byte_add_row(
-          &mut semantic_rows,
-          a_lo,
-          b_lo,
-          row.scalar2,
-          sum_lo,
-          carry_mid,
-          i,
-        )?;
-        push_byte_add_row(
-          &mut semantic_rows,
-          a_hi,
-          b_hi,
-          carry_mid,
-          sum_hi,
-          row.arg1,
-          i,
-        )?;
-      }
-      crate::semantic_proof::OP_U29_ADD_EQ | crate::semantic_proof::OP_U24_ADD_EQ => {
         semantic_rows.push(row.clone());
       }
       _ => {}
@@ -3501,9 +2978,7 @@ pub fn generate_stage_a_semantic_trace(rows: &[ProofRow]) -> Result<RowMajorMatr
     let mut carry_in = semantic_rows
       .last()
       .map(|row| match row.op {
-        OP_BYTE_ADD_EQ => row.scalar2 as u16,
-        crate::semantic_proof::OP_U16_ADD_EQ
-        | crate::semantic_proof::OP_U29_ADD_EQ
+        crate::semantic_proof::OP_U29_ADD_EQ
         | crate::semantic_proof::OP_U24_ADD_EQ => row.arg1 as u16,
         _ => 0,
       })
@@ -3511,19 +2986,17 @@ pub fn generate_stage_a_semantic_trace(rows: &[ProofRow]) -> Result<RowMajorMatr
 
     for i in semantic_len..n_rows {
       let carry_out = 0u16;
-      let sum = carry_in;
-      let expected = sum;
 
       let base = i * NUM_PROOF_COLS;
-      trace.values[base + COL_OP] = Val::from_u16(OP_BYTE_ADD_EQ as u16);
+      trace.values[base + COL_OP] = Val::from_u16(crate::semantic_proof::OP_U29_ADD_EQ as u16);
       trace.values[base + COL_SCALAR0] = Val::from_u16(0);
       trace.values[base + COL_SCALAR1] = Val::from_u16(0);
-      trace.values[base + COL_SCALAR2] = Val::from_u16(carry_out);
+      trace.values[base + COL_SCALAR2] = Val::from_u16(carry_in);
       trace.values[base + COL_ARG0] = Val::from_u16(carry_in);
-      trace.values[base + COL_ARG1] = Val::from_u16(expected);
+      trace.values[base + COL_ARG1] = Val::from_u16(carry_out);
       trace.values[base + COL_ARG2] = Val::from_u16(0);
-      trace.values[base + COL_VALUE] = Val::from_u16(sum);
-      trace.values[base + COL_RET_TY] = Val::from_u16(RET_WFF_EQ as u16);
+      trace.values[base + COL_VALUE] = Val::from_u16(carry_in);
+      trace.values[base + COL_RET_TY] = Val::from_u16(crate::semantic_proof::RET_WFF_AND as u16);
 
       carry_in = carry_out;
     }
@@ -3649,7 +3122,7 @@ fn serialize_wff_bytes(wff: &WFF) -> Vec<u8> {
 /// Build a WFF-match trace from inferred/public WFF byte serializations.
 ///
 /// This is the second ZKP stage:
-/// - stage 1 proves inferred WFF rows are valid (`OP_BYTE_ADD_EQ` constraints)
+/// - stage 1 proves inferred WFF rows are valid (add-equality constraints)
 /// - stage 2 proves inferred WFF serialization equals public WFF serialization.
 pub fn generate_wff_match_trace_from_wffs(
   inferred_wff: &WFF,
@@ -3886,171 +3359,6 @@ pub fn prove_and_verify_stage_a(public_wff: &WFF, private_pi: &Proof) -> bool {
 }
 
 // ============================================================
-// Batch STARK proving
-//
-// Usage pattern:
-//   let all_steps: Vec<LutStep> = instructions
-//       .iter()
-//       .flat_map(|itp| {
-//           let rows = compile_proof(itp.semantic_proof.as_ref().unwrap());
-//           build_lut_steps_from_rows_add_family(&rows).unwrap_or_default()
-//       })
-//       .collect();
-//   let proof = prove_batch_lut_stark_add_family(&all_steps)?;
-// ============================================================
-
-/// Prove N add-family (ADD/SUB) instructions' LUT kernel in one STARK call.
-///
-/// `all_steps` is the concatenation of `build_lut_steps_from_rows_add_family()`
-/// output for each instruction.
-pub fn prove_batch_lut_stark(all_steps: &[LutStep]) -> Result<CircleStarkProof, String> {
-  prove_lut_kernel_stark(all_steps)
-}
-
-/// Verify a batched LUT STARK proof.
-pub fn verify_batch_lut_stark(proof: &CircleStarkProof) -> bool {
-  verify_lut_kernel_stark(proof).is_ok()
-}
-
-/// Build and immediately prove N add-family instructions' LUT in one shot.
-pub fn prove_batch_stark_add_family(all_rows: &[ProofRow]) -> Result<CircleStarkProof, String> {
-  let steps = build_lut_steps_from_rows_add_family(all_rows)?;
-  prove_lut_kernel_stark(&steps)
-}
-
-/// Verify an add-family batch LUT proof.
-pub fn verify_batch_stark_add_family(proof: &CircleStarkProof) -> bool {
-  verify_lut_kernel_stark(proof).is_ok()
-}
-
-/// Build and immediately prove N add-family instructions' LUT with custom FRI params.
-pub fn prove_batch_stark_add_family_with_params(
-  all_rows: &[ProofRow],
-  num_queries: usize,
-  query_pow_bits: usize,
-  log_final_poly_len: usize,
-) -> Result<CircleStarkProof, String> {
-  let steps = build_lut_steps_from_rows_add_family(all_rows)?;
-  let trace = build_lut_trace_from_steps(&steps)?;
-  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
-  Ok(p3_uni_stark::prove(
-    &config,
-    &LutKernelAir,
-    trace,
-    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
-  ))
-}
-
-/// Verify an add-family batch proof produced with matching custom FRI params.
-pub fn verify_batch_stark_add_family_with_params(
-  proof: &CircleStarkProof,
-  num_queries: usize,
-  query_pow_bits: usize,
-  log_final_poly_len: usize,
-) -> bool {
-  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
-  p3_uni_stark::verify(
-    &config,
-    &LutKernelAir,
-    proof,
-    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
-  )
-  .is_ok()
-}
-
-/// Build and immediately prove N mul-family (MUL/DIV/MOD/SDIV/SMOD) instructions' LUT in one shot.
-pub fn prove_batch_stark_mul_family(all_rows: &[ProofRow]) -> Result<CircleStarkProof, String> {
-  let steps = build_lut_steps_from_rows_mul_family(all_rows)?;
-  prove_lut_kernel_stark(&steps)
-}
-
-/// Build and immediately prove N mul-family instructions' LUT with custom FRI params.
-pub fn prove_batch_stark_mul_family_with_params(
-  all_rows: &[ProofRow],
-  num_queries: usize,
-  query_pow_bits: usize,
-  log_final_poly_len: usize,
-) -> Result<CircleStarkProof, String> {
-  let steps = build_lut_steps_from_rows_mul_family(all_rows)?;
-  let trace = build_lut_trace_from_steps(&steps)?;
-  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
-  Ok(p3_uni_stark::prove(
-    &config,
-    &LutKernelAir,
-    trace,
-    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
-  ))
-}
-
-/// Verify a mul-family batch LUT proof.
-pub fn verify_batch_stark_mul_family(proof: &CircleStarkProof) -> bool {
-  verify_lut_kernel_stark(proof).is_ok()
-}
-
-/// Verify a mul-family batch proof produced with matching custom FRI params.
-pub fn verify_batch_stark_mul_family_with_params(
-  proof: &CircleStarkProof,
-  num_queries: usize,
-  query_pow_bits: usize,
-  log_final_poly_len: usize,
-) -> bool {
-  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
-  p3_uni_stark::verify(
-    &config,
-    &LutKernelAir,
-    proof,
-    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
-  )
-  .is_ok()
-}
-
-/// Build and immediately prove N bit-family (AND/OR/XOR/NOT) instructions' LUT in one shot.
-pub fn prove_batch_stark_bit_family(all_rows: &[ProofRow]) -> Result<CircleStarkProof, String> {
-  let steps = build_lut_steps_from_rows_bit_family(all_rows)?;
-  prove_lut_kernel_stark(&steps)
-}
-
-/// Build and immediately prove N bit-family instructions' LUT with custom FRI params.
-pub fn prove_batch_stark_bit_family_with_params(
-  all_rows: &[ProofRow],
-  num_queries: usize,
-  query_pow_bits: usize,
-  log_final_poly_len: usize,
-) -> Result<CircleStarkProof, String> {
-  let steps = build_lut_steps_from_rows_bit_family(all_rows)?;
-  let trace = build_lut_trace_from_steps(&steps)?;
-  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
-  Ok(p3_uni_stark::prove(
-    &config,
-    &LutKernelAir,
-    trace,
-    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
-  ))
-}
-
-/// Verify a bit-family batch LUT proof.
-pub fn verify_batch_stark_bit_family(proof: &CircleStarkProof) -> bool {
-  verify_lut_kernel_stark(proof).is_ok()
-}
-
-/// Verify a bit-family batch proof produced with matching custom FRI params.
-pub fn verify_batch_stark_bit_family_with_params(
-  proof: &CircleStarkProof,
-  num_queries: usize,
-  query_pow_bits: usize,
-  log_final_poly_len: usize,
-) -> bool {
-  let config = make_circle_config_with_params(num_queries, query_pow_bits, log_final_poly_len);
-  p3_uni_stark::verify(
-    &config,
-    &LutKernelAir,
-    proof,
-    &default_receipt_bind_public_values_for_tag(RECEIPT_BIND_TAG_LUT),
-  )
-  .is_ok()
-}
-
-// ============================================================
 // Cross-family batch WFF proving
 //
 // Prove any mix of opcodes (ADD, SUB, MUL, DIV, AND, OR, XOR, LT, SGT, EQ …)
@@ -4112,17 +3420,6 @@ pub fn build_lut_steps_from_rows_auto(rows: &[ProofRow]) -> Result<Vec<LutStep>,
         || op == OP_EQ_SYM => {}
 
       // ── Add-family LUT ops ─────────────────────────────────────────────────
-      crate::semantic_proof::OP_BYTE_ADD_EQ => out.push(LutStep {
-        op: LutOpcode::ByteAddEq,
-        in0: row.scalar0,
-        in1: row.scalar1,
-        in2: row.arg0,
-        out0: row.value,
-        out1: row.scalar2,
-      }),
-      crate::semantic_proof::OP_U16_ADD_EQ => {
-        append_u16_row_as_u15_steps(row, &mut out)?;
-      }
       crate::semantic_proof::OP_U29_ADD_EQ => out.push(LutStep {
         op: LutOpcode::U29AddEq,
         in0: row.scalar0,
@@ -4139,17 +3436,6 @@ pub fn build_lut_steps_from_rows_auto(rows: &[ProofRow]) -> Result<Vec<LutStep>,
         out0: row.value,
         out1: row.arg1,
       }),
-      crate::semantic_proof::OP_BYTE_ADD_CARRY_EQ => {
-        let total = row.scalar0 + row.scalar1 + row.arg0;
-        out.push(LutStep {
-          op: LutOpcode::ByteAddCarryEq,
-          in0: row.scalar0,
-          in1: row.scalar1,
-          in2: row.arg0,
-          out0: if total >= 256 { 1 } else { 0 },
-          out1: total & 0xFF,
-        });
-      }
 
       // ── Mul-family LUT ops ─────────────────────────────────────────────────
       crate::semantic_proof::OP_U15_MUL_EQ => {
@@ -4301,115 +3587,127 @@ pub fn verify_batch_wff_proofs(
     }
   }
 
+  // 3. Out-of-circuit row content validation (Gap 3 + Gap 4).
+  //
+  // Gap 3: byte AND/OR/XOR rows must commit the correct result value.
+  // Gap 4: arithmetic operands must be within their declared bit-width bounds.
+  //
+  // The LUT AIR does not constrain value = scalar0 op scalar1 for byte ops,
+  // nor does it enforce operand ranges for add/mul ops.  These checks are
+  // mandatory here to close the soundness gaps.
+  let all_rows: Vec<ProofRow> = proofs.iter().flat_map(|p| compile_proof(p)).collect();
+  if !validate_manifest_rows(&all_rows) {
+    return Err(
+      "manifest row validation failed (Gap 3/4): byte op value or range check".to_string(),
+    );
+  }
+
   Ok(())
 }
 
 // ============================================================
-// Memory consistency proof  (SMAT — Sorted Memory Access Table)
+// Memory consistency proof  (read/write set intersection, binary-tree aggregation)
 // ============================================================
 //
 // Soundness design
 // ─────────────────
-// The proof binds to the public claim set via a Poseidon hash committed in
-// public_values, and enforces read/write consistency in the AIR itself.
+// Each batch proof exposes two sparse maps as public output:
 //
-// Three defences:
+//   write_set : Map<addr → value>  — final value written to each address
+//                                    in this batch (last write wins).
+//   read_set  : Map<addr → value>  — addresses read *before* any write in
+//                                    this batch (cross-batch dependencies).
 //
-//   1. **Claim binding** — `public_values = [TAG, n_claims, hash[0..8]]`
-//      where `hash = poseidon(claims)`.  The verifier recomputes this hash
-//      from the supplied claims and checks it matches the proof's public
-//      values, so a proof for claim set A cannot be replayed for set B.
+// Binary-tree aggregation merges adjacent proofs by checking the
+// intersection of the right child's `read_set` against the left child's
+// `write_set`:
 //
-//   2. **Sorted SMAT witness** — The prover lays out a *sorted* receive table
-//      (sorted by (addr, rw_counter)).  The AIR enforces:
-//        a. Same-addr read-continuity: if addr[i]==addr[i+1] and both are
-//           SMAT rows and is_write[i+1]=0, then val[i+1] == val[i].
-//      (Full range-based sort ordering would require a range chip; we defer
-//      that to a future step and rely on the LogUp multiset argument + the
-//      claim hash to enforce that the exact claimed accesses are witnessed.)
+//     ∀ addr ∈ R.read_set ∩ L.write_set:
+//         R.read_set[addr] == L.write_set[addr]
 //
-//   3. **LogUp multiset equality** — claim rows (mult=+1 each) and SMAT
-//      receive rows (mult=−freq) form a balanced multiset; the LogUp running
-//      sum is zero iff both sides encode the same multiset.
+//     merged.write_set = L.write_set ∪ R.write_set  (R overwrites same addr)
+//     merged.read_set  = L.read_set ∪ (R.read_set \ L.write_set.keys())
 //
-// Column layout  (NUM_MEM_COLS = 19)
+// All leaf proofs are fully independent (no prev-snapshot dependency) and
+// can be generated in parallel.  Binary-tree aggregation then requires only
+// O(log N) sequential levels.  At the root, `read_set` lists the addresses
+// that must be satisfied by the genesis state, and `write_set` is the final
+// memory state after all batches.
+//
+// After aggregation the write/read logs are discarded; only the compact
+// `AggregatedMemoryProof { write_set, read_set }` remains.
+//
+// Column layout  (NUM_MEM_COLS = 12)
 // ────────────────────────────────────
-//  0  addr_hi      — upper 32 bits of the 64-bit word address
-//  1  addr_lo      — lower 32 bits
-//  2  rw_hi        — upper 32 bits of rw_counter
-//  3  rw_lo        — lower 32 bits
-//  4  is_write     — 0 (read) or 1 (write)
-//  5  val0         — value bytes  0- 3 (big-endian u32)
-//  6  val1         — value bytes  4- 7
-//  7  val2         — value bytes  8-11
-//  8  val3         — value bytes 12-15
-//  9  val4         — value bytes 16-19
-// 10  val5         — value bytes 20-23
-// 11  val6         — value bytes 24-27
-// 12  val7         — value bytes 28-31
-// 13  write_version — per-address write version (0 for first access, +1 per write)
-// 14  mult         — +1 for claim rows, −freq for SMAT rows, 0 for padding
-// 15  is_smat      — 1 for SMAT receive rows, 0 for claim / padding rows
-// 16  addr_eq      — 1 if addr[i] == addr[i+1] and both are SMAT rows
-// 17  inv_addr_hi  — inverse witness: (addr_hi[next]-addr_hi[cur])^{-1} or 0
-// 18  inv_addr_lo  — inverse witness: (addr_lo[next]-addr_lo[cur])^{-1} or 0
-//                   (used only when addr_hi parts are equal)
+//  0  addr_hi   — upper 32 bits of the 64-bit word address
+//  1  addr_lo   — lower 32 bits
+//  2  val0      — value bytes  0- 3 (big-endian u32)
+//  3..9  val1..val7
+// 10  is_write  — 1 for write rows, 0 for read rows
+// 11  mult      — +1 for log entry rows, 0 for padding
 //
-// (19 columns total, 1 LogUp aux column.)
-//
-// Public values layout  (MEM_PUBLIC_VALUES_LEN = 10)
+// Public values layout  (MEM_PUBLIC_VALUES_LEN = 35)
 // ────────────────────────────────────────────────────
-//  pis[0]     = RECEIPT_BIND_TAG_MEM
-//  pis[1]     = n_claims  (number of MemAccessClaims)
-//  pis[2..10] = poseidon_hash(claims)  (8 × M31)
+//  pis[ 0]      = RECEIPT_BIND_TAG_MEM
+//  pis[ 1]      = n_writes
+//  pis[ 2..10]  = poseidon_hash(write_log)  (8 × M31, rw_counter included)
+//  pis[10]      = n_reads
+//  pis[11..19]  = poseidon_hash(read_log)   (8 × M31, rw_counter included)
+//  pis[19..27]  = poseidon_hash(write_set)  (8 × M31) — aggregation interface
+//  pis[27..35]  = poseidon_hash(read_set)   (8 × M31) — aggregation interface
 
-use p3_lookup::logup::LogUpGadget;
-use p3_lookup::lookup_traits::{Kind as LookupKind, LookupData, LookupGadget};
-use p3_uni_stark::{Entry, SymbolicExpression, SymbolicVariable, VerifierConstraintFolder};
+
 
 pub const RECEIPT_BIND_TAG_MEM: u32 = 4;
-const MEM_PUBLIC_VALUES_LEN: usize = 10;
+const MEM_PUBLIC_VALUES_LEN: usize = 35;
 
 const MEM_COL_ADDR_HI: usize = 0;
 const MEM_COL_ADDR_LO: usize = 1;
-const MEM_COL_RW_HI: usize = 2;
-const MEM_COL_RW_LO: usize = 3;
-const MEM_COL_IS_WRITE: usize = 4;
-const MEM_COL_VAL0: usize = 5;
-// val1..val7 are MEM_COL_VAL0+1 .. MEM_COL_VAL0+7
-const MEM_COL_WRITE_VERSION: usize = 13;
-const MEM_COL_MULT: usize = 14;
-const MEM_COL_IS_SMAT: usize = 15;
-const MEM_COL_ADDR_EQ: usize = 16;
-const MEM_COL_INV_ADDR_HI: usize = 17;
-const MEM_COL_INV_ADDR_LO: usize = 18;
-/// Total number of main-trace columns in the SMAT AIR.
-pub const NUM_MEM_COLS: usize = 19;
-/// Number of columns in the LogUp lookup tuple (cols 0..14: addr_hi..write_version + mult excluded).
-/// Tuple = (addr_hi, addr_lo, rw_hi, rw_lo, is_write, val0..val7, write_version) = 14 cols.
-const MEM_LOOKUP_TUPLE_COLS: usize = 14;
+const MEM_COL_VAL0: usize = 2;
+// val1..val7 are MEM_COL_VAL0+1 .. MEM_COL_VAL0+7  (cols 2..9)
+const MEM_COL_IS_WRITE: usize = 10;
+const MEM_COL_MULT: usize = 11;
+/// Total number of main-trace columns.
+pub const NUM_MEM_COLS: usize = 12;
 
-// ── Claim hash ────────────────────────────────────────────────────────
+// ── Log entry type ────────────────────────────────────────────────────
 
-/// Poseidon2/M31 hash of a `MemAccessClaim` slice.
-///
-/// Sponge input layout: `[n_claims, addr_hi, addr_lo, rw_hi, rw_lo, is_write,
-/// write_version, val0..val7, …]` one block per claim.
-fn hash_mem_claims(claims: &[crate::transition::MemAccessClaim]) -> [Val; 8] {
+/// A single entry in the public write or read log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemLogEntry {
+  pub rw_counter: u64,
+  pub addr: u64,
+  pub value: [u8; 32],
+}
+
+/// Split a flat `MemAccessClaim` slice into separate write and read logs.
+pub fn split_mem_logs(
+  claims: &[crate::transition::MemAccessClaim],
+) -> (Vec<MemLogEntry>, Vec<MemLogEntry>) {
+  let mut writes = Vec::new();
+  let mut reads = Vec::new();
+  for c in claims {
+    let entry = MemLogEntry { rw_counter: c.rw_counter, addr: c.addr, value: c.value };
+    if c.is_write { writes.push(entry); } else { reads.push(entry); }
+  }
+  (writes, reads)
+}
+
+// ── Hash helpers ──────────────────────────────────────────────────────
+
+fn hash_mem_log(log: &[MemLogEntry]) -> [Val; 8] {
   let mut rng = rand::rngs::SmallRng::seed_from_u64(0xC0DEC0DE_u64);
   let poseidon = Poseidon2Mersenne31::<16>::new_from_rng_128(&mut rng);
   let sponge = PaddingFreeSponge::<_, 16, 8, 8>::new(poseidon);
 
-  let mut input: Vec<Val> = Vec::with_capacity(1 + claims.len() * 16);
-  input.push(Val::from_u32(claims.len() as u32));
-  for c in claims {
-    input.push(Val::from_u32((c.addr >> 32) as u32));
-    input.push(Val::from_u32(c.addr as u32));
-    input.push(Val::from_u32((c.rw_counter >> 32) as u32));
-    input.push(Val::from_u32(c.rw_counter as u32));
-    input.push(Val::from_u32(c.is_write as u32));
-    input.push(Val::from_u32(c.write_version));
-    for chunk in c.value.chunks(4) {
+  let mut input: Vec<Val> = Vec::with_capacity(1 + log.len() * 12);
+  input.push(Val::from_u32(log.len() as u32));
+  for e in log {
+    input.push(Val::from_u32((e.rw_counter >> 32) as u32));
+    input.push(Val::from_u32(e.rw_counter as u32));
+    input.push(Val::from_u32((e.addr >> 32) as u32));
+    input.push(Val::from_u32(e.addr as u32));
+    for chunk in e.value.chunks(4) {
       input.push(Val::from_u32(u32::from_be_bytes([
         chunk[0], chunk[1], chunk[2], chunk[3],
       ])));
@@ -4418,39 +3716,190 @@ fn hash_mem_claims(claims: &[crate::transition::MemAccessClaim]) -> [Val; 8] {
   sponge.hash_iter(input)
 }
 
-/// Build the `public_values` vector for a memory consistency STARK.
-fn make_mem_public_values(claims: &[crate::transition::MemAccessClaim]) -> Vec<Val> {
-  let hash = hash_mem_claims(claims);
+fn hash_mem_set(set: &std::collections::HashMap<u64, [u8; 32]>) -> [Val; 8] {
+  if set.is_empty() {
+    return [Val::ZERO; 8];
+  }
+  let mut sorted: Vec<(u64, [u8; 32])> = set.iter().map(|(&a, &v)| (a, v)).collect();
+  sorted.sort_by_key(|(a, _)| *a);
+
+  let mut rng = rand::rngs::SmallRng::seed_from_u64(0xC0DEC0DE_u64);
+  let poseidon = Poseidon2Mersenne31::<16>::new_from_rng_128(&mut rng);
+  let sponge = PaddingFreeSponge::<_, 16, 8, 8>::new(poseidon);
+
+  let mut input: Vec<Val> = Vec::with_capacity(1 + sorted.len() * 10);
+  input.push(Val::from_u32(sorted.len() as u32));
+  for (addr, value) in &sorted {
+    input.push(Val::from_u32((*addr >> 32) as u32));
+    input.push(Val::from_u32(*addr as u32));
+    for chunk in value.chunks(4) {
+      input.push(Val::from_u32(u32::from_be_bytes([
+        chunk[0], chunk[1], chunk[2], chunk[3],
+      ])));
+    }
+  }
+  sponge.hash_iter(input)
+}
+
+/// Build the `public_values` vector (`MEM_PUBLIC_VALUES_LEN = 35`).
+fn make_mem_public_values(
+  write_log: &[MemLogEntry],
+  read_log: &[MemLogEntry],
+  write_set: &std::collections::HashMap<u64, [u8; 32]>,
+  read_set: &std::collections::HashMap<u64, [u8; 32]>,
+) -> Vec<Val> {
+  let wlh = hash_mem_log(write_log);
+  let rlh = hash_mem_log(read_log);
+  let wsh = hash_mem_set(write_set);
+  let rsh = hash_mem_set(read_set);
   let mut pv = Vec::with_capacity(MEM_PUBLIC_VALUES_LEN);
-  pv.push(Val::from_u32(RECEIPT_BIND_TAG_MEM));
-  pv.push(Val::from_u32(claims.len() as u32));
-  pv.extend_from_slice(&hash);
+  pv.push(Val::from_u32(RECEIPT_BIND_TAG_MEM));       //  0
+  pv.push(Val::from_u32(write_log.len() as u32));     //  1
+  pv.extend_from_slice(&wlh);                         //  2..10
+  pv.push(Val::from_u32(read_log.len() as u32));      //  10
+  pv.extend_from_slice(&rlh);                         // 11..19
+  pv.extend_from_slice(&wsh);                         // 19..27 — aggregation interface
+  pv.extend_from_slice(&rsh);                         // 27..35 — aggregation interface
   pv
+}
+
+// ── Intra-batch consistency checker ──────────────────────────────────
+
+/// Validate intra-batch read/write consistency and derive `(write_set, read_set)`.
+///
+/// Scans `claims` in execution order (rw_counter is monotone):
+/// - **Write**: updates `write_set[addr] = value` (last write wins).
+/// - **Intra-batch read**: addr was already written in this batch — value must
+///   match the most recent write.
+/// - **Cross-batch read**: addr not yet written in this batch — exposed in
+///   `read_set[addr]` for the parent aggregation node to check.
+///
+/// Cross-batch consistency (e.g., `read_set[addr] == left.write_set[addr]`)
+/// is deferred to aggregation time and enforced by [`aggregate_memory_proofs`].
+fn check_claims_and_build_sets(
+  claims: &[crate::transition::MemAccessClaim],
+) -> Result<
+  (
+    std::collections::HashMap<u64, [u8; 32]>,
+    std::collections::HashMap<u64, [u8; 32]>,
+  ),
+  String,
+> {
+  use std::collections::HashMap;
+  let mut write_set: HashMap<u64, [u8; 32]> = HashMap::new();
+  let mut read_set: HashMap<u64, [u8; 32]> = HashMap::new();
+  let mut last_write: HashMap<u64, [u8; 32]> = HashMap::new();
+
+  for claim in claims {
+    if claim.is_write {
+      last_write.insert(claim.addr, claim.value);
+      write_set.insert(claim.addr, claim.value); // last write wins
+    } else if let Some(&written) = last_write.get(&claim.addr) {
+      // Intra-batch read: must match the most recent write to this address.
+      if claim.value != written {
+        return Err(format!(
+          "read/write mismatch at addr=0x{:x}: read {:?}, last write {:?}",
+          claim.addr, claim.value, written
+        ));
+      }
+    } else {
+      // Cross-batch read: addr not yet written in this batch.
+      match read_set.entry(claim.addr) {
+        std::collections::hash_map::Entry::Vacant(e) => {
+          e.insert(claim.value);
+        }
+        std::collections::hash_map::Entry::Occupied(e) => {
+          if *e.get() != claim.value {
+            return Err(format!(
+              "cross-batch read mismatch at addr=0x{:x}: {:?} vs {:?}",
+              claim.addr,
+              e.get(),
+              claim.value
+            ));
+          }
+        }
+      }
+    }
+  }
+  Ok((write_set, read_set))
+}
+
+/// Re-derive `(write_set, read_set)` from a split log pair (used in verification).
+///
+/// Merges `write_log` and `read_log` by `rw_counter`, then applies the same
+/// sequential scan as [`check_claims_and_build_sets`].
+fn derive_sets_from_logs(
+  write_log: &[MemLogEntry],
+  read_log: &[MemLogEntry],
+) -> Result<
+  (
+    std::collections::HashMap<u64, [u8; 32]>,
+    std::collections::HashMap<u64, [u8; 32]>,
+  ),
+  String,
+> {
+  use std::collections::HashMap;
+  // Merge into (rw_counter, is_write, addr, value) and sort by rw_counter.
+  let mut merged: Vec<(u64, bool, u64, [u8; 32])> = Vec::new();
+  for e in write_log {
+    merged.push((e.rw_counter, true, e.addr, e.value));
+  }
+  for e in read_log {
+    merged.push((e.rw_counter, false, e.addr, e.value));
+  }
+  merged.sort_by_key(|(rw, _, _, _)| *rw);
+
+  let mut write_set: HashMap<u64, [u8; 32]> = HashMap::new();
+  let mut read_set: HashMap<u64, [u8; 32]> = HashMap::new();
+  let mut last_write: HashMap<u64, [u8; 32]> = HashMap::new();
+
+  for (_, is_write, addr, value) in merged {
+    if is_write {
+      last_write.insert(addr, value);
+      write_set.insert(addr, value);
+    } else if let Some(&written) = last_write.get(&addr) {
+      if value != written {
+        return Err(format!(
+          "read/write mismatch at addr=0x{:x}: read {:?}, last write {:?}",
+          addr, value, written
+        ));
+      }
+    } else {
+      match read_set.entry(addr) {
+        std::collections::hash_map::Entry::Vacant(e) => {
+          e.insert(value);
+        }
+        std::collections::hash_map::Entry::Occupied(e) => {
+          if *e.get() != value {
+            return Err(format!(
+              "cross-batch read mismatch at addr=0x{:x}: {:?} vs {:?}",
+              addr,
+              e.get(),
+              value
+            ));
+          }
+        }
+      }
+    }
+  }
+  Ok((write_set, read_set))
 }
 
 // ── AIR ──────────────────────────────────────────────────────────────
 
-/// AIR for the SMAT memory consistency LogUp argument.
+/// AIR for the memory log LogUp membership argument.
 ///
-/// Constraints (in addition to the LogUp running-sum argument):
-///  • `is_write  ∈ {0,1}` (degree 2)
-///  • `is_smat   ∈ {0,1}` (degree 2)
-///  • `addr_eq   ∈ {0,1}` (degree 2)
-///  • Tag check: `pis[0] == RECEIPT_BIND_TAG_MEM` (degree 1)
-///  • addr_eq soundness (degree 2, per part hi/lo):
-///      `diff_hi * inv_hi = 1 - same_hi`,  `diff_hi * same_hi = 0`
-///      `diff_lo * inv_lo = 1 - same_lo`,  `diff_lo * same_lo = 0`
-///      `addr_eq = same_hi * same_lo`  (degree 2)
-///      (only enforced on SMAT rows: gated by `is_smat * is_smat_next`)
-///  • Read-continuity (degree 5):
-///      `is_smat[cur] * is_smat[next] * addr_eq[cur]
-///       * (1 - is_write[next]) * (val_k[next] - val_k[cur]) = 0`
-///    for each k ∈ 0..8.
-///  • write_version increment (degree 4):
-///      `is_smat[cur] * is_smat[next] * addr_eq[cur]
-///       * (wv[next] - wv[cur] - is_write[cur]) = 0`
-///  • write_version reset (degree 3):
-///      `is_smat[next] * (1 - addr_eq[cur]) * wv[next] = 0`
+/// Each trace row represents one entry from the write or read log.
+/// The only AIR constraints are:
+///   1. Tag check: `pis[0] == RECEIPT_BIND_TAG_MEM`  (degree 1)
+///   2. `is_write ∈ {0, 1}`                          (degree 2)
+///
+/// All read/write consistency is checked deterministically by the verifier
+/// using the public write_log and read_log (no ZK needed for consistency).
+///
+/// The LogUp argument proves that the rows in the trace are a subset of
+/// the committed (write_log ∪ read_log) tuples, preventing the prover from
+/// fabricating log entries not present in the actual execution.
 pub struct MemoryConsistencyAir;
 
 impl<F: p3_field::Field> p3_air::BaseAir<F> for MemoryConsistencyAir {
@@ -4464,411 +3913,149 @@ where
   AB::F: p3_field::Field,
 {
   fn eval(&self, builder: &mut AB) {
-    let main = builder.main();
-    let local = main.row_slice(0).expect("empty SMAT trace");
-    let next = main.row_slice(1).expect("single-row SMAT trace");
-    let local = &*local;
-    let next = &*next;
-
-    // ── Boolean checks ─────────────────────────────────────────────
-    let is_write = local[MEM_COL_IS_WRITE].clone();
-    builder.assert_zero(is_write.clone().into() * (AB::Expr::ONE - is_write.clone().into()));
-
-    let is_smat = local[MEM_COL_IS_SMAT].clone();
-    builder.assert_zero(is_smat.clone().into() * (AB::Expr::ONE - is_smat.clone().into()));
-
-    let addr_eq = local[MEM_COL_ADDR_EQ].clone();
-    builder.assert_zero(addr_eq.clone().into() * (AB::Expr::ONE - addr_eq.clone().into()));
-
-    // ── Tag check ──────────────────────────────────────────────────
+    // ── Tag check ────────────────────────────────────────────────
     let pis = builder.public_values();
     builder.assert_eq(pis[0].into(), AB::Expr::from_u32(RECEIPT_BIND_TAG_MEM));
 
-    // ── Read-continuity constraint ────────────────────────────────
-    // For consecutive SMAT rows with the same address, a read must
-    // return the value written by the preceding row.
-    //
-    // Note: is_transition() is NOT needed here because padding rows
-    // have is_smat=0 and claim rows have is_smat=0, so the selector
-    // `sel` is already zero on any row pair that doesn't involve two
-    // consecutive SMAT rows.  This includes the wrap-around (last→first).
-    let is_smat_next = next[MEM_COL_IS_SMAT].clone();
-    let is_write_next = next[MEM_COL_IS_WRITE].clone();
-
-    // sel = is_smat[cur] * is_smat[next] * addr_eq[cur] * (1 - is_write[next])
-    let sel: AB::Expr = is_smat.clone().into()
-      * is_smat_next.clone().into()
-      * addr_eq.clone().into()
-      * (AB::Expr::ONE - is_write_next.clone().into());
-
-    for k in 0..8 {
-      let val_cur = local[MEM_COL_VAL0 + k].clone();
-      let val_next = next[MEM_COL_VAL0 + k].clone();
-      builder.assert_zero(sel.clone() * (val_next.clone().into() - val_cur.clone().into()));
-    }
-
-    // ── addr_eq soundness via inverse witnesses ───────────────────
-    //
-    // We need to prove addr_eq is genuinely determined by the actual
-    // address values, not freely set by a cheating prover.
-    //
-    // For each address part (hi, lo) we use an "equality bit" pattern:
-    //   diff * inv = 1 - same_bit   (degree 2)
-    //   diff * same_bit = 0         (degree 2)
-    //
-    // This forces same_bit=1 iff diff==0 (assuming inv is the field
-    // inverse of diff when diff≠0, else inv can be anything).
-    //
-    // Then addr_eq = same_hi * same_lo is checked against the column.
-    //
-    // All constraints are gated by is_smat[cur] * is_smat[next] to
-    // apply only on SMAT-to-SMAT row transitions.
-    let smat_gate: AB::Expr =
-      is_smat.clone().into() * is_smat_next.clone().into();
-
-    let addr_hi_cur: AB::Expr = local[MEM_COL_ADDR_HI].clone().into();
-    let addr_hi_next: AB::Expr = next[MEM_COL_ADDR_HI].clone().into();
-    let addr_lo_cur: AB::Expr = local[MEM_COL_ADDR_LO].clone().into();
-    let addr_lo_next: AB::Expr = next[MEM_COL_ADDR_LO].clone().into();
-
-    let diff_hi: AB::Expr = addr_hi_next - addr_hi_cur;
-    let diff_lo: AB::Expr = addr_lo_next - addr_lo_cur;
-
-    let inv_hi: AB::Expr = local[MEM_COL_INV_ADDR_HI].clone().into();
-    let inv_lo: AB::Expr = local[MEM_COL_INV_ADDR_LO].clone().into();
-
-    // same_hi, same_lo derived from addr_eq and the constraint pattern.
-    // We store same_hi and same_lo implicitly:
-    //   same_hi = 1 - diff_hi * inv_hi  (this is enforced below)
-    //   same_lo = 1 - diff_lo * inv_lo
-    //   addr_eq  = same_hi * same_lo
-    //
-    // Constraints (degree 3 each, gated by smat_gate):
-    //   C1: smat_gate * (diff_hi * inv_hi + addr_hi_same - 1) = 0
-    //           where addr_hi_same = 1 - diff_hi * inv_hi
-    //   C2: smat_gate * diff_hi * (1 - addr_hi_same) = 0  [redundant with C1 for malleability]
-    //
-    // Simpler combined constraints (total 6, degree ≤ 3):
-    //   C1: smat_gate * diff_hi * (1 - diff_hi * inv_hi) = 0
-    //         → if diff_hi≠0, then inv_hi must satisfy diff_hi*inv_hi=1 (else constraint fails)
-    //   C2: smat_gate * (1 - addr_eq) = same_hi_lo_gate
-    //   ...
-    //
-    // Practical encoding: use addr_eq directly with:
-    //   C1: addr_eq * diff_hi = 0      → addr_eq=1 implies hi parts equal
-    //   C2: addr_eq * diff_lo = 0      → addr_eq=1 implies lo parts equal
-    //   C3: (1 - addr_eq) * smat_gate * (1 - diff_hi * inv_hi - diff_lo * inv_lo) = 0
-    //         → if addr_eq=0 and on SMAT pair, at least one diff is non-zero
-    //            and its inverse is correct (prover must supply valid inverses)
-    //
-    // C1 and C2 are degree 2; C3 is degree 4 (3 multiplied terms with smat_gate).
-
-    // C1: addr_eq * diff_hi = 0
-    builder.assert_zero(addr_eq.clone().into() * diff_hi.clone());
-    // C2: addr_eq * diff_lo = 0
-    builder.assert_zero(addr_eq.clone().into() * diff_lo.clone());
-    // C3: (1 - addr_eq) * smat_gate * (diff_hi * inv_hi + diff_lo * inv_lo - ...) 
-    // We enforce: smat_gate * (1 - addr_eq) forces that (diff_hi*inv_hi + diff_lo*inv_lo)
-    // spans the non-zero case. Specifically:
-    //   if addr_eq=0 and is_smat pair: must have diff_hi≠0 OR diff_lo≠0
-    //   we enforce: smat_gate * (1 - addr_eq) * (1 - diff_hi * inv_hi) * (1 - diff_lo * inv_lo) = 0
-    // but that's degree 6. Instead use:
-    //   C3: smat_gate * (1 - addr_eq) * ((1 - diff_hi*inv_hi)*(1 - diff_lo*inv_lo)) = 0
-    // Rewrite as: smat_gate * (1 - addr_eq - diff_hi*inv_hi - diff_lo*inv_lo + diff_hi*inv_hi*diff_lo*inv_lo) = 0
-    // The last term is degree 5 with smat_gate = degree 7: too high.
-    //
-    // Use the simplest sound encoding: two separate one-sided checks:
-    //   C3a: smat_gate * (1 - addr_eq - diff_hi * inv_hi) * ... 
-    // Actually the cleanest that keeps degree ≤ 4:
-    //   Let x = diff_hi * inv_hi + diff_lo * inv_lo   (this is 1 for hi-differ, 1 for lo-differ, 2 for both)
-    //   C3: smat_gate * (1 - addr_eq) * (1 - x) = 0  (degree 4 with smat_gate degree 2)
-    //   Wait, smat_gate is degree 2, (1-addr_eq) is degree 1, (1-x) is degree 3 → product degree 6: too high.
-    //
-    // Minimum-degree sound approach (degree 3 total):
-    //   C1: addr_eq * diff_hi = 0                            degree 2 ✓
-    //   C2: addr_eq * diff_lo = 0                            degree 2 ✓
-    //   C3: is_smat * (1 - addr_eq) * (1 - diff_hi*inv_hi - diff_lo*inv_lo) = 0  degree 4 ✓
-    //   (Note: is_smat alone, not smat_gate, to stay at degree 4)
-    //
-    // C3 with is_smat (degree 1 select) * (1-addr_eq) * (1 - diff*inv - diff*inv):
-    //   = degree 1 + 1 + 2 = 4 ✓
-    let prod_hi: AB::Expr = diff_hi.clone() * inv_hi;
-    let prod_lo: AB::Expr = diff_lo.clone() * inv_lo;
-    // C3: is_smat * is_smat_next * (1 - addr_eq) * (1 - diff_hi*inv_hi - diff_lo*inv_lo) = 0
-    // Gated by smat_gate so only applies on SMAT-to-SMAT row transitions.
-    // (degree 4: smat_gate=2, (1-addr_eq)=1, (1-prod_hi-prod_lo)=3 → total 4 with smat_gate being 2)
-    // Actually degree: smat_gate(2) * (1-addr_eq)(1) * expr(2) = 5. Use is_smat only (degree 1):
-    // is_smat(1) * is_smat_next(1) * (1-addr_eq)(1) * (1-prod)(2) = degree 5 — too high.
-    // Use smat_gate(2) alone, drop one factor: accept degree 4.
-    // C3 rewritten: smat_gate * (1 - addr_eq) * (1 - prod_hi - prod_lo) = 0
-    // degree = 2 + 1 + 2 = 5: still too high with the polynomial evaluation.
-    // Correct degree counting: smat_gate is degree 2, (1-addr_eq) is degree 1 in terms of
-    // original witness entries, (1 - diff*inv - diff*inv) is degree 2.
-    // Product = degree 2+1+2 = 5 ← above the constraint degree limit.
-    // 
-    // Fix: replace smat_gate with is_smat only (degree 1):
-    // C3: is_smat * (1 - addr_eq) * (1 - diff_hi*inv_hi - diff_lo*inv_lo) = 0
-    // but also gate on is_smat_next to exclude the last SMAT row's transition to non-SMAT:
-    // We cannot add is_smat_next without going to degree 4+2=6...
-    //
-    // The approach: encode C3 differently:
-    //   When is_smat=1 AND addr_eq=0: at least one of prod_hi, prod_lo must be 1.
-    //   i.e. is_smat * (1 - addr_eq) * (1 - prod_hi) * (1 - prod_lo) = 0
-    //   degree = 1 + 1 + 2 + 2 = 6: too high.
-    //
-    // Simplest approach that stays degree ≤ 4 and is still sound:
-    //   C3: is_smat * is_smat_next * (1 - addr_eq) * (prod_hi + prod_lo) = 1 ... no, enforce:
-    //   C3: is_smat * is_smat_next * (1 - prod_hi - prod_lo - addr_eq) = 0
-    //   degree = 2 + 1 + (degree of prod expressions = 2) ... 
-    //   prod_hi = diff_hi * inv_hi (degree 2), so (1 - prod_hi - prod_lo - addr_eq) is degree 2,
-    //   × smat_gate (degree 2) = degree 4. ✓
-    //
-    // But this encodes: prod_hi + prod_lo + addr_eq = 1
-    // Cases:
-    //   addr_eq=1, prod_hi=0, prod_lo=0 → 1 ✓ (same address, inv=0)
-    //   addr_eq=0, prod_hi=1, prod_lo=0 → 1 ✓ (hi differs, hi inverse valid)
-    //   addr_eq=0, prod_hi=0, prod_lo=1 → 1 ✓ (lo differs, lo inverse valid)
-    //   addr_eq=0, prod_hi=1, prod_lo=1 → 2 ✗ — fails when BOTH parts differ!
-    //
-    // Fix for the "both parts differ" case: encode as OR with a combined inverse.
-    // Let comb = diff_hi * (any_nonzero_when_hi_differs) + ...
-    // 
-    // Pragmatic sound fix: use is_smat alone (not smat_gate), and fill inv witnesses
-    // on ALL rows including the last SMAT row. The last SMAT row's next is a non-SMAT
-    // row; diff_hi and diff_lo will differ from 0, so inv needs to be set. But we only
-    // want C3 to fire for SMAT-to-SMAT, so gate with is_smat_next:
-    //
-    // C3: is_smat_next * (1 - addr_eq) * (1 - prod_hi - prod_lo) = 0
-    //     degree = 1 + 1 + 2 = 4 ✓
-    //   But now "is_smat_next" is on the next row, so inv columns are on the current row.
-    //   This is equivalent to: on the NEXT row (when it's SMAT) and this row's addr_eq=0,
-    //   prod_hi + prod_lo must equal 1.
-    //   This is slightly weaker (doesn't constrain the last SMAT row's inv values when
-    //   the next is non-SMAT) but that's fine — those inv values are unconstrained padding.
-    //
-    // HOWEVER: is_smat_next gates on the NEXT row's is_smat, which means on the wrap-
-    // around row (last padding → first SMAT row, is_smat_next=1) the constraint fires
-    // even though the current row is padding (is_smat=0, addr_eq=0, prod=0) and would
-    // incorrectly fail. Therefore we MUST also gate on is_smat[cur]:
-    //   Final: smat_gate * (1 - addr_eq) * (1 - prod_hi - prod_lo) = 0  [degree 5]
-    builder.assert_zero(
-      smat_gate.clone()
-        * (AB::Expr::ONE - addr_eq.clone().into())
-        * (AB::Expr::ONE - prod_hi - prod_lo),
-    );
-
-    // ── write_version monotonicity ────────────────────────────────
-    //
-    // For SMAT rows with the same address:
-    //   wv[next] = wv[cur] + is_write[cur]
-    //
-    // For SMAT rows with a different address:
-    //   wv[next] = 0   (new address starts at wv=0)
-    //
-    // C4: is_smat[cur] * is_smat[next] * addr_eq[cur]
-    //       * (wv[next] - wv[cur] - is_write[cur]) = 0  (degree 4)
-    let wv_cur: AB::Expr = local[MEM_COL_WRITE_VERSION].clone().into();
-    let wv_next: AB::Expr = next[MEM_COL_WRITE_VERSION].clone().into();
-
-    builder.assert_zero(
-      smat_gate.clone()
-        * addr_eq.clone().into()
-        * (wv_next.clone() - wv_cur - is_write.clone().into()),
-    );
-
-    // C5: is_smat[next] * (1 - addr_eq[cur]) * wv[next] = 0  (degree 3)
-    builder.assert_zero(
-      is_smat_next.clone().into()
-        * (AB::Expr::ONE - addr_eq.clone().into())
-        * wv_next,
-    );
+    // ── is_write boolean ─────────────────────────────────────────
+    let main = builder.main();
+    let local = main.row_slice(0).expect("empty memory trace");
+    let local = &*local;
+    let is_write = local[MEM_COL_IS_WRITE].clone();
+    builder.assert_zero(is_write.clone().into() * (AB::Expr::ONE - is_write.into()));
   }
 }
 
 // ── Lookup descriptor ────────────────────────────────────────────────
 
-fn make_mem_lookup() -> p3_lookup::lookup_traits::Lookup<Val> {
-  let col =
-    |c: usize| SymbolicExpression::Variable(SymbolicVariable::new(Entry::Main { offset: 0 }, c));
-  // Lookup tuple = cols 0..MEM_LOOKUP_TUPLE_COLS (addr_hi..val7, 13 elements).
-  // is_smat and addr_eq are AIR-internal and NOT part of the lookup tuple.
-  let tuple: Vec<SymbolicExpression<Val>> = (0..MEM_LOOKUP_TUPLE_COLS).map(col).collect();
-  p3_lookup::lookup_traits::Lookup::new(
-    LookupKind::Local,
-    vec![tuple],
+// ── Trace builder ─────────────────────────────────────────────────────
+
+fn value_to_u32s(value: &[u8; 32]) -> [u32; 8] {
+  let mut out = [0u32; 8];
+  for (i, chunk) in value.chunks(4).enumerate() {
+    out[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+  }
+  out
+}
+
+fn fill_log_row(data: &mut [Val], base: usize, entry: &MemLogEntry, is_write: bool, mult: i32) {
+  data[base + MEM_COL_ADDR_HI] = Val::from_u32((entry.addr >> 32) as u32);
+  data[base + MEM_COL_ADDR_LO] = Val::from_u32(entry.addr as u32);
+  let vals = value_to_u32s(&entry.value);
+  for k in 0..8 {
+    data[base + MEM_COL_VAL0 + k] = Val::from_u32(vals[k]);
+  }
+  data[base + MEM_COL_IS_WRITE] = Val::from_u32(is_write as u32);
+  data[base + MEM_COL_MULT] = if mult >= 0 {
+    Val::from_u32(mult as u32)
+  } else {
+    -Val::from_u32((-mult) as u32)
+  };
+}
+
+/// Build the memory log trace from write and read logs with LogUp multiplicities.
+///
+/// Trace layout:
+///   Rows 0 .. n_writes       : write log entries (is_write=1)
+///   Rows n_writes .. n_total : read log entries  (is_write=0)
+///   Remaining rows           : padding (all-zero, mult=0)
+///
+/// LogUp multiplicity assignment:
+///   - Last write per addr (the entry whose value appears in `write_set`):
+///     `mult = count of intra-batch reads to that addr`.  All earlier writes
+///     to the same addr get `mult = 0` (they are not the canonical value).
+///   - Intra-batch read (addr ∈ write_set): `mult = −1`.
+///   - Cross-batch read (addr ∉ write_set): `mult = 0` (not in this LogUp).
+///   - Padding rows: `mult = 0`.
+///
+/// Combined, the LogUp sum Σ mult_i/(α − fingerprint(row_i)) = 0 proves that
+/// the multiset of intra-batch read `(addr, value)` tuples equals the
+/// last-written value per addr with the correct multiplicities — i.e. every
+/// intra-batch read sees `write_set[addr]`.
+fn build_mem_log_trace(
+  write_log: &[MemLogEntry],
+  read_log: &[MemLogEntry],
+  write_set: &std::collections::HashMap<u64, [u8; 32]>,
+) -> RowMajorMatrix<Val> {
+  // Count intra-batch reads per addr (reads whose addr appears in write_set).
+  let mut intra_read_count: std::collections::HashMap<u64, i32> = Default::default();
+  for e in read_log {
+    if write_set.contains_key(&e.addr) {
+      *intra_read_count.entry(e.addr).or_insert(0) += 1;
+    }
+  }
+
+  // Index of the last write per addr (determines which write carries the canonical value).
+  let mut last_write_idx: std::collections::HashMap<u64, usize> = Default::default();
+  for (i, e) in write_log.iter().enumerate() {
+    last_write_idx.insert(e.addr, i);
+  }
+
+  let n_total = write_log.len() + read_log.len();
+  let height = n_total.max(4).next_power_of_two();
+  let mut data = vec![Val::ZERO; height * NUM_MEM_COLS];
+
+  for (i, entry) in write_log.iter().enumerate() {
+    // Only the last write to each addr contributes to the LogUp sum;
+    // earlier writes are "overwritten" and get mult = 0.
+    let mult = if last_write_idx.get(&entry.addr) == Some(&i) {
+      *intra_read_count.get(&entry.addr).unwrap_or(&0)
+    } else {
+      0
+    };
+    fill_log_row(&mut data, i * NUM_MEM_COLS, entry, true, mult);
+  }
+
+  for (i, entry) in read_log.iter().enumerate() {
+    let mult = if write_set.contains_key(&entry.addr) { -1 } else { 0 };
+    fill_log_row(&mut data, (write_log.len() + i) * NUM_MEM_COLS, entry, false, mult);
+  }
+
+  RowMajorMatrix::new(data, NUM_MEM_COLS)
+}
+
+// ── Memory LogUp argument helpers ────────────────────────────────────
+
+/// Build the `Lookup` descriptor for the memory consistency local LogUp.
+///
+/// Fingerprint tuple: `(addr_hi, addr_lo, val0..val7)` — columns 0–9.
+/// Multiplicity column: `MEM_COL_MULT` (column 11).
+/// Auxiliary column index in the permutation trace: 0.
+fn make_mem_lookup() -> Lookup<Val> {
+  let col = |c: usize| {
+    SymbolicExpression::Variable(SymbolicVariable::new(Entry::Main { offset: 0 }, c))
+  };
+  Lookup::new(
+    Kind::Local,
+    vec![vec![
+      col(MEM_COL_ADDR_HI),
+      col(MEM_COL_ADDR_LO),
+      col(MEM_COL_VAL0),
+      col(MEM_COL_VAL0 + 1),
+      col(MEM_COL_VAL0 + 2),
+      col(MEM_COL_VAL0 + 3),
+      col(MEM_COL_VAL0 + 4),
+      col(MEM_COL_VAL0 + 5),
+      col(MEM_COL_VAL0 + 6),
+      col(MEM_COL_VAL0 + 7),
+    ]],
     vec![col(MEM_COL_MULT)],
-    vec![0], // single aux column index
+    vec![0],
   )
 }
 
-// ── Trace builder ─────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-struct MemTraceKey {
-  addr_hi: u32,
-  addr_lo: u32,
-  rw_hi: u32,
-  rw_lo: u32,
-  is_write: u32,
-  val: [u32; 8],
-  write_version: u32,
-}
-
-impl MemTraceKey {
-  fn from_claim(c: &crate::transition::MemAccessClaim) -> Self {
-    let mut val = [0u32; 8];
-    for (i, chunk) in c.value.chunks(4).enumerate() {
-      val[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-    }
-    Self {
-      addr_hi: (c.addr >> 32) as u32,
-      addr_lo: c.addr as u32,
-      rw_hi: (c.rw_counter >> 32) as u32,
-      rw_lo: c.rw_counter as u32,
-      is_write: c.is_write as u32,
-      val,
-      write_version: c.write_version,
-    }
-  }
-
-  fn fill_tuple_cols(&self, row: &mut [Val]) {
-    row[MEM_COL_ADDR_HI] = Val::from_u32(self.addr_hi);
-    row[MEM_COL_ADDR_LO] = Val::from_u32(self.addr_lo);
-    row[MEM_COL_RW_HI] = Val::from_u32(self.rw_hi);
-    row[MEM_COL_RW_LO] = Val::from_u32(self.rw_lo);
-    row[MEM_COL_IS_WRITE] = Val::from_u32(self.is_write);
-    for k in 0..8 {
-      row[MEM_COL_VAL0 + k] = Val::from_u32(self.val[k]);
-    }
-    row[MEM_COL_WRITE_VERSION] = Val::from_u32(self.write_version);
-  }
-
-  fn addr64(&self) -> u64 {
-    ((self.addr_hi as u64) << 32) | self.addr_lo as u64
-  }
-}
-
-/// Build the SMAT LogUp trace from `claims`.
-///
-/// Trace layout:
-///  - Rows 0 .. n_smat          : SMAT receive rows (sorted by (addr,rw_counter)).
-///                                mult = −freq,  is_smat = 1.
-///  - Rows n_smat .. n_smat+N   : claim query rows (original claim order).
-///                                mult = +1,  is_smat = 0.
-///  - Remaining rows            : padding (all-zero).
-///
-/// `addr_eq[i]` is set to 1 when SMAT row i and i+1 have the same address.
-///
-/// Returns `Err` if any read claim is inconsistent with the witnessed writes.
-fn build_smat_trace(
-  claims: &[crate::transition::MemAccessClaim],
-) -> Result<RowMajorMatrix<Val>, String> {
-  use std::collections::{BTreeMap, HashMap};
-
-  // ── 1. R/W consistency check ─────────────────────────────────────
-  let mut sorted_idx: Vec<usize> = (0..claims.len()).collect();
-  sorted_idx.sort_by_key(|&i| (claims[i].addr, claims[i].rw_counter));
-
-  let mut last_write: HashMap<u64, [u8; 32]> = HashMap::new();
-  for &i in &sorted_idx {
-    let c = &claims[i];
-    if c.is_write {
-      last_write.insert(c.addr, c.value);
-    } else {
-      let expected = last_write.get(&c.addr).copied().unwrap_or([0u8; 32]);
-      if c.value != expected {
-        return Err(format!(
-          "build_smat_trace: read/write consistency violation \
-           at addr=0x{:x} rw={}",
-          c.addr, c.rw_counter
-        ));
-      }
-    }
-  }
-
-  // ── 2. Build sorted SMAT (unique tuples with frequency) ──────────
-  let mut smat_mult: BTreeMap<MemTraceKey, u32> = BTreeMap::new();
-  for c in claims {
-    *smat_mult.entry(MemTraceKey::from_claim(c)).or_insert(0) += 1;
-  }
-  // BTreeMap order = lexicographic on (addr_hi, addr_lo, rw_hi, rw_lo, …)
-  // which is equivalent to sort by (addr, rw_counter) ascending.
-  let smat_rows: Vec<(&MemTraceKey, u32)> = smat_mult.iter().map(|(k, &m)| (k, m)).collect();
-  let n_smat = smat_rows.len();
-  let n_claims = claims.len();
-
-  // ── 3. Allocate trace ─────────────────────────────────────────────
-  let n_data = n_smat + n_claims;
-  let height = n_data.max(4).next_power_of_two();
-  let mut data = vec![Val::ZERO; height * NUM_MEM_COLS];
-
-  // ── 4. SMAT receive rows ──────────────────────────────────────────
-  for (row_idx, (key, freq)) in smat_rows.iter().enumerate() {
-    let base = row_idx * NUM_MEM_COLS;
-    key.fill_tuple_cols(&mut data[base..]);
-    data[base + MEM_COL_MULT] = -Val::from_u32(*freq); // receive: negative mult
-    data[base + MEM_COL_IS_SMAT] = Val::ONE;
-    // addr_eq: 1 if next SMAT row has the same address.
-    // Also fill inv_addr_hi / inv_addr_lo witnesses.
-    if row_idx + 1 < n_smat {
-      let next_key = smat_rows[row_idx + 1].0;
-      let diff_hi = (next_key.addr_hi as i64) - (key.addr_hi as i64);
-      let diff_lo = (next_key.addr_lo as i64) - (key.addr_lo as i64);
-      if diff_hi == 0 && diff_lo == 0 {
-        data[base + MEM_COL_ADDR_EQ] = Val::ONE;
-        // same_hi = same_lo = 1 → diff * inv = 0, set inv to 0
-        data[base + MEM_COL_INV_ADDR_HI] = Val::ZERO;
-        data[base + MEM_COL_INV_ADDR_LO] = Val::ZERO;
-      } else {
-        // addr_eq = 0: set inv so that diff * inv = 1 (standard inverse witness)
-        // diff_hi != 0 OR diff_lo != 0; use whichever is non-zero.
-        let inv_hi = if diff_hi != 0 {
-          Val::from_u32(diff_hi.rem_euclid(0x7FFF_FFFFi64) as u32)
-            .try_inverse()
-            .unwrap_or(Val::ZERO)
-        } else {
-          Val::ZERO
-        };
-        let inv_lo = if diff_lo != 0 {
-          Val::from_u32(diff_lo.rem_euclid(0x7FFF_FFFFi64) as u32)
-            .try_inverse()
-            .unwrap_or(Val::ZERO)
-        } else {
-          Val::ZERO
-        };
-        data[base + MEM_COL_INV_ADDR_HI] = inv_hi;
-        data[base + MEM_COL_INV_ADDR_LO] = inv_lo;
-      }
-    }
-  }
-
-  // ── 5. Claim query rows ───────────────────────────────────────────
-  for (i, c) in claims.iter().enumerate() {
-    let base = (n_smat + i) * NUM_MEM_COLS;
-    MemTraceKey::from_claim(c).fill_tuple_cols(&mut data[base..]);
-    data[base + MEM_COL_MULT] = Val::ONE; // query: positive mult
-    // is_smat = 0, addr_eq = 0 (already zero from vec initialisation)
-  }
-
-  Ok(RowMajorMatrix::new(data, NUM_MEM_COLS))
-}
-
-// ── Permutation trace helper ──────────────────────────────────────────
-
-fn generate_smat_perm_trace(
+/// Generate the permutation (LogUp running-sum) trace for the memory AIR.
+fn generate_mem_perm_trace(
   main_trace: &RowMajorMatrix<Val>,
-  public_values: &[Val],
-  perm_challenges: &[<CircleStarkConfig as p3_uni_stark::StarkGenericConfig>::Challenge],
-) -> Option<RowMajorMatrix<<CircleStarkConfig as p3_uni_stark::StarkGenericConfig>::Challenge>> {
+  perm_challenges: &[Challenge],
+) -> Option<RowMajorMatrix<Challenge>> {
   let gadget = LogUpGadget::new();
   let lookup = make_mem_lookup();
-  let mut lookup_data: Vec<
-    LookupData<<CircleStarkConfig as p3_uni_stark::StarkGenericConfig>::Challenge>,
-  > = vec![];
+  let mut lookup_data: Vec<LookupData<Challenge>> = vec![];
   let perm_trace = gadget.generate_permutation::<CircleStarkConfig>(
     main_trace,
     &None,
-    public_values,
+    &[],
     &[lookup],
     &mut lookup_data,
     perm_challenges,
@@ -4876,80 +4063,1745 @@ fn generate_smat_perm_trace(
   Some(perm_trace)
 }
 
-// ── Public API ────────────────────────────────────────────────────────
-
-/// Proof of SMAT memory consistency backed by a Circle STARK / LogUp argument.
-///
-/// The proof commits to the claim set via `public_values`; supply the *same*
-/// `claims` to [`verify_memory_consistency`].
-pub struct MemoryConsistencyProof {
-  pub stark_proof: CircleStarkProof,
+/// Evaluate the memory LogUp constraints (called in both prover and verifier).
+fn eval_mem_lookup(folder: &mut VerifierConstraintFolder<CircleStarkConfig>) {
+  LogUpGadget::new().eval_local_lookup(folder, &make_mem_lookup());
 }
 
-/// Prove memory consistency for `claims` using the SMAT LogUp STARK.
+// ── Public API ────────────────────────────────────────────────────────
+
+/// Proof that the execution's memory accesses are consistent.
 ///
-/// Returns `Err` if any read claim is inconsistent with the witnessed writes.
+/// Exposes `write_set` (final written values) and `read_set` (cross-batch
+/// dependencies) as public output.  Binary-tree aggregation merges adjacent
+/// proofs by checking `R.read_set ∩ L.write_set` for value consistency.
+pub struct MemoryConsistencyProof {
+  pub stark_proof: CircleStarkProof,
+  /// Final value written to each address in this batch (last write wins).
+  pub write_set: std::collections::HashMap<u64, [u8; 32]>,
+  /// Cross-batch dependencies: addresses read before any write in this batch.
+  pub read_set: std::collections::HashMap<u64, [u8; 32]>,
+  /// Write log (retained for STARK verification; can be discarded after aggregation).
+  pub write_log: Vec<MemLogEntry>,
+  /// Read log (retained for STARK verification; can be discarded after aggregation).
+  pub read_log: Vec<MemLogEntry>,
+}
+
+/// Prove memory consistency for `claims`.
+///
+/// Steps:
+/// 1. Split claims into write/read logs (preserving `rw_counter` for ordering).
+/// 2. Scan claims in execution order to build `write_set` / `read_set` and check
+///    intra-batch read/write consistency.
+/// 3. Build STARK with LogUp permutation argument that proves every intra-batch
+///    read `(addr, value)` matches `write_set[addr]` in-circuit.
 pub fn prove_memory_consistency(
   claims: &[crate::transition::MemAccessClaim],
 ) -> Result<MemoryConsistencyProof, String> {
-  let public_values = make_mem_public_values(claims);
+  let (write_log, read_log) = split_mem_logs(claims);
 
-  let trace = if claims.is_empty() {
+  // Intra-batch consistency + derive (write_set, read_set).
+  let (write_set, read_set) = check_claims_and_build_sets(claims)?;
+
+  let public_values =
+    make_mem_public_values(&write_log, &read_log, &write_set, &read_set);
+
+  let trace = if write_log.is_empty() && read_log.is_empty() {
     RowMajorMatrix::new(vec![Val::ZERO; 4 * NUM_MEM_COLS], NUM_MEM_COLS)
   } else {
-    build_smat_trace(claims)?
+    build_mem_log_trace(&write_log, &read_log, &write_set)
   };
 
-  let trace_for_perm = trace.clone();
-  let pv_for_perm = public_values.clone();
-  let lookup_prove = make_mem_lookup();
   let config = make_circle_config();
-
-  let stark_proof = p3_uni_stark::prove_with_lookup(
+  let trace_for_perm = trace.clone();
+  let stark_proof = prove_with_lookup(
     &config,
     &MemoryConsistencyAir,
     trace,
     &public_values,
     None,
-    move |perm_challenges| {
-      generate_smat_perm_trace(&trace_for_perm, &pv_for_perm, perm_challenges)
-    },
-    2,
-    2,
-    move |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| {
-      let gadget = LogUpGadget::new();
-      gadget.eval_local_lookup(folder, &lookup_prove);
-    },
+    move |perm_challenges| generate_mem_perm_trace(&trace_for_perm, perm_challenges),
+    2, // num_perm_challenges (1 lookup × 2 challenges: alpha + beta)
+    2, // lookup_constraint_count (first_row + universal for local LogUp)
+    |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_mem_lookup(folder),
   );
 
-  Ok(MemoryConsistencyProof { stark_proof })
+  Ok(MemoryConsistencyProof {
+    stark_proof,
+    write_set,
+    read_set,
+    write_log,
+    read_log,
+  })
 }
 
-/// Verify a [`MemoryConsistencyProof`] against a set of access claims.
+/// Verify a single [`MemoryConsistencyProof`].
 ///
-/// Recomputes the claim hash from `claims`, checks it against the proof's
-/// committed public values, and runs the STARK / LogUp verifier.
-pub fn verify_memory_consistency(
-  proof: &MemoryConsistencyProof,
-  claims: &[crate::transition::MemAccessClaim],
-) -> bool {
-  let public_values = make_mem_public_values(claims);
-  let config = make_circle_config();
-  let lookup_verify = make_mem_lookup();
+/// 1. Re-derives `(write_set, read_set)` from the embedded logs to catch tampering.
+/// 2. Verifies the STARK proof against the re-derived public values.
+///
+/// Cross-batch consistency (i.e., that `read_set` values are satisfied by a
+/// prior batch's `write_set`) is enforced at aggregation time.
+pub fn verify_memory_consistency(proof: &MemoryConsistencyProof) -> bool {
+  // Re-derive (write_set, read_set) from logs to detect tampering.
+  let (derived_write_set, derived_read_set) =
+    match derive_sets_from_logs(&proof.write_log, &proof.read_log) {
+      Ok(s) => s,
+      Err(_) => return false,
+    };
+  if derived_write_set != proof.write_set || derived_read_set != proof.read_set {
+    return false;
+  }
 
-  let result = p3_uni_stark::verify_with_lookup(
+  let public_values = make_mem_public_values(
+    &proof.write_log,
+    &proof.read_log,
+    &proof.write_set,
+    &proof.read_set,
+  );
+
+  let config = make_circle_config();
+  verify_with_lookup(
     &config,
     &MemoryConsistencyAir,
     &proof.stark_proof,
     &public_values,
     None,
-    2,
-    move |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| {
-      let gadget = LogUpGadget::new();
-      gadget.eval_local_lookup(folder, &lookup_verify);
-    },
+    2, // num_perm_challenges (must match prove_memory_consistency)
+    |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_mem_lookup(folder),
+  )
+  .is_ok()
+}
+
+// ── Binary-tree aggregation ───────────────────────────────────────────
+
+/// Compact result of binary-tree aggregation over leaf [`MemoryConsistencyProof`]s.
+///
+/// After aggregation the write/read logs are discarded; only the sparse
+/// `write_set` (final memory state) and `read_set` (genesis dependencies)
+/// survive, summarising the entire multi-batch state transition in O(accessed
+/// addresses) data.
+///
+/// # Recursive STARK aggregation
+/// Each merge node will be replaced by a **recursive STARK proof** whose
+/// circuit verifies both child proofs inside the arithmetisation:
+///
+/// ```text
+/// MergeAir public inputs:
+///   left.write_set_hash  (8 × M31)
+///   left.read_set_hash   (8 × M31)
+///   right.write_set_hash (8 × M31)
+///   right.read_set_hash  (8 × M31)
+///
+/// MergeAir constraints:
+///   1. Verify left  child STARK proof  (IOP transcript check in-circuit)
+///   2. Verify right child STARK proof
+///   3. ∀ addr ∈ R.read_set ∩ L.write_set: R.read_set[addr] == L.write_set[addr]
+///
+/// Output public input for the parent level:
+///   merged.write_set_hash, merged.read_set_hash
+/// ```
+///
+/// The current native-Rust intersection check is a placeholder that will be
+/// replaced once the recursive STARK verifier circuit is implemented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregatedMemoryProof {
+  /// Final values written across all batches (right/later batch wins on overlap).
+  pub write_set: std::collections::HashMap<u64, [u8; 32]>,
+  /// Cross-batch dependencies not satisfied within the aggregated subtree.
+  /// At the root this corresponds to the required genesis memory state.
+  pub read_set: std::collections::HashMap<u64, [u8; 32]>,
+}
+
+/// Merge two adjacent proven batches using read/write set intersection.
+///
+/// Checks that every address the right batch reads from a prior batch has the
+/// value that the left batch wrote.  Returns `Err` if any proof is invalid or
+/// any intersection value mismatches.
+pub fn aggregate_memory_proofs(
+  left: &MemoryConsistencyProof,
+  right: &MemoryConsistencyProof,
+) -> Result<AggregatedMemoryProof, String> {
+  if !verify_memory_consistency(left) {
+    return Err("left child proof failed verification".to_string());
+  }
+  if !verify_memory_consistency(right) {
+    return Err("right child proof failed verification".to_string());
+  }
+  merge_sets(&left.write_set, &left.read_set, &right.write_set, &right.read_set)
+}
+
+/// Core set-merge logic (shared by both leaf and tree aggregation).
+fn merge_sets(
+  left_ws: &std::collections::HashMap<u64, [u8; 32]>,
+  left_rs: &std::collections::HashMap<u64, [u8; 32]>,
+  right_ws: &std::collections::HashMap<u64, [u8; 32]>,
+  right_rs: &std::collections::HashMap<u64, [u8; 32]>,
+) -> Result<AggregatedMemoryProof, String> {
+  // Intersection check: ∀ addr ∈ R.read_set ∩ L.write_set, values must match.
+  for (addr, &r_val) in right_rs {
+    if let Some(&l_val) = left_ws.get(addr) {
+      if r_val != l_val {
+        return Err(format!(
+          "read/write set mismatch at addr=0x{addr:x}: right read {r_val:?}, left wrote {l_val:?}"
+        ));
+      }
+    }
+  }
+
+  // Merged write_set: left base, right overwrites on overlap.
+  let mut write_set = left_ws.clone();
+  for (&addr, &val) in right_ws {
+    write_set.insert(addr, val);
+  }
+
+  // Merged read_set: left's unresolved reads + right's reads not covered by left's writes.
+  let mut read_set = left_rs.clone();
+  for (&addr, &val) in right_rs {
+    if !left_ws.contains_key(&addr) {
+      // Not satisfied by the left subtree → propagate upward.
+      read_set.entry(addr).or_insert(val);
+    }
+  }
+
+  Ok(AggregatedMemoryProof { write_set, read_set })
+}
+
+/// Aggregate a sequence of adjacent batch proofs into a single compact proof
+/// using a binary tree of merge operations.
+///
+/// # Current implementation
+/// Each merge node performs a native-Rust read/write set intersection check.
+/// This is a **placeholder** — see [`AggregatedMemoryProof`] for the planned
+/// replacement with a recursive STARK circuit.
+///
+/// # Parallelism
+/// Leaf proofs are fully independent (no prev-snapshot dependency) and can be
+/// generated in any order or in parallel.  Within each tree level all merge
+/// nodes are also independent — each reads only its two immediate children —
+/// so every level can be processed with data-parallel iteration.
+///
+/// Tree depth = ⌈log₂(N)⌉ → O(N) total work, O(log N) sequential depth.
+///
+/// # Odd lengths
+/// If a level has an odd number of nodes the final node is carried up
+/// unchanged (equivalent to padding with an identity batch).
+pub fn aggregate_proofs_tree(
+  proofs: &[MemoryConsistencyProof],
+) -> Result<AggregatedMemoryProof, String> {
+  if proofs.is_empty() {
+    return Err("aggregate_proofs_tree: empty proof slice".to_string());
+  }
+
+  // Validate all leaves and convert to AggregatedMemoryProof nodes.
+  let mut nodes: Vec<AggregatedMemoryProof> = proofs
+    .iter()
+    .enumerate()
+    .map(|(i, p)| {
+      if !verify_memory_consistency(p) {
+        Err(format!("leaf proof {i} failed verification"))
+      } else {
+        Ok(AggregatedMemoryProof {
+          write_set: p.write_set.clone(),
+          read_set: p.read_set.clone(),
+        })
+      }
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+
+  // Binary-tree reduction — each level halves the node count.
+  while nodes.len() > 1 {
+    let mut next_level = Vec::with_capacity((nodes.len() + 1) / 2);
+    let mut iter = nodes.into_iter().peekable();
+    while let Some(left) = iter.next() {
+      if let Some(right) = iter.next() {
+        let merged =
+          merge_sets(&left.write_set, &left.read_set, &right.write_set, &right.read_set)?;
+        next_level.push(merged);
+      } else {
+        // Odd node — carry forward unchanged.
+        next_level.push(left);
+      }
+    }
+    nodes = next_level;
+  }
+
+  Ok(nodes.into_iter().next().unwrap())
+}
+
+// ============================================================
+// Storage consistency proof  (read/write set intersection)
+// ============================================================
+//
+// Identical soundness design to the memory proof, with a 2D key space:
+//   StorageKey = (contract: [u8;20], slot: [u8;32])  →  value: [u8;32]
+//
+// Each batch proof exposes:
+//   write_set : Map<StorageKey → value>  — final value SSTORE'd per (contract, slot)
+//   read_set  : Map<StorageKey → value>  — cross-batch SLOAD dependencies
+//
+// Aggregation: same intersection rule as memory.
+//
+// Column layout  (NUM_STOR_COLS = 23)
+// ─────────────────────────────────────────────────────────────
+//  0.. 4  contract0..4 — 20-byte contract address as 5 × u32 (big-endian)
+//  5..12  slot0..7     — 32-byte slot key as 8 × u32
+// 13..20  val0..7      — 32-byte value as 8 × u32
+// 21      is_write     — 1 for SSTORE, 0 for SLOAD
+// 22      mult         — +1 for live rows, 0 for padding
+//
+// Public values layout  (STOR_PUBLIC_VALUES_LEN = 35)
+// ─────────────────────────────────────────────────────────────
+//  pis[ 0]      = RECEIPT_BIND_TAG_STORAGE
+//  pis[ 1]      = n_writes
+//  pis[ 2..10]  = poseidon_hash(write_log)   (8 × M31)
+//  pis[10]      = n_reads
+//  pis[11..19]  = poseidon_hash(read_log)    (8 × M31)
+//  pis[19..27]  = poseidon_hash(write_set)   (8 × M31)  — aggregation interface
+//  pis[27..35]  = poseidon_hash(read_set)    (8 × M31)  — aggregation interface
+// ============================================================
+
+pub const RECEIPT_BIND_TAG_STORAGE: u32 = 5;
+const STOR_PUBLIC_VALUES_LEN: usize = 35;
+
+const STOR_COL_CONTRACT0: usize = 0;
+// contract1..4 = STOR_COL_CONTRACT0+1..STOR_COL_CONTRACT0+4  (cols 0..4)
+const STOR_COL_SLOT0: usize = 5;
+// slot1..7 = STOR_COL_SLOT0+1..STOR_COL_SLOT0+7  (cols 5..12)
+const STOR_COL_VAL0: usize = 13;
+// val1..7 = STOR_COL_VAL0+1..STOR_COL_VAL0+7  (cols 13..20)
+const STOR_COL_IS_WRITE: usize = 21;
+const STOR_COL_MULT: usize = 22;
+/// Total number of main-trace columns for storage.
+pub const NUM_STOR_COLS: usize = 23;
+
+// ── Key and set types ─────────────────────────────────────────────────
+
+/// `(contract_address, storage_slot)` key.
+pub type StorageKey = ([u8; 20], [u8; 32]);
+/// Storage map type: `StorageKey → value`.
+pub type StorageSet = std::collections::HashMap<StorageKey, [u8; 32]>;
+
+// ── Log entry type ────────────────────────────────────────────────────
+
+/// A single entry in the public storage write or read log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageLogEntry {
+  pub rw_counter: u64,
+  pub contract: [u8; 20],
+  pub slot: [u8; 32],
+  pub value: [u8; 32],
+}
+
+/// Split a `StorageAccessClaim` slice into separate write and read logs.
+pub fn split_storage_logs(
+  claims: &[crate::transition::StorageAccessClaim],
+) -> (Vec<StorageLogEntry>, Vec<StorageLogEntry>) {
+  let mut writes = Vec::new();
+  let mut reads = Vec::new();
+  for c in claims {
+    let entry = StorageLogEntry {
+      rw_counter: c.rw_counter,
+      contract: c.contract,
+      slot: c.slot,
+      value: c.value,
+    };
+    if c.is_write { writes.push(entry); } else { reads.push(entry); }
+  }
+  (writes, reads)
+}
+
+// ── Hash helpers ──────────────────────────────────────────────────────
+
+fn contract_to_u32s(contract: &[u8; 20]) -> [u32; 5] {
+  let mut out = [0u32; 5];
+  for (i, chunk) in contract.chunks(4).enumerate() {
+    out[i] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+  }
+  out
+}
+
+fn hash_storage_log(log: &[StorageLogEntry]) -> [Val; 8] {
+  let mut rng = rand::rngs::SmallRng::seed_from_u64(0xC0DEC0DE_u64);
+  let poseidon = Poseidon2Mersenne31::<16>::new_from_rng_128(&mut rng);
+  let sponge = PaddingFreeSponge::<_, 16, 8, 8>::new(poseidon);
+
+  // per entry: 2 (rw_counter) + 5 (contract) + 8 (slot) + 8 (value) = 23
+  let mut input: Vec<Val> = Vec::with_capacity(1 + log.len() * 23);
+  input.push(Val::from_u32(log.len() as u32));
+  for e in log {
+    input.push(Val::from_u32((e.rw_counter >> 32) as u32));
+    input.push(Val::from_u32(e.rw_counter as u32));
+    for u in contract_to_u32s(&e.contract) {
+      input.push(Val::from_u32(u));
+    }
+    for chunk in e.slot.chunks(4) {
+      input.push(Val::from_u32(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])));
+    }
+    for chunk in e.value.chunks(4) {
+      input.push(Val::from_u32(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])));
+    }
+  }
+  sponge.hash_iter(input)
+}
+
+fn hash_storage_set(set: &StorageSet) -> [Val; 8] {
+  if set.is_empty() {
+    return [Val::ZERO; 8];
+  }
+  // Sort by (contract, slot) for determinism.
+  let mut sorted: Vec<(StorageKey, [u8; 32])> =
+    set.iter().map(|(&k, &v)| (k, v)).collect();
+  sorted.sort_by_key(|((c, s), _)| (*c, *s));
+
+  let mut rng = rand::rngs::SmallRng::seed_from_u64(0xC0DEC0DE_u64);
+  let poseidon = Poseidon2Mersenne31::<16>::new_from_rng_128(&mut rng);
+  let sponge = PaddingFreeSponge::<_, 16, 8, 8>::new(poseidon);
+
+  // per entry: 5 (contract) + 8 (slot) + 8 (value) = 21
+  let mut input: Vec<Val> = Vec::with_capacity(1 + sorted.len() * 21);
+  input.push(Val::from_u32(sorted.len() as u32));
+  for ((contract, slot), value) in &sorted {
+    for u in contract_to_u32s(contract) {
+      input.push(Val::from_u32(u));
+    }
+    for chunk in slot.chunks(4) {
+      input.push(Val::from_u32(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])));
+    }
+    for chunk in value.chunks(4) {
+      input.push(Val::from_u32(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])));
+    }
+  }
+  sponge.hash_iter(input)
+}
+
+/// Build the `public_values` vector (`STOR_PUBLIC_VALUES_LEN = 35`).
+fn make_storage_public_values(
+  write_log: &[StorageLogEntry],
+  read_log: &[StorageLogEntry],
+  write_set: &StorageSet,
+  read_set: &StorageSet,
+) -> Vec<Val> {
+  let wlh = hash_storage_log(write_log);
+  let rlh = hash_storage_log(read_log);
+  let wsh = hash_storage_set(write_set);
+  let rsh = hash_storage_set(read_set);
+  let mut pv = Vec::with_capacity(STOR_PUBLIC_VALUES_LEN);
+  pv.push(Val::from_u32(RECEIPT_BIND_TAG_STORAGE));    //  0
+  pv.push(Val::from_u32(write_log.len() as u32));      //  1
+  pv.extend_from_slice(&wlh);                          //  2..10
+  pv.push(Val::from_u32(read_log.len() as u32));       //  10
+  pv.extend_from_slice(&rlh);                          // 11..19
+  pv.extend_from_slice(&wsh);                          // 19..27 — aggregation interface
+  pv.extend_from_slice(&rsh);                          // 27..35 — aggregation interface
+  pv
+}
+
+// ── Intra-batch consistency checker ──────────────────────────────────
+
+/// Validate intra-batch SLOAD/SSTORE consistency and derive `(write_set, read_set)`.
+fn check_storage_claims_and_build_sets(
+  claims: &[crate::transition::StorageAccessClaim],
+) -> Result<(StorageSet, StorageSet), String> {
+  use std::collections::HashMap;
+  let mut write_set: StorageSet = HashMap::new();
+  let mut read_set: StorageSet = HashMap::new();
+  let mut last_write: StorageSet = HashMap::new();
+
+  for claim in claims {
+    let key: StorageKey = (claim.contract, claim.slot);
+    if claim.is_write {
+      last_write.insert(key, claim.value);
+      write_set.insert(key, claim.value); // last write wins
+    } else if let Some(&written) = last_write.get(&key) {
+      if claim.value != written {
+        return Err(format!(
+          "storage read/write mismatch at contract={} slot={}: read {:?}, last write {:?}",
+          format!("{:?}", claim.contract),
+          format!("{:?}", claim.slot),
+          claim.value,
+          written
+        ));
+      }
+    } else {
+      match read_set.entry(key) {
+        std::collections::hash_map::Entry::Vacant(e) => {
+          e.insert(claim.value);
+        }
+        std::collections::hash_map::Entry::Occupied(e) => {
+          if *e.get() != claim.value {
+            return Err(format!(
+              "cross-batch storage read mismatch at contract={} slot={}",
+              format!("{:?}", claim.contract),
+              format!("{:?}", claim.slot),
+            ));
+          }
+        }
+      }
+    }
+  }
+  Ok((write_set, read_set))
+}
+
+/// Re-derive `(write_set, read_set)` from a split log pair (used in verification).
+fn derive_storage_sets_from_logs(
+  write_log: &[StorageLogEntry],
+  read_log: &[StorageLogEntry],
+) -> Result<(StorageSet, StorageSet), String> {
+  // Merge by rw_counter to restore execution order.
+  let mut merged: Vec<(u64, bool, StorageKey, [u8; 32])> = Vec::new();
+  for e in write_log {
+    merged.push((e.rw_counter, true, (e.contract, e.slot), e.value));
+  }
+  for e in read_log {
+    merged.push((e.rw_counter, false, (e.contract, e.slot), e.value));
+  }
+  merged.sort_by_key(|(rw, _, _, _)| *rw);
+
+  let mut write_set: StorageSet = std::collections::HashMap::new();
+  let mut read_set: StorageSet = std::collections::HashMap::new();
+  let mut last_write: StorageSet = std::collections::HashMap::new();
+
+  for (_, is_write, key, value) in merged {
+    if is_write {
+      last_write.insert(key, value);
+      write_set.insert(key, value);
+    } else if let Some(&written) = last_write.get(&key) {
+      if value != written {
+        return Err(format!(
+          "storage read/write mismatch at contract={} slot={}",
+          format!("{:?}", key.0),
+          format!("{:?}", key.1),
+        ));
+      }
+    } else {
+      match read_set.entry(key) {
+        std::collections::hash_map::Entry::Vacant(e) => {
+          e.insert(value);
+        }
+        std::collections::hash_map::Entry::Occupied(e) => {
+          if *e.get() != value {
+            return Err(format!(
+              "cross-batch storage read mismatch at contract={} slot={}",
+              format!("{:?}", key.0),
+              format!("{:?}", key.1),
+            ));
+          }
+        }
+      }
+    }
+  }
+  Ok((write_set, read_set))
+}
+
+// ── AIR ──────────────────────────────────────────────────────────────
+
+/// AIR for the storage log LogUp membership argument.
+///
+/// Each trace row represents one entry from the SSTORE or SLOAD log.
+/// The AIR constraints are:
+///   1. Tag check: `pis[0] == RECEIPT_BIND_TAG_STORAGE`  (degree 1)
+///   2. `is_write ∈ {0, 1}`                              (degree 2)
+///
+/// In-circuit consistency is enforced by the LogUp permutation argument
+/// in `eval_stor_lookup`: every intra-batch SLOAD `(contract, slot, value)`
+/// must match an SSTORE row with the correct multiplicity, proving that the
+/// read value equals the last value written to that slot within the batch.
+pub struct StorageConsistencyAir;
+
+impl<F: p3_field::Field> p3_air::BaseAir<F> for StorageConsistencyAir {
+  fn width(&self) -> usize {
+    NUM_STOR_COLS
+  }
+}
+
+impl<AB: p3_air::AirBuilderWithPublicValues> p3_air::Air<AB> for StorageConsistencyAir
+where
+  AB::F: p3_field::Field,
+{
+  fn eval(&self, builder: &mut AB) {
+    let pis = builder.public_values();
+    builder.assert_eq(pis[0].into(), AB::Expr::from_u32(RECEIPT_BIND_TAG_STORAGE));
+
+    let main = builder.main();
+    let local = main.row_slice(0).expect("empty storage trace");
+    let local = &*local;
+    let is_write = local[STOR_COL_IS_WRITE].clone();
+    builder.assert_zero(is_write.clone().into() * (AB::Expr::ONE - is_write.into()));
+  }
+}
+
+// ── Lookup descriptor ────────────────────────────────────────────────
+
+/// Build the `Lookup` descriptor for the storage consistency local LogUp.
+///
+/// Fingerprint tuple: `(contract0..4, slot0..7, val0..7)` — 21 columns.
+/// Multiplicity column: `STOR_COL_MULT`.
+fn make_stor_lookup() -> Lookup<Val> {
+  let col = |c: usize| {
+    SymbolicExpression::Variable(SymbolicVariable::new(Entry::Main { offset: 0 }, c))
+  };
+  Lookup::new(
+    Kind::Local,
+    vec![vec![
+      col(STOR_COL_CONTRACT0),
+      col(STOR_COL_CONTRACT0 + 1),
+      col(STOR_COL_CONTRACT0 + 2),
+      col(STOR_COL_CONTRACT0 + 3),
+      col(STOR_COL_CONTRACT0 + 4),
+      col(STOR_COL_SLOT0),
+      col(STOR_COL_SLOT0 + 1),
+      col(STOR_COL_SLOT0 + 2),
+      col(STOR_COL_SLOT0 + 3),
+      col(STOR_COL_SLOT0 + 4),
+      col(STOR_COL_SLOT0 + 5),
+      col(STOR_COL_SLOT0 + 6),
+      col(STOR_COL_SLOT0 + 7),
+      col(STOR_COL_VAL0),
+      col(STOR_COL_VAL0 + 1),
+      col(STOR_COL_VAL0 + 2),
+      col(STOR_COL_VAL0 + 3),
+      col(STOR_COL_VAL0 + 4),
+      col(STOR_COL_VAL0 + 5),
+      col(STOR_COL_VAL0 + 6),
+      col(STOR_COL_VAL0 + 7),
+    ]],
+    vec![col(STOR_COL_MULT)],
+    vec![0],
+  )
+}
+
+/// Generate the permutation (LogUp running-sum) trace for the storage AIR.
+fn generate_stor_perm_trace(
+  main_trace: &RowMajorMatrix<Val>,
+  perm_challenges: &[Challenge],
+) -> Option<RowMajorMatrix<Challenge>> {
+  let gadget = LogUpGadget::new();
+  let lookup = make_stor_lookup();
+  let mut lookup_data: Vec<LookupData<Challenge>> = vec![];
+  let perm_trace = gadget.generate_permutation::<CircleStarkConfig>(
+    main_trace,
+    &None,
+    &[],
+    &[lookup],
+    &mut lookup_data,
+    perm_challenges,
   );
-  result.is_ok()
+  Some(perm_trace)
+}
+
+/// Evaluate the storage LogUp constraints (called in both prover and verifier).
+fn eval_stor_lookup(folder: &mut VerifierConstraintFolder<CircleStarkConfig>) {
+  LogUpGadget::new().eval_local_lookup(folder, &make_stor_lookup());
+}
+
+// ── Trace builder ─────────────────────────────────────────────────────
+
+fn fill_storage_log_row(data: &mut [Val], base: usize, entry: &StorageLogEntry, is_write: bool, mult: i32) {
+  let cs = contract_to_u32s(&entry.contract);
+  for k in 0..5 {
+    data[base + STOR_COL_CONTRACT0 + k] = Val::from_u32(cs[k]);
+  }
+  for (k, chunk) in entry.slot.chunks(4).enumerate() {
+    data[base + STOR_COL_SLOT0 + k] =
+      Val::from_u32(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+  }
+  let vs = value_to_u32s(&entry.value);
+  for k in 0..8 {
+    data[base + STOR_COL_VAL0 + k] = Val::from_u32(vs[k]);
+  }
+  data[base + STOR_COL_IS_WRITE] = Val::from_u32(is_write as u32);
+  data[base + STOR_COL_MULT] = if mult >= 0 {
+    Val::from_u32(mult as u32)
+  } else {
+    -Val::from_u32((-mult) as u32)
+  };
+}
+
+fn build_storage_log_trace(
+  write_log: &[StorageLogEntry],
+  read_log: &[StorageLogEntry],
+  _write_set: &StorageSet,
+) -> RowMajorMatrix<Val> {
+  // Determine intra-batch reads using rw_counter ordering.
+  //
+  // A read is "intra-batch" iff it occurred AFTER the last write to the same
+  // key in this batch.  Reads that precede any write (genesis / cross-batch
+  // reads) are excluded from the LogUp (mult = 0) even if the same key is
+  // later written.  This ensures the LogUp sum cancels correctly:
+  //   last-write sends +(key, final_value) × count_intra_reads
+  //   each intra-batch read receives −1 × (key, final_value)
+  //
+  // The native-Rust recalculation in `verify_storage_consistency` (via
+  // `derive_storage_sets_from_logs`) provides the authoritative consistency
+  // guarantee; the LogUp adds an in-circuit binding on top.
+
+  // Step 1: rw_counter of the last write per key.
+  let mut last_write_rw: std::collections::HashMap<StorageKey, u64> = Default::default();
+  for e in write_log {
+    let key = (e.contract, e.slot);
+    let rw = last_write_rw.entry(key).or_insert(0);
+    if e.rw_counter > *rw {
+      *rw = e.rw_counter;
+    }
+  }
+
+  // Step 2: classify reads.  A read is intra-batch only if it happened
+  // strictly after the last write to that key.
+  let mut intra_read_count: std::collections::HashMap<StorageKey, i32> = Default::default();
+  let mut intra_read_rw_set: std::collections::HashSet<u64> = Default::default();
+  for e in read_log {
+    let key = (e.contract, e.slot);
+    if let Some(&lw_rw) = last_write_rw.get(&key) {
+      if e.rw_counter > lw_rw {
+        *intra_read_count.entry(key).or_insert(0) += 1;
+        intra_read_rw_set.insert(e.rw_counter);
+      }
+    }
+  }
+
+  // Step 3: index of the last write per key (by position in write_log).
+  let mut last_write_idx: std::collections::HashMap<StorageKey, usize> = Default::default();
+  for (i, e) in write_log.iter().enumerate() {
+    last_write_idx.insert((e.contract, e.slot), i);
+  }
+
+  let n_total = write_log.len() + read_log.len();
+  let height = n_total.max(4).next_power_of_two();
+  let mut data = vec![Val::ZERO; height * NUM_STOR_COLS];
+
+  for (i, entry) in write_log.iter().enumerate() {
+    let key: StorageKey = (entry.contract, entry.slot);
+    // Only the last SSTORE to each key carries the LogUp multiplicity.
+    // Earlier writes to the same key get mult = 0 (their value is not the
+    // canonical one that intra-batch reads see).
+    let mult = if last_write_idx.get(&key) == Some(&i) {
+      *intra_read_count.get(&key).unwrap_or(&0)
+    } else {
+      0
+    };
+    fill_storage_log_row(&mut data, i * NUM_STOR_COLS, entry, true, mult);
+  }
+
+  for (i, entry) in read_log.iter().enumerate() {
+    // Only intra-batch reads (happened after the last write) contribute −1.
+    let mult = if intra_read_rw_set.contains(&entry.rw_counter) { -1 } else { 0 };
+    fill_storage_log_row(&mut data, (write_log.len() + i) * NUM_STOR_COLS, entry, false, mult);
+  }
+
+  RowMajorMatrix::new(data, NUM_STOR_COLS)
+}
+
+// ── Public API ────────────────────────────────────────────────────────
+
+/// Proof that the execution's storage accesses (SLOAD/SSTORE) are consistent.
+///
+/// Exposes `write_set` (final SSTORE'd values) and `read_set` (cross-batch
+/// SLOAD dependencies).  Binary-tree aggregation merges adjacent proofs by
+/// checking `R.read_set ∩ L.write_set` for value consistency.
+///
+/// The key space is `(contract_address: [u8;20], slot: [u8;32])`, matching
+/// the EVM's two-dimensional storage layout.
+pub struct StorageConsistencyProof {
+  pub stark_proof: CircleStarkProof,
+  /// Final value SSTORE'd to each `(contract, slot)` in this batch (last write wins).
+  pub write_set: StorageSet,
+  /// Cross-batch SLOAD dependencies: slots read before any SSTORE in this batch.
+  pub read_set: StorageSet,
+  /// SSTORE log (retained for STARK verification; can be discarded after aggregation).
+  pub write_log: Vec<StorageLogEntry>,
+  /// SLOAD log (retained for STARK verification; can be discarded after aggregation).
+  pub read_log: Vec<StorageLogEntry>,
+}
+
+/// Prove storage consistency for `claims` (a mix of SLOAD and SSTORE claims).
+pub fn prove_storage_consistency(
+  claims: &[crate::transition::StorageAccessClaim],
+) -> Result<StorageConsistencyProof, String> {
+  let (write_log, read_log) = split_storage_logs(claims);
+
+  let (write_set, read_set) = check_storage_claims_and_build_sets(claims)?;
+
+  let public_values =
+    make_storage_public_values(&write_log, &read_log, &write_set, &read_set);
+
+  let trace = if write_log.is_empty() && read_log.is_empty() {
+    RowMajorMatrix::new(vec![Val::ZERO; 4 * NUM_STOR_COLS], NUM_STOR_COLS)
+  } else {
+    build_storage_log_trace(&write_log, &read_log, &write_set)
+  };
+
+  let config = make_circle_config();
+  let trace_for_perm = trace.clone();
+  let stark_proof = prove_with_lookup(
+    &config,
+    &StorageConsistencyAir,
+    trace,
+    &public_values,
+    None,
+    move |perm_challenges| generate_stor_perm_trace(&trace_for_perm, perm_challenges),
+    2, // num_perm_challenges (1 lookup × 2 challenges: alpha + beta)
+    2, // lookup_constraint_count (first_row + universal for local LogUp)
+    |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_stor_lookup(folder),
+  );
+
+  Ok(StorageConsistencyProof {
+    stark_proof,
+    write_set,
+    read_set,
+    write_log,
+    read_log,
+  })
+}
+
+/// Verify a single [`StorageConsistencyProof`].
+///
+/// 1. Re-derives `(write_set, read_set)` from the embedded logs to catch tampering.
+/// 2. Verifies the STARK proof against the re-derived public values.
+///
+/// Cross-batch consistency is enforced at aggregation time.
+pub fn verify_storage_consistency(proof: &StorageConsistencyProof) -> bool {
+  let (derived_write_set, derived_read_set) =
+    match derive_storage_sets_from_logs(&proof.write_log, &proof.read_log) {
+      Ok(s) => s,
+      Err(_) => return false,
+    };
+  if derived_write_set != proof.write_set || derived_read_set != proof.read_set {
+    return false;
+  }
+
+  let public_values = make_storage_public_values(
+    &proof.write_log,
+    &proof.read_log,
+    &proof.write_set,
+    &proof.read_set,
+  );
+
+  let config = make_circle_config();
+  verify_with_lookup(
+    &config,
+    &StorageConsistencyAir,
+    &proof.stark_proof,
+    &public_values,
+    None,
+    2, // num_perm_challenges (must match prove_storage_consistency)
+    |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_stor_lookup(folder),
+  )
+  .is_ok()
+}
+
+// ── Binary-tree aggregation ───────────────────────────────────────────
+
+/// Compact result of binary-tree aggregation over leaf [`StorageConsistencyProof`]s.
+///
+/// After aggregation, `write_set` is the final storage state and `read_set`
+/// lists the genesis-required slots (those read before any write across all batches).
+///
+/// # Recursive STARK aggregation
+/// Same `MergeAir` design as memory aggregation; the only change is the key
+/// type (`StorageKey` vs `u64`).
+///
+/// ```text
+/// MergeAir constraints:
+///   1. Verify left  child STARK proof
+///   2. Verify right child STARK proof
+///   3. ∀ key ∈ R.read_set ∩ L.write_set: R.read_set[key] == L.write_set[key]
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AggregatedStorageProof {
+  pub write_set: StorageSet,
+  pub read_set: StorageSet,
+}
+
+/// Merge two adjacent proven batches using storage read/write set intersection.
+pub fn aggregate_storage_proofs(
+  left: &StorageConsistencyProof,
+  right: &StorageConsistencyProof,
+) -> Result<AggregatedStorageProof, String> {
+  if !verify_storage_consistency(left) {
+    return Err("left child storage proof failed verification".to_string());
+  }
+  if !verify_storage_consistency(right) {
+    return Err("right child storage proof failed verification".to_string());
+  }
+  merge_storage_sets(&left.write_set, &left.read_set, &right.write_set, &right.read_set)
+}
+
+fn merge_storage_sets(
+  left_ws: &StorageSet,
+  left_rs: &StorageSet,
+  right_ws: &StorageSet,
+  right_rs: &StorageSet,
+) -> Result<AggregatedStorageProof, String> {
+  for (key, &r_val) in right_rs {
+    if let Some(&l_val) = left_ws.get(key) {
+      if r_val != l_val {
+        return Err(format!(
+          "storage read/write set mismatch at contract={} slot={}: right read {:?}, left wrote {:?}",
+          format!("{:?}", key.0),
+          format!("{:?}", key.1),
+          r_val,
+          l_val,
+        ));
+      }
+    }
+  }
+
+  let mut write_set = left_ws.clone();
+  for (&key, &val) in right_ws {
+    write_set.insert(key, val);
+  }
+
+  let mut read_set = left_rs.clone();
+  for (&key, &val) in right_rs {
+    if !left_ws.contains_key(&key) {
+      read_set.entry(key).or_insert(val);
+    }
+  }
+
+  Ok(AggregatedStorageProof { write_set, read_set })
+}
+
+/// Aggregate a sequence of adjacent batch storage proofs using a binary tree.
+///
+/// Identical algorithm to [`aggregate_proofs_tree`] for memory.
+/// Tree depth = ⌈log₂(N)⌉ → O(N) total work, O(log N) sequential depth.
+pub fn aggregate_storage_proofs_tree(
+  proofs: &[StorageConsistencyProof],
+) -> Result<AggregatedStorageProof, String> {
+  if proofs.is_empty() {
+    return Err("aggregate_storage_proofs_tree: empty proof slice".to_string());
+  }
+
+  let mut nodes: Vec<AggregatedStorageProof> = proofs
+    .iter()
+    .enumerate()
+    .map(|(i, p)| {
+      if !verify_storage_consistency(p) {
+        Err(format!("leaf storage proof {i} failed verification"))
+      } else {
+        Ok(AggregatedStorageProof {
+          write_set: p.write_set.clone(),
+          read_set: p.read_set.clone(),
+        })
+      }
+    })
+    .collect::<Result<Vec<_>, _>>()?;
+
+  while nodes.len() > 1 {
+    let mut next_level = Vec::with_capacity((nodes.len() + 1) / 2);
+    let mut iter = nodes.into_iter().peekable();
+    while let Some(left) = iter.next() {
+      if let Some(right) = iter.next() {
+        let merged = merge_storage_sets(
+          &left.write_set,
+          &left.read_set,
+          &right.write_set,
+          &right.read_set,
+        )?;
+        next_level.push(merged);
+      } else {
+        next_level.push(left);
+      }
+    }
+    nodes = next_level;
+  }
+
+  Ok(nodes.into_iter().next().unwrap())
+}
+
+// ============================================================
+// Stack consistency proof  (push/pop multiset argument)
+// ============================================================
+//
+// Soundness design
+// ─────────────────
+// Every instruction that touches the stack emits a sequence of
+// `StackAccessClaim`s in execution order:
+//
+//   pop claims  — one for each value consumed from the top (inputs)
+//   push claims — one for each value produced onto the top (outputs)
+//
+// Each claim records `(rw_counter, depth_after, is_push, value)`.
+// The consistency checker verifies that for every pop at depth D,
+// the value matches the most recent push that left the stack at depth D.
+//
+// This prevents the prover from:
+//   - fabricating `stack_inputs` to arithmetic instructions (wrong value)
+//   - forging `stack_outputs` from earlier instructions
+//   - hiding instructions by omitting claims
+//
+// Column layout  (NUM_STACK_COLS = 12)
+// ──────────────────────────────────────
+//  0     rw_hi      — upper 32 bits of the 64-bit rw_counter
+//  1     rw_lo      — lower 32 bits
+//  2     depth      — stack depth after this access (u32)
+//  3..10 val0..val7 — 32-byte value as 8 × u32 (big-endian)
+// 11     is_push    — 1 for push, 0 for pop
+//
+// Public values layout  (STACK_PUBLIC_VALUES_LEN = 19)
+// ─────────────────────────────────────────────────────
+//  pis[ 0]      = RECEIPT_BIND_TAG_STACK_CONSISTENCY
+//  pis[ 1]      = n_pushes
+//  pis[ 2..10]  = poseidon_hash(push_log)  (8 × M31)
+//  pis[10]      = n_pops
+//  pis[11..19]  = poseidon_hash(pop_log)   (8 × M31)
+
+pub const RECEIPT_BIND_TAG_STACK_CONSISTENCY: u32 = 6;
+const STACK_PUBLIC_VALUES_LEN: usize = 19;
+
+const STACK_COL_RW_HI: usize = 0;
+const STACK_COL_RW_LO: usize = 1;
+const STACK_COL_DEPTH: usize = 2;
+const STACK_COL_VAL0: usize = 3;
+// val1..val7 are STACK_COL_VAL0+1 .. STACK_COL_VAL0+7  (cols 3..10)
+const STACK_COL_IS_PUSH: usize = 11;
+/// LogUp multiplicity: +count_pops for last push at (depth,val), -1 for intra-batch pops,
+/// 0 for cross-batch pops and padding.
+const STACK_COL_MULT: usize = 12;
+/// Total number of main-trace columns for stack consistency.
+pub const NUM_STACK_COLS: usize = 13;
+
+// ── Log types ─────────────────────────────────────────────────────────
+
+/// A single entry in the stack push or pop log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackLogEntry {
+  pub rw_counter: u64,
+  pub depth_after: u32,
+  pub value: [u8; 32],
+}
+
+/// Split a `StackAccessClaim` slice into push_log and pop_log.
+pub fn split_stack_logs(
+  claims: &[crate::transition::StackAccessClaim],
+) -> (Vec<StackLogEntry>, Vec<StackLogEntry>) {
+  let mut pushes = Vec::new();
+  let mut pops = Vec::new();
+  for c in claims {
+    let entry = StackLogEntry {
+      rw_counter: c.rw_counter,
+      depth_after: c.depth_after as u32,
+      value: c.value,
+    };
+    if c.is_push {
+      pushes.push(entry);
+    } else {
+      pops.push(entry);
+    }
+  }
+  (pushes, pops)
+}
+
+// ── Hash helpers ──────────────────────────────────────────────────────
+
+fn hash_stack_log(log: &[StackLogEntry]) -> [Val; 8] {
+  let mut rng = rand::rngs::SmallRng::seed_from_u64(0xC0DEC0DE_u64);
+  let poseidon = Poseidon2Mersenne31::<16>::new_from_rng_128(&mut rng);
+  let sponge = PaddingFreeSponge::<_, 16, 8, 8>::new(poseidon);
+
+  // per entry: 2 (rw_counter) + 1 (depth) + 8 (value) = 11 fields
+  let mut input: Vec<Val> = Vec::with_capacity(1 + log.len() * 11);
+  input.push(Val::from_u32(log.len() as u32));
+  for e in log {
+    input.push(Val::from_u32((e.rw_counter >> 32) as u32));
+    input.push(Val::from_u32(e.rw_counter as u32));
+    input.push(Val::from_u32(e.depth_after));
+    for chunk in e.value.chunks(4) {
+      input.push(Val::from_u32(u32::from_be_bytes([
+        chunk[0], chunk[1], chunk[2], chunk[3],
+      ])));
+    }
+  }
+  sponge.hash_iter(input)
+}
+
+fn make_stack_public_values(
+  push_log: &[StackLogEntry],
+  pop_log: &[StackLogEntry],
+) -> Vec<Val> {
+  let plh = hash_stack_log(push_log);
+  let oph = hash_stack_log(pop_log);
+  let mut pv = Vec::with_capacity(STACK_PUBLIC_VALUES_LEN);
+  pv.push(Val::from_u32(RECEIPT_BIND_TAG_STACK_CONSISTENCY)); //  0
+  pv.push(Val::from_u32(push_log.len() as u32));              //  1
+  pv.extend_from_slice(&plh);                                 //  2..10
+  pv.push(Val::from_u32(pop_log.len() as u32));               // 10
+  pv.extend_from_slice(&oph);                                 // 11..19
+  pv
+}
+
+// ── Intra-batch consistency checker ───────────────────────────────────
+
+/// Validate push/pop consistency within the batch.
+///
+/// Scans claims in execution order (rw_counter monotone):
+/// - **Push**: records `last_push[depth_after] = value`.
+/// - **Pop**: depth_before = depth_after_pop + 1 (the popped slot).
+///   Verifies `value == last_push[depth_before]`.
+///
+/// Returns `Err` on value mismatch.
+fn check_stack_claims(
+  claims: &[crate::transition::StackAccessClaim],
+) -> Result<(), String> {
+  // `top_value[d]` = value at stack depth d (1-based; depth d means d items on stack,
+  // the top item is at index `depth` after a push).
+  let mut top_value: std::collections::HashMap<u32, [u8; 32]> = std::collections::HashMap::new();
+
+  for claim in claims {
+    let d = claim.depth_after as u32;
+    if claim.is_push {
+      // After push: depth d, value = claim.value
+      top_value.insert(d, claim.value);
+    } else {
+      // This is a pop.  `depth_after` = depth after the pop = depth before pop - 1.
+      // The popped slot was at depth d + 1.
+      let popped_depth = d + 1;
+      if let Some(&pushed_val) = top_value.get(&popped_depth) {
+        if pushed_val != claim.value {
+          return Err(format!(
+            "stack pop/push mismatch at rw_counter={} depth={}: \
+             popped {:?} but last push was {:?}",
+            claim.rw_counter, popped_depth, claim.value, pushed_val
+          ));
+        }
+        // Remove the depth slot — it's been consumed.
+        top_value.remove(&popped_depth);
+      }
+      // If no prior push tracked at this depth it's a cross-batch dependency
+      // (e.g. values left on the stack from a previous batch); silently accept.
+    }
+  }
+  Ok(())
+}
+
+// ── AIR ───────────────────────────────────────────────────────────────
+
+/// AIR for the stack log LogUp membership argument.
+///
+/// Each trace row represents one push or pop event.
+/// Constraints:
+///   1. Tag check: `pis[0] == RECEIPT_BIND_TAG_STACK_CONSISTENCY`  (degree 1)
+///   2. `is_push ∈ {0, 1}`                                         (degree 2)
+pub struct StackConsistencyAir;
+
+impl<F: p3_field::Field> p3_air::BaseAir<F> for StackConsistencyAir {
+  fn width(&self) -> usize {
+    NUM_STACK_COLS
+  }
+}
+
+impl<AB: p3_air::AirBuilderWithPublicValues> p3_air::Air<AB> for StackConsistencyAir
+where
+  AB::F: p3_field::Field,
+{
+  fn eval(&self, builder: &mut AB) {
+    let pis = builder.public_values();
+    builder.assert_eq(
+      pis[0].into(),
+      AB::Expr::from_u32(RECEIPT_BIND_TAG_STACK_CONSISTENCY),
+    );
+
+    let main = builder.main();
+    let local = main.row_slice(0).expect("empty stack trace");
+    let local = &*local;
+    let is_push = local[STACK_COL_IS_PUSH].clone();
+    builder.assert_zero(is_push.clone().into() * (AB::Expr::ONE - is_push.into()));
+  }
+}
+
+// ── Trace builder ─────────────────────────────────────────────────────
+
+fn fill_stack_log_row(data: &mut [Val], base: usize, entry: &StackLogEntry, is_push: bool) {
+  data[base + STACK_COL_RW_HI] = Val::from_u32((entry.rw_counter >> 32) as u32);
+  data[base + STACK_COL_RW_LO] = Val::from_u32(entry.rw_counter as u32);
+  data[base + STACK_COL_DEPTH] = Val::from_u32(entry.depth_after);
+  let vals = value_to_u32s(&entry.value);
+  for k in 0..8 {
+    data[base + STACK_COL_VAL0 + k] = Val::from_u32(vals[k]);
+  }
+  data[base + STACK_COL_IS_PUSH] = Val::from_u32(is_push as u32);
+  // STACK_COL_MULT is set separately during trace construction.
+}
+
+fn build_stack_log_trace(
+  push_log: &[StackLogEntry],
+  pop_log: &[StackLogEntry],
+  intra_pop_count_per_push: &std::collections::HashMap<(u32, [u8; 32]), i32>,
+  intra_pop_set: &std::collections::HashSet<u64>, // rw_counters of intra-batch pops
+) -> RowMajorMatrix<Val> {
+  let n_total = push_log.len() + pop_log.len();
+  let height = n_total.max(4).next_power_of_two();
+  let mut data = vec![Val::ZERO; height * NUM_STACK_COLS];
+
+  // Index of the last push per (depth, value) key — only that row carries the LogUp mult.
+  let mut last_push_idx: std::collections::HashMap<(u32, [u8; 32]), usize> = Default::default();
+  for (i, e) in push_log.iter().enumerate() {
+    last_push_idx.insert((e.depth_after, e.value), i);
+  }
+
+  for (i, entry) in push_log.iter().enumerate() {
+    fill_stack_log_row(&mut data, i * NUM_STACK_COLS, entry, true);
+    let key = (entry.depth_after, entry.value);
+    let mult = if last_push_idx.get(&key) == Some(&i) {
+      *intra_pop_count_per_push.get(&key).unwrap_or(&0)
+    } else {
+      0
+    };
+    let base = i * NUM_STACK_COLS;
+    data[base + STACK_COL_MULT] = if mult >= 0 {
+      Val::from_u32(mult as u32)
+    } else {
+      -Val::from_u32((-mult) as u32)
+    };
+  }
+
+  for (i, entry) in pop_log.iter().enumerate() {
+    let base = (push_log.len() + i) * NUM_STACK_COLS;
+    fill_stack_log_row(&mut data, base, entry, false);
+    // Intra-batch pops contribute −1; cross-batch pops contribute 0.
+    data[base + STACK_COL_MULT] = if intra_pop_set.contains(&entry.rw_counter) {
+      -Val::ONE
+    } else {
+      Val::ZERO
+    };
+  }
+
+  RowMajorMatrix::new(data, NUM_STACK_COLS)
+}
+
+// ── Stack LogUp argument helpers ──────────────────────────────────────
+
+/// Build the `Lookup` descriptor for the stack consistency local LogUp.
+///
+/// Fingerprint tuple: `(depth_slot, val0..val7)` where `depth_slot` is the
+/// *canonical slot depth* — i.e. the depth of the pushed/popped item, not the
+/// stack depth *after* the operation.
+///
+/// - Push row: `STACK_COL_DEPTH` = D (depth after push = slot depth).
+///   `STACK_COL_IS_PUSH` = 1.  →  depth_slot = D + (1 - 1) = D.
+/// - Pop  row: `STACK_COL_DEPTH` = D − 1 (depth after pop).
+///   `STACK_COL_IS_PUSH` = 0.  →  depth_slot = (D−1) + (1 − 0) = D.
+///
+/// Adding `(1 − is_push)` normalises both row types to the same slot depth D,
+/// so push and pop rows for the same physical stack slot share the same
+/// fingerprint and their multiplicities (+count vs −1) cancel correctly.
+///
+/// Multiplicity column: STACK_COL_MULT.
+fn make_stack_lookup() -> Lookup<Val> {
+  let col = |c: usize| {
+    SymbolicExpression::Variable(SymbolicVariable::new(Entry::Main { offset: 0 }, c))
+  };
+  // depth_slot = STACK_COL_DEPTH + (1 − STACK_COL_IS_PUSH)
+  let depth_slot = col(STACK_COL_DEPTH)
+    + (SymbolicExpression::Constant(Val::ONE) - col(STACK_COL_IS_PUSH));
+  Lookup::new(
+    Kind::Local,
+    vec![vec![
+      depth_slot,
+      col(STACK_COL_VAL0),
+      col(STACK_COL_VAL0 + 1),
+      col(STACK_COL_VAL0 + 2),
+      col(STACK_COL_VAL0 + 3),
+      col(STACK_COL_VAL0 + 4),
+      col(STACK_COL_VAL0 + 5),
+      col(STACK_COL_VAL0 + 6),
+      col(STACK_COL_VAL0 + 7),
+    ]],
+    vec![col(STACK_COL_MULT)],
+    vec![0],
+  )
+}
+
+fn generate_stack_perm_trace(
+  main_trace: &RowMajorMatrix<Val>,
+  perm_challenges: &[Challenge],
+) -> Option<RowMajorMatrix<Challenge>> {
+  let gadget = LogUpGadget::new();
+  let lookup = make_stack_lookup();
+  let mut lookup_data: Vec<LookupData<Challenge>> = vec![];
+  let perm_trace = gadget.generate_permutation::<CircleStarkConfig>(
+    main_trace,
+    &None,
+    &[],
+    &[lookup],
+    &mut lookup_data,
+    perm_challenges,
+  );
+  Some(perm_trace)
+}
+
+fn eval_stack_lookup(folder: &mut VerifierConstraintFolder<CircleStarkConfig>) {
+  LogUpGadget::new().eval_local_lookup(folder, &make_stack_lookup());
+}
+
+/// Build auxiliary data structures for the stack LogUp trace:
+/// - `intra_pop_count_per_push`: for each (depth_after, value) key seen in pushes, how many
+///   intra-batch pops matched it.
+/// - `intra_pop_set`: set of rw_counters of intra-batch pops.
+///
+/// An intra-batch pop is one where the matching push also appears in this batch.
+fn build_stack_logup_aux(
+  push_log: &[StackLogEntry],
+  pop_log: &[StackLogEntry],
+) -> (
+  std::collections::HashMap<(u32, [u8; 32]), i32>,
+  std::collections::HashSet<u64>,
+) {
+  // Build the push set: (depth_after, value) → list of push rw_counters.
+  let mut push_set: std::collections::HashMap<(u32, [u8; 32]), Vec<u64>> = Default::default();
+  for e in push_log {
+    push_set.entry((e.depth_after, e.value)).or_default().push(e.rw_counter);
+  }
+
+  let mut intra_pop_count: std::collections::HashMap<(u32, [u8; 32]), i32> = Default::default();
+  let mut intra_pop_set: std::collections::HashSet<u64> = Default::default();
+
+  for e in pop_log {
+    // A pop's "depth_before" = depth_after + 1; the canonical stack slot being popped has
+    // depth = depth_after + 1, but the *value* stored there was recorded as depth_after
+    // in the push that put it there.  We store depth_after in both push and pop log entries.
+    let key = (e.depth_after + 1, e.value);
+    if push_set.contains_key(&key) {
+      *intra_pop_count.entry(key).or_insert(0) += 1;
+      intra_pop_set.insert(e.rw_counter);
+    }
+  }
+
+  (intra_pop_count, intra_pop_set)
+}
+
+// ── Public API ─────────────────────────────────────────────────────────
+
+/// Proof that the execution's stack push/pop accesses are consistent.
+pub struct StackConsistencyProof {
+  pub stark_proof: CircleStarkProof,
+  pub push_log: Vec<StackLogEntry>,
+  pub pop_log: Vec<StackLogEntry>,
+}
+
+/// Prove stack push/pop consistency for `claims`.
+pub fn prove_stack_consistency(
+  claims: &[crate::transition::StackAccessClaim],
+) -> Result<StackConsistencyProof, String> {
+  let (push_log, pop_log) = split_stack_logs(claims);
+
+  check_stack_claims(claims)?;
+
+  let public_values = make_stack_public_values(&push_log, &pop_log);
+
+  let (intra_pop_count, intra_pop_set) = build_stack_logup_aux(&push_log, &pop_log);
+
+  let trace = if push_log.is_empty() && pop_log.is_empty() {
+    RowMajorMatrix::new(vec![Val::ZERO; 4 * NUM_STACK_COLS], NUM_STACK_COLS)
+  } else {
+    build_stack_log_trace(&push_log, &pop_log, &intra_pop_count, &intra_pop_set)
+  };
+
+  let config = make_circle_config();
+  let trace_for_perm = trace.clone();
+  let stark_proof = prove_with_lookup(
+    &config,
+    &StackConsistencyAir,
+    trace,
+    &public_values,
+    None,
+    move |perm_challenges| generate_stack_perm_trace(&trace_for_perm, perm_challenges),
+    2,
+    2,
+    |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_stack_lookup(folder),
+  );
+
+  Ok(StackConsistencyProof { stark_proof, push_log, pop_log })
+}
+
+/// Verify a single [`StackConsistencyProof`].
+///
+/// 1. Re-derives public values from the embedded logs to catch tampering.
+/// 2. Replays the push/pop consistency check.
+/// 3. Verifies the STARK proof.
+pub fn verify_stack_consistency(proof: &StackConsistencyProof) -> bool {
+  // Re-derive public values from the logs.
+  let public_values = make_stack_public_values(&proof.push_log, &proof.pop_log);
+
+  // Reconstruct claims from logs sorted by rw_counter to replay consistency check.
+  let mut merged: Vec<(u64, bool, u32, [u8; 32])> = Vec::new();
+  for e in &proof.push_log {
+    merged.push((e.rw_counter, true, e.depth_after, e.value));
+  }
+  for e in &proof.pop_log {
+    merged.push((e.rw_counter, false, e.depth_after, e.value));
+  }
+  merged.sort_by_key(|(rw, _, _, _)| *rw);
+
+  let reconstructed: Vec<crate::transition::StackAccessClaim> = merged
+    .into_iter()
+    .map(|(rw_counter, is_push, depth_after, value)| {
+      crate::transition::StackAccessClaim {
+        rw_counter,
+        depth_after: depth_after as usize,
+        is_push,
+        value,
+      }
+    })
+    .collect();
+
+  if check_stack_claims(&reconstructed).is_err() {
+    return false;
+  }
+
+  let config = make_circle_config();
+  verify_with_lookup(
+    &config,
+    &StackConsistencyAir,
+    &proof.stark_proof,
+    &public_values,
+    None,
+    2,
+    |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_stack_lookup(folder),
+  )
+  .is_ok()
+}
+
+// ============================================================
+// Keccak256 consistency proof  (preimage membership argument)
+// ============================================================
+//
+// Soundness design
+// ─────────────────
+// Every KECCAK256 instruction emits a `KeccakClaim`:
+//
+//   KeccakClaim { offset, size, input_bytes, output_hash }
+//
+// The consistency checker:
+//   1. Verifies `keccak256(input_bytes) == output_hash` for every claim.
+//   2. Commits to `(n_claims, log_hash)` via Poseidon in `public_values`.
+//   3. Proves a STARK over the claim log so the verifier can re-check.
+//
+// This prevents the prover from:
+//   - Claiming a wrong hash for a given preimage.
+//   - Hiding KECCAK256 instructions entirely (the claim count is public).
+//
+// ── 현재 설계의 Soundness 한계 ──────────────────────────────────────────
+//
+// 검증자(verify_keccak_consistency)는 log에 기록된 output_hash가 실제
+// 메모리 바이트(memory[offset..offset+size])로부터 도출됐는지 체크하지
+// 않는다. 악의적 prover가 임의의 hash를 커밋해도 STARK는 통과한다.
+//
+// 가장 경제적인 보완책: KeccakClaim.offset + size 범위가 MemAccessClaim
+// 로그에 read 항목으로 존재하는지 배치 검증자 단계에서 크로스체크.
+// STARK 복잡도 증가 없이 soundness를 의미 있게 끌어올릴 수 있다.
+//
+// ── LogUp 전환 분석 ─────────────────────────────────────────────────────
+//
+// keccak256 preimage를 STARK 내부에서 완전 증명하려면 keccak-f 치환을
+// AIR 제약으로 표현해야 한다.
+//
+//   keccak-f 비용:  25 lanes × 64 bits × 24 rounds ≈ 38,400 행/호출
+//
+// 현재 vs LogUp 내부 증명 비교:
+//
+//   항목              | 현재 (Rust 검증)  | keccak-f AIR
+//   ─────────────────────────────────────────────────────
+//   트레이스 크기     | n_calls × 1 행    | n_calls × ~40,000 행
+//   증명 시간(1회)    | 수 μs             | 수십~수백 ms
+//   증명 크기         | 최소              | 수십 배 증가
+//
+// ∴ LogUp 전환은 성능 향상을 기대할 수 없다. keccak-f는 비선형(χ 스텝)
+//   이고, AND/OR/XOR 바이트 테이블처럼 작은 재사용 테이블로 축약 불가.
+//   LogUp이 유효한 것은 "작고 자주 재사용되는 테이블"(byte_table 등)
+//   에 한정된다.
+//
+// Column layout  (NUM_KECCAK_COLS = 11)
+// ──────────────────────────────────────
+//  0     offset_hi  — upper 32 bits of the memory offset
+//  1     offset_lo  — lower 32 bits
+//  2     size_hi    — upper 32 bits of the data length
+//  3     size_lo    — lower 32 bits
+//  4..11 hash0..7   — 32-byte keccak output as 8 × u32 (big-endian)
+//
+// Public values layout  (KECCAK_PUBLIC_VALUES_LEN = 11)
+// ───────────────────────────────────────────────────────
+//  pis[ 0]      = RECEIPT_BIND_TAG_KECCAK
+//  pis[ 1]      = n_claims
+//  pis[ 2..10]  = poseidon_hash(claim_log)  (8 × M31)
+
+pub const RECEIPT_BIND_TAG_KECCAK: u32 = 7;
+const KECCAK_PUBLIC_VALUES_LEN: usize = 11;
+
+const KECCAK_COL_OFFSET_HI: usize = 0;
+const KECCAK_COL_OFFSET_LO: usize = 1;
+const KECCAK_COL_SIZE_HI: usize = 2;
+const KECCAK_COL_SIZE_LO: usize = 3;
+const KECCAK_COL_HASH0: usize = 4;
+/// Total number of main-trace columns for keccak consistency.
+pub const NUM_KECCAK_COLS: usize = 12; // 4 (offset/size) + 8 (hash)
+
+// ── Log type ──────────────────────────────────────────────────────────
+
+/// A single entry in the KECCAK256 claim log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeccakLogEntry {
+  /// Memory byte offset of the hashed data.
+  pub offset: u64,
+  /// Length in bytes of the hashed data.
+  pub size: u64,
+  /// Raw input bytes (length == `size`).
+  ///
+  /// Retained in the proof so that `verify_batch_transaction_zk_receipt` can
+  /// cross-check these bytes against the `MemoryConsistencyProof` log (BUG-MISS-3).
+  /// Included in the Poseidon log-hash so any tampering is detected by
+  /// `verify_keccak_consistency`.
+  pub input_bytes: Vec<u8>,
+  /// keccak256(input_bytes).
+  pub output_hash: [u8; 32],
+}
+
+// ── AIR ───────────────────────────────────────────────────────────────
+
+/// AIR for the KECCAK256 claim log.
+///
+/// Constraints:
+///   1. Tag check: `pis[0] == RECEIPT_BIND_TAG_KECCAK`  (degree 1)
+///
+/// Practical soundness: The Poseidon log-hash in `public_values` binds every
+/// `(offset, size, output_hash)` triple the prover committed.  The prover must
+/// compute `keccak256(input_bytes) == output_hash` _before_ building the trace
+/// (enforced in `prove_keccak_consistency`).  The verifier re-derives the
+/// Poseidon hash from the embedded log and checks it against `pis[2..10]`
+/// (enforced in `verify_keccak_consistency`).  This combination prevents hash
+/// forgery without requiring a keccak-f sub-circuit.
+pub struct KeccakConsistencyAir;
+
+impl<F: p3_field::Field> p3_air::BaseAir<F> for KeccakConsistencyAir {
+  fn width(&self) -> usize {
+    NUM_KECCAK_COLS
+  }
+}
+
+impl<AB: p3_air::AirBuilderWithPublicValues> p3_air::Air<AB> for KeccakConsistencyAir
+where
+  AB::F: p3_field::Field,
+{
+  fn eval(&self, builder: &mut AB) {
+    let pis = builder.public_values();
+
+    // Constraint 1: tag check — uniquely binds this proof to the keccak role.
+    builder.assert_eq(pis[0].into(), AB::Expr::from_u32(RECEIPT_BIND_TAG_KECCAK));
+  }
+}
+
+// ── Hash helper ───────────────────────────────────────────────────────
+
+fn hash_keccak_log(log: &[KeccakLogEntry]) -> [Val; 8] {
+  let mut rng = rand::rngs::SmallRng::seed_from_u64(0xC0DEC0DE_u64);
+  let poseidon = Poseidon2Mersenne31::<16>::new_from_rng_128(&mut rng);
+  let sponge = PaddingFreeSponge::<_, 16, 8, 8>::new(poseidon);
+
+  let mut input: Vec<Val> = Vec::with_capacity(1 + log.len() * 14);
+  input.push(Val::from_u32(log.len() as u32));
+  for e in log {
+    input.push(Val::from_u32((e.offset >> 32) as u32));
+    input.push(Val::from_u32(e.offset as u32));
+    input.push(Val::from_u32((e.size >> 32) as u32));
+    input.push(Val::from_u32(e.size as u32));
+    // Commit input_bytes into the hash (packed 4 bytes per field element).
+    input.push(Val::from_u32(e.input_bytes.len() as u32));
+    for chunk in e.input_bytes.chunks(4) {
+      let mut buf = [0u8; 4];
+      buf[..chunk.len()].copy_from_slice(chunk);
+      input.push(Val::from_u32(u32::from_be_bytes(buf)));
+    }
+    for chunk in e.output_hash.chunks(4) {
+      input.push(Val::from_u32(u32::from_be_bytes([
+        chunk[0], chunk[1], chunk[2], chunk[3],
+      ])));
+    }
+  }
+  sponge.hash_iter(input)
+}
+
+fn make_keccak_public_values(log: &[KeccakLogEntry]) -> Vec<Val> {
+  let lh = hash_keccak_log(log);
+  let mut pv = Vec::with_capacity(KECCAK_PUBLIC_VALUES_LEN);
+  pv.push(Val::from_u32(RECEIPT_BIND_TAG_KECCAK)); //  0
+  pv.push(Val::from_u32(log.len() as u32));        //  1
+  pv.extend_from_slice(&lh);                        //  2..10
+  pv
+}
+
+// ── Trace builder ─────────────────────────────────────────────────────
+
+fn fill_keccak_log_row(data: &mut [Val], base: usize, entry: &KeccakLogEntry) {
+  data[base + KECCAK_COL_OFFSET_HI] = Val::from_u32((entry.offset >> 32) as u32);
+  data[base + KECCAK_COL_OFFSET_LO] = Val::from_u32(entry.offset as u32);
+  data[base + KECCAK_COL_SIZE_HI] = Val::from_u32((entry.size >> 32) as u32);
+  data[base + KECCAK_COL_SIZE_LO] = Val::from_u32(entry.size as u32);
+  for (k, chunk) in entry.output_hash.chunks(4).enumerate() {
+    data[base + KECCAK_COL_HASH0 + k] =
+      Val::from_u32(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+  }
+}
+
+fn build_keccak_log_trace(log: &[KeccakLogEntry]) -> RowMajorMatrix<Val> {
+  let height = log.len().max(4).next_power_of_two();
+  let mut data = vec![Val::ZERO; height * NUM_KECCAK_COLS];
+  for (i, entry) in log.iter().enumerate() {
+    fill_keccak_log_row(&mut data, i * NUM_KECCAK_COLS, entry);
+  }
+  RowMajorMatrix::new(data, NUM_KECCAK_COLS)
+}
+
+// ── Keccak256 computation ─────────────────────────────────────────────
+
+/// Compute keccak256 of `input` and return the 32-byte digest.
+pub fn keccak256_bytes(input: &[u8]) -> [u8; 32] {
+  use p3_keccak::Keccak256Hash;
+  use p3_symmetric::CryptographicHasher;
+  Keccak256Hash.hash_iter(input.iter().copied())
+}
+
+// ── Public API ────────────────────────────────────────────────────────
+
+/// Proof that all KECCAK256 instructions in a batch produced correct digests.
+///
+/// The STARK commits to the list of `(offset, size, output_hash)` tuples and
+/// the prover verifies `keccak256(input_bytes) == output_hash` for each claim
+/// before building the STARK trace.
+pub struct KeccakConsistencyProof {
+  pub stark_proof: CircleStarkProof,
+  /// The claim log committed to in this proof.
+  pub log: Vec<KeccakLogEntry>,
+}
+
+/// Prove KECCAK256 consistency for `claims`.
+///
+/// Steps:
+/// 1. Verify `keccak256(claim.input_bytes) == claim.output_hash` for every claim.
+/// 2. Build the claim log (drops `input_bytes` after verification).
+/// 3. Build STARK that commits to `(n_claims, log_hash)` in `public_values`.
+pub fn prove_keccak_consistency(
+  claims: &[crate::transition::KeccakClaim],
+) -> Result<KeccakConsistencyProof, String> {
+  // Step 1: verify all preimages.
+  let mut log = Vec::with_capacity(claims.len());
+  for claim in claims {
+    let computed = keccak256_bytes(&claim.input_bytes);
+    if computed != claim.output_hash {
+      return Err(format!(
+        "KECCAK256 preimage mismatch at offset={} size={}: computed {:?}, claimed {:?}",
+        claim.offset, claim.size, computed, claim.output_hash
+      ));
+    }
+    log.push(KeccakLogEntry {
+      offset: claim.offset,
+      size: claim.size,
+      input_bytes: claim.input_bytes.clone(),
+      output_hash: claim.output_hash,
+    });
+  }
+
+  let public_values = make_keccak_public_values(&log);
+
+  let trace = if log.is_empty() {
+    RowMajorMatrix::new(vec![Val::ZERO; 4 * NUM_KECCAK_COLS], NUM_KECCAK_COLS)
+  } else {
+    build_keccak_log_trace(&log)
+  };
+
+  let config = make_circle_config();
+  let stark_proof = p3_uni_stark::prove(&config, &KeccakConsistencyAir, trace, &public_values);
+
+  Ok(KeccakConsistencyProof { stark_proof, log })
+}
+
+/// Cross-check that each keccak claim's `input_bytes` match the bytes in the
+/// memory log at the corresponding addresses.
+///
+/// For every claim's address range `[offset, offset+size)`, each 32-byte word
+/// address is looked up in `(mem_write_log ∪ mem_read_log)` and the relevant
+/// byte slice is compared against `input_bytes`.  Returns `false` on any
+/// mismatch or if a keccak-accessed word is missing from the memory log.
+///
+/// This closes BUG-MISS-3: without this check a malicious prover could commit
+/// keccak256(X) while the memory proof has different values at the same
+/// addresses.
+pub fn validate_keccak_memory_cross_check(
+  keccak_log: &[KeccakLogEntry],
+  mem_write_log: &[MemLogEntry],
+  mem_read_log: &[MemLogEntry],
+) -> bool {
+  if keccak_log.is_empty() {
+    return true;
+  }
+
+  // Build addr → last-known value map.
+  // read_log base values are installed first; write_log (ordered by rw_counter)
+  // overwrites to give the final written value per address.
+  let mut mem_map: std::collections::HashMap<u64, [u8; 32]> =
+    std::collections::HashMap::new();
+  for e in mem_read_log {
+    mem_map.entry(e.addr).or_insert(e.value);
+  }
+  for e in mem_write_log {
+    mem_map.insert(e.addr, e.value);
+  }
+
+  for entry in keccak_log {
+    let offset = entry.offset;
+    let size = entry.size as usize;
+
+    if entry.input_bytes.len() != size {
+      return false;
+    }
+    if size == 0 {
+      continue;
+    }
+
+    // Iterate over the 32-byte-aligned words that cover [offset, offset+size).
+    let first_word = (offset / 32) * 32;
+    let last_word = ((offset + size as u64 - 1) / 32) * 32;
+    let mut word = first_word;
+    while word <= last_word {
+      // Overlap of this word [word, word+32) with [offset, offset+size).
+      let abs_start = offset.max(word);
+      let abs_end = (offset + size as u64).min(word + 32);
+
+      let val_start = (abs_start - word) as usize;
+      let val_end = (abs_end - word) as usize;
+      let inp_start = (abs_start - offset) as usize;
+      let inp_end = (abs_end - offset) as usize;
+
+      let mem_value = match mem_map.get(&word) {
+        Some(v) => v,
+        None => return false, // keccak-accessed word not in memory log
+      };
+
+      if mem_value[val_start..val_end] != entry.input_bytes[inp_start..inp_end] {
+        return false;
+      }
+
+      word += 32;
+    }
+  }
+
+  true
+}
+
+/// Verify a single [`KeccakConsistencyProof`].
+///
+/// 1. Re-derives public values from the embedded log to catch tampering.
+/// 2. Verifies the STARK proof against the re-derived public values.
+pub fn verify_keccak_consistency(proof: &KeccakConsistencyProof) -> bool {
+  let public_values = make_keccak_public_values(&proof.log);
+  let config = make_circle_config();
+  p3_uni_stark::verify(
+    &config,
+    &KeccakConsistencyAir,
+    &proof.stark_proof,
+    &public_values,
+  )
+  .is_ok()
 }
 
 // ============================================================

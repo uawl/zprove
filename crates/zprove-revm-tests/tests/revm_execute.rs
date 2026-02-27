@@ -135,6 +135,40 @@ fn executes_memory_mstore_mload_with_revm_trace() {
 }
 
 #[test]
+fn proves_memory_mstore_mload_consistency() {
+  // PUSH1 0x2A, PUSH1 0x00, MSTORE, PUSH1 0x00, MLOAD, STOP
+  let bytecode = Bytes::from(vec![
+    opcode::PUSH1,
+    0x2A,
+    opcode::PUSH1,
+    0x00,
+    opcode::MSTORE,
+    opcode::PUSH1,
+    0x00,
+    opcode::MLOAD,
+    opcode::STOP,
+  ]);
+
+  let proof = execute_bytecode_and_prove(bytecode, Bytes::default(), U256::ZERO)
+    .expect("memory prove should succeed");
+
+  let mstore_step =
+    find_step_by_opcode(&proof.steps, opcode::MSTORE).expect("MSTORE step");
+  // MSTORE write claim: addr=0, value = 0x2A padded to 32 bytes
+  assert_eq!(mstore_step.memory_claims.len(), 1);
+  assert!(mstore_step.memory_claims[0].is_write);
+  assert_eq!(mstore_step.memory_claims[0].value[31], 0x2A);
+
+  let mload_step = find_step_by_opcode(&proof.steps, opcode::MLOAD).expect("MLOAD step");
+  // MLOAD read claim: addr=0, value should be what was stored
+  assert_eq!(mload_step.memory_claims.len(), 1);
+  assert!(!mload_step.memory_claims[0].is_write);
+  assert_eq!(mload_step.memory_claims[0].value[31], 0x2A);
+  // MLOAD output matches the stored value
+  assert_eq!(mload_step.stack_outputs[0][31], 0x2A);
+}
+
+#[test]
 fn executes_memory_mstore8_with_revm_trace() {
   let bytecode = Bytes::from(vec![
     opcode::PUSH1,
@@ -160,6 +194,57 @@ fn executes_memory_mstore8_with_revm_trace() {
     find_step_by_opcode(&trace.steps, opcode::MLOAD).expect("MLOAD step should exist");
   assert_eq!(mload_step.stack_outputs.len(), 1);
   assert_eq!(mload_step.stack_outputs[0][0], 0xAB);
+}
+
+#[test]
+fn proves_memory_mstore8_mload_consistency() {
+  // PUSH1 0xAB, PUSH1 0x00, MSTORE8, PUSH1 0x00, MLOAD, STOP
+  let bytecode = Bytes::from(vec![
+    opcode::PUSH1,
+    0xAB,
+    opcode::PUSH1,
+    0x00,
+    opcode::MSTORE8,
+    opcode::PUSH1,
+    0x00,
+    opcode::MLOAD,
+    opcode::STOP,
+  ]);
+
+  let proof = execute_bytecode_and_prove(bytecode, Bytes::default(), U256::ZERO)
+    .expect("mstore8 memory prove should succeed");
+
+  let mstore8_step = find_step_by_opcode(&proof.steps, opcode::MSTORE8).expect("MSTORE8 step");
+  assert_eq!(mstore8_step.memory_claims.len(), 1);
+  assert!(mstore8_step.memory_claims[0].is_write);
+  // byte 0xAB written to offset 0, so word byte 0 = 0xAB
+  assert_eq!(mstore8_step.memory_claims[0].value[0], 0xAB);
+
+  let mload_step = find_step_by_opcode(&proof.steps, opcode::MLOAD).expect("MLOAD step");
+  assert_eq!(mload_step.stack_outputs[0][0], 0xAB);
+}
+
+#[test]
+fn proves_memory_mixed_arithmetic_and_memory() {
+  // ADD result, store it, load it back:
+  // PUSH1 3, PUSH1 4, ADD, PUSH1 0x00, MSTORE, PUSH1 0x00, MLOAD, STOP
+  let bytecode = Bytes::from(vec![
+    opcode::PUSH1, 3,
+    opcode::PUSH1, 4,
+    opcode::ADD,
+    opcode::PUSH1, 0x00,
+    opcode::MSTORE,
+    opcode::PUSH1, 0x00,
+    opcode::MLOAD,
+    opcode::STOP,
+  ]);
+
+  let proof = execute_bytecode_and_prove(bytecode, Bytes::default(), U256::ZERO)
+    .expect("mixed arithmetic+memory prove should succeed");
+
+  let mload_step = find_step_by_opcode(&proof.steps, opcode::MLOAD).expect("MLOAD step");
+  // ADD result 7 should be stored and reloaded
+  assert_eq!(mload_step.stack_outputs[0][31], 7);
 }
 
 #[test]

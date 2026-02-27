@@ -1,9 +1,12 @@
 use crate::transition::{
-  InstructionTransitionProof, InstructionTransitionStatement, MemAccessClaim, TransactionProof,
-  VmState, opcode_input_count, opcode_output_count, prove_batch_transaction_zk_receipt,
-  prove_instruction, prove_instruction_zk_receipts_parallel, verify_batch_transaction_zk_receipt,
+  BlockTxContext, CallContextClaim, ExternalStateClaim, InstructionTransitionProof,
+  InstructionTransitionStatement, KeccakClaim, MemAccessClaim, ReturnDataClaim, StackAccessClaim,
+  StorageAccessClaim, SubCallClaim, TransactionProof, VmState, opcode_input_count,
+  opcode_output_count, prove_batch_transaction_zk_receipt, prove_instruction,
+  prove_instruction_zk_receipts_parallel, verify_batch_transaction_zk_receipt,
   verify_instruction_zk_receipt, verify_proof, verify_proof_with_rows,
 };
+use crate::zk_proof::{prove_memory_consistency, verify_memory_consistency};
 use revm::bytecode::opcode;
 use revm::{
   Context, InspectEvm, Inspector, MainBuilder, MainContext,
@@ -11,9 +14,11 @@ use revm::{
   database::BenchmarkDB,
   database_interface::{BENCH_CALLER, BENCH_TARGET},
   interpreter::interpreter_types::StackTr,
+  interpreter::interpreter_types::InputsTr,
   interpreter::{
     Interpreter, InterpreterTypes,
     interpreter_types::{Jumps, MemoryTr},
+    CallInputs, CallOutcome, CreateInputs, CreateOutcome,
   },
   primitives::{Address, Bytes, TxKind, U256},
   state::Bytecode,
@@ -48,10 +53,20 @@ struct ProvingInspector {
   /// Snapshot of the relevant memory word *before* the instruction executes.
   /// Used to build MemAccessClaim for MSTORE/MSTORE8 (we need value_before).
   pending_memory_before: Option<[u8; 32]>,
+  /// Contract address executing the current instruction (20 bytes, big-endian).
+  /// Captured in `step()` to be used in `step_end()` for SLOAD/SSTORE claims.
+  pending_contract: [u8; 20],
   /// Global monotone rw_counter for memory accesses.
   rw_counter: u64,
+  /// Global monotone rw_counter for stack accesses.
+  stack_rw_counter: u64,
   /// Accumulated instruction transition proofs.
   pub proofs: Vec<InstructionTransitionProof>,
+  /// Stack of sub-call info captured in `call()` / `create()` hooks,
+  /// pending consumption in the matching `call_end()` / `create_end()`.
+  pending_sub_call_stack: Vec<(u8, [u8; 20], [u8; 32])>, // (opcode, callee, value)
+  /// Sub-call claim ready to be attached to the next ITP in `step_end()`.
+  pending_sub_call: Option<SubCallClaim>,
 }
 
 /// Read a 32-byte word from a raw memory slice at a given byte offset.
@@ -113,6 +128,11 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
           }
         }
       }
+      opcode::SLOAD | opcode::SSTORE => {
+        // Capture the contract address once per instruction for storage claims.
+        let addr = interp.input.target_address();
+        self.pending_contract = addr.into_array();
+      }
       _ => {}
     }
   }
@@ -137,8 +157,26 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
       None
     };
 
-    // Build memory access claims for MLOAD / MSTORE / MSTORE8.
-    let memory_claims = self.build_memory_claims(interp, &outputs);
+    // Build memory access claims for MLOAD / MSTORE / MSTORE8 / RETURN / REVERT.
+    let (memory_claims, return_data_claim) = self.build_memory_and_return_claims(interp, &outputs);
+
+    // Build storage access claims for SLOAD / SSTORE.
+    let storage_claims = self.build_storage_claims(&outputs);
+
+    // Build call-context claim for CALLER / CALLVALUE / CALLDATALOAD / CALLDATASIZE.
+    let call_context_claim = self.build_call_context_claim(interp, &outputs);
+
+    // Build KECCAK256 claim (preimage + hash witness).
+    let keccak_claim = self.build_keccak_claim(interp, &outputs);
+
+    // Build external-state claim (BLOCKHASH, EXTCODESIZE, EXTCODEHASH).
+    let external_state_claim = self.build_external_state_claim(&outputs);
+
+    // Take the sub-call claim captured in call_end/create_end.
+    let sub_call_claim = self.pending_sub_call.take();
+
+    // Build stack access claims.
+    let stack_claims = self.build_stack_claims(&outputs);
 
     self.proofs.push(InstructionTransitionProof {
       opcode: self.pending_opcode,
@@ -147,19 +185,105 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
       stack_outputs: outputs,
       semantic_proof,
       memory_claims,
+      storage_claims,
+      stack_claims,
+      return_data_claim,
+      call_context_claim,
+      keccak_claim,
+      external_state_claim,
+      sub_call_claim,
     });
+  }
+
+  /// Called when a CALL / CALLCODE / DELEGATECALL / STATICCALL is about to execute.
+  /// Pushes metadata onto the sub-call stack so `call_end` can build the claim.
+  fn call(&mut self, _context: &mut CTX, inputs: &mut CallInputs) -> Option<CallOutcome> {
+    use revm::interpreter::CallScheme;
+    let op = match inputs.scheme {
+      CallScheme::Call => opcode::CALL,
+      CallScheme::CallCode => opcode::CALLCODE,
+      CallScheme::DelegateCall => opcode::DELEGATECALL,
+      CallScheme::StaticCall => opcode::STATICCALL,
+    };
+    let callee = inputs.target_address.into_array();
+    let value = inputs
+      .transfer_value()
+      .unwrap_or_else(|| inputs.apparent_value().unwrap_or(U256::ZERO))
+      .to_be_bytes::<32>();
+    self.pending_sub_call_stack.push((op, callee, value));
+    None
+  }
+
+  /// Called after a CALL / CALLCODE / DELEGATECALL / STATICCALL finishes.
+  /// Builds the `SubCallClaim` from the recorded info + outcome.
+  fn call_end(
+    &mut self,
+    _context: &mut CTX,
+    _inputs: &CallInputs,
+    outcome: &mut CallOutcome,
+  ) {
+    if let Some((op, callee, value)) = self.pending_sub_call_stack.pop() {
+      self.pending_sub_call = Some(SubCallClaim {
+        opcode: op,
+        callee,
+        value,
+        return_data: outcome.result.output.to_vec(),
+        success: outcome.result.is_ok(),
+        inner_proof: None,
+      });
+    }
+  }
+
+  /// Called when a CREATE / CREATE2 is about to execute.
+  fn create(
+    &mut self,
+    _context: &mut CTX,
+    inputs: &mut CreateInputs,
+  ) -> Option<CreateOutcome> {
+    use revm::interpreter::CreateScheme;
+    let op = match inputs.scheme() {
+      CreateScheme::Create => opcode::CREATE,
+      CreateScheme::Create2 { .. } => opcode::CREATE2,
+      CreateScheme::Custom { .. } => opcode::CREATE,
+    };
+    // Callee address is not known until after deployment; use zero placeholder.
+    self.pending_sub_call_stack.push((op, [0u8; 20], inputs.value().to_be_bytes::<32>()));
+    None
+  }
+
+  /// Called after a CREATE / CREATE2 finishes.
+  fn create_end(
+    &mut self,
+    _context: &mut CTX,
+    _inputs: &CreateInputs,
+    outcome: &mut CreateOutcome,
+  ) {
+    if let Some((op, _, value)) = self.pending_sub_call_stack.pop() {
+      let callee = outcome.address.map(|a| a.into_array()).unwrap_or([0u8; 20]);
+      self.pending_sub_call = Some(SubCallClaim {
+        opcode: op,
+        callee,
+        value,
+        return_data: outcome.result.output.to_vec(),
+        success: outcome.result.is_ok(),
+        inner_proof: None,
+      });
+    }
   }
 }
 
 impl ProvingInspector {
-  /// Build `MemAccessClaim`s for the current instruction.
-  /// Called from `step_end` after the instruction has executed.
-  fn build_memory_claims<INTR: InterpreterTypes>(
+  /// Build `MemAccessClaim`s and (optionally) a `ReturnDataClaim` for the current instruction.
+  ///
+  /// Returns `(memory_claims, return_data_claim)`.
+  /// `return_data_claim` is `Some` only for RETURN and REVERT.
+  fn build_memory_and_return_claims<INTR: InterpreterTypes>(
     &mut self,
     interp: &Interpreter<INTR>,
     outputs: &[[u8; 32]],
-  ) -> Vec<MemAccessClaim> {
+  ) -> (Vec<MemAccessClaim>, Option<ReturnDataClaim>) {
     let mut claims = Vec::new();
+    let mut return_data_claim: Option<ReturnDataClaim> = None;
 
     match self.pending_opcode {
       opcode::MLOAD => {
@@ -179,7 +303,6 @@ impl ProvingInspector {
               addr: aligned as u64,
               is_write: false,
               value: outputs[0],
-              write_version: 0,
             });
           }
         }
@@ -202,7 +325,6 @@ impl ProvingInspector {
               addr: aligned as u64,
               is_write: true,
               value: value_after,
-              write_version: 0,
             });
           }
         }
@@ -240,12 +362,453 @@ impl ProvingInspector {
               // Use actual memory after write (word_after may differ if memory
               // was already expanded with non-zero bytes from prior writes).
               value: actual,
-              write_version: 0,
             });
           }
         }
       }
+      op @ (opcode::RETURN | opcode::REVERT) => {
+        // inputs[0] = offset, inputs[1] = size
+        if self.pending_inputs.len() >= 2 {
+          let offset_u256 = U256::from_be_bytes::<32>(self.pending_inputs[0]);
+          let size_u256 = U256::from_be_bytes::<32>(self.pending_inputs[1]);
+          if let (Some(offset), Some(size)) = (
+            offset_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            size_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+          ) {
+            // Read the current memory snapshot.
+            let local_off = interp.memory.local_memory_offset();
+            let local_size = interp.memory.size();
+            let mem_bytes: Vec<u8> = interp
+              .memory
+              .global_slice(local_off..local_off + local_size)
+              .to_vec();
+
+            // Emit one MemAccessClaim per 32-byte aligned chunk touched.
+            if size > 0 {
+              let start_aligned = (offset / 32) * 32;
+              let end_byte = offset + size;
+              let end_aligned = ((end_byte + 31) / 32) * 32;
+              let mut addr = start_aligned;
+              while addr < end_aligned {
+                self.rw_counter += 1;
+                let word = read_word_from_mem(&mem_bytes, addr);
+                claims.push(MemAccessClaim {
+                  rw_counter: self.rw_counter,
+                  addr: addr as u64,
+                  is_write: false,
+                  value: word,
+                });
+                addr += 32;
+              }
+            }
+
+            // Capture the actual return data bytes.
+            let data = if size == 0 {
+              vec![]
+            } else {
+              let start = offset.min(mem_bytes.len());
+              let end = (offset + size).min(mem_bytes.len());
+              let mut d = mem_bytes[start..end].to_vec();
+              // Zero-pad if memory was shorter than offset+size.
+              if d.len() < size {
+                d.resize(size, 0u8);
+              }
+              d
+            };
+
+            return_data_claim = Some(ReturnDataClaim {
+              is_revert: op == opcode::REVERT,
+              offset: offset as u64,
+              size: size as u64,
+              data,
+            });
+          }
+        }
+      }
+      // RETURNDATACOPY: (dest_offset, src_offset, size) → 0
+      // Emits one write MemAccessClaim per 32-byte aligned chunk in dest range.
+      opcode::RETURNDATACOPY => {
+        if self.pending_inputs.len() >= 3 {
+          let dest_u256 = U256::from_be_bytes::<32>(self.pending_inputs[0]);
+          let size_u256 = U256::from_be_bytes::<32>(self.pending_inputs[2]);
+          if let (Some(dest), Some(size)) = (
+            dest_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            size_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+          ) {
+            if size > 0 {
+              let local_off = interp.memory.local_memory_offset();
+              let local_size = interp.memory.size();
+              let mem: Vec<u8> = interp
+                .memory
+                .global_slice(local_off..local_off + local_size)
+                .to_vec();
+              let start_aligned = (dest / 32) * 32;
+              let end_aligned = ((dest + size + 31) / 32) * 32;
+              let mut addr = start_aligned;
+              while addr < end_aligned {
+                self.rw_counter += 1;
+                claims.push(MemAccessClaim {
+                  rw_counter: self.rw_counter,
+                  addr: addr as u64,
+                  is_write: true,
+                  value: read_word_from_mem(&mem, addr),
+                });
+                addr += 32;
+              }
+            }
+          }
+        }
+      }
+
+      // EXTCODECOPY: (address, dest_offset, src_offset, size) → 0
+      // Emits one write MemAccessClaim per 32-byte aligned chunk in dest range.
+      opcode::EXTCODECOPY => {
+        if self.pending_inputs.len() >= 4 {
+          let dest_u256 = U256::from_be_bytes::<32>(self.pending_inputs[1]);
+          let size_u256 = U256::from_be_bytes::<32>(self.pending_inputs[3]);
+          if let (Some(dest), Some(size)) = (
+            dest_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            size_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+          ) {
+            if size > 0 {
+              let local_off = interp.memory.local_memory_offset();
+              let local_size = interp.memory.size();
+              let mem: Vec<u8> = interp
+                .memory
+                .global_slice(local_off..local_off + local_size)
+                .to_vec();
+              let start_aligned = (dest / 32) * 32;
+              let end_aligned = ((dest + size + 31) / 32) * 32;
+              let mut addr = start_aligned;
+              while addr < end_aligned {
+                self.rw_counter += 1;
+                claims.push(MemAccessClaim {
+                  rw_counter: self.rw_counter,
+                  addr: addr as u64,
+                  is_write: true,
+                  value: read_word_from_mem(&mem, addr),
+                });
+                addr += 32;
+              }
+            }
+          }
+        }
+      }
+
+      // MCOPY: (dest_offset, src_offset, size) → 0
+      // Emits read claims for src range then write claims for dest range.
+      opcode::MCOPY => {
+        if self.pending_inputs.len() >= 3 {
+          let dest_u256 = U256::from_be_bytes::<32>(self.pending_inputs[0]);
+          let src_u256 = U256::from_be_bytes::<32>(self.pending_inputs[1]);
+          let size_u256 = U256::from_be_bytes::<32>(self.pending_inputs[2]);
+          if let (Some(dest), Some(src), Some(size)) = (
+            dest_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            src_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            size_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+          ) {
+            if size > 0 {
+              let local_off = interp.memory.local_memory_offset();
+              let local_size = interp.memory.size();
+              let mem: Vec<u8> = interp
+                .memory
+                .global_slice(local_off..local_off + local_size)
+                .to_vec();
+              // Read claims for source range.
+              let src_start = (src / 32) * 32;
+              let src_end = ((src + size + 31) / 32) * 32;
+              let mut addr = src_start;
+              while addr < src_end {
+                self.rw_counter += 1;
+                claims.push(MemAccessClaim {
+                  rw_counter: self.rw_counter,
+                  addr: addr as u64,
+                  is_write: false,
+                  value: read_word_from_mem(&mem, addr),
+                });
+                addr += 32;
+              }
+              // Write claims for destination range (after copy).
+              let dst_start = (dest / 32) * 32;
+              let dst_end = ((dest + size + 31) / 32) * 32;
+              let mut addr = dst_start;
+              while addr < dst_end {
+                self.rw_counter += 1;
+                claims.push(MemAccessClaim {
+                  rw_counter: self.rw_counter,
+                  addr: addr as u64,
+                  is_write: true,
+                  value: read_word_from_mem(&mem, addr),
+                });
+                addr += 32;
+              }
+            }
+          }
+        }
+      }
+
       _ => {}
+    }
+
+    (claims, return_data_claim)
+  }
+
+  /// Build a `KeccakClaim` for KECCAK256.
+  ///
+  /// - `pending_inputs[0]` = memory offset (U256, big-endian).
+  /// - `pending_inputs[1]` = size in bytes (U256, big-endian).
+  /// - `outputs[0]`        = keccak256 digest pushed to the stack.
+  ///
+  /// Reads `size` bytes from memory at `offset` to record the full preimage.
+  fn build_keccak_claim<INTR: InterpreterTypes>(
+    &self,
+    interp: &Interpreter<INTR>,
+    outputs: &[[u8; 32]],
+  ) -> Option<KeccakClaim> {
+    if self.pending_opcode != opcode::KECCAK256 {
+      return None;
+    }
+    if self.pending_inputs.len() < 2 || outputs.is_empty() {
+      return None;
+    }
+
+    let offset_u256 = U256::from_be_bytes::<32>(self.pending_inputs[0]);
+    let size_u256 = U256::from_be_bytes::<32>(self.pending_inputs[1]);
+
+    // Clamp to usize (gas enforcement prevents unreasonable values in practice).
+    let offset: u64 = offset_u256.try_into().unwrap_or(u64::MAX);
+    let size: u64 = size_u256.try_into().unwrap_or(u64::MAX);
+
+    let output_hash = outputs[0];
+
+    // Read `size` bytes from memory.
+    let input_bytes = if size == 0 {
+      vec![]
+    } else {
+      let local_off = interp.memory.local_memory_offset();
+      let local_size = interp.memory.size();
+      let mem: Vec<u8> = interp
+        .memory
+        .global_slice(local_off..local_off + local_size)
+        .to_vec();
+      let start = offset as usize;
+      let end = start.saturating_add(size as usize).min(mem.len());
+      let mut bytes = vec![0u8; size as usize];
+      if start < mem.len() {
+        let copy_len = (end - start).min(size as usize);
+        bytes[..copy_len].copy_from_slice(&mem[start..start + copy_len]);
+      }
+      bytes
+    };
+
+    Some(KeccakClaim { offset, size, input_bytes, output_hash })
+  }
+
+  /// Build a `CallContextClaim` for CALLER / CALLVALUE / CALLDATALOAD / CALLDATASIZE.
+  ///
+  /// - CALLER:        `output_value` = caller address left-padded to 32 bytes.
+  /// - CALLVALUE:     `output_value` = ETH value as big-endian U256.
+  /// - CALLDATALOAD:  `calldata_offset` = `pending_inputs[0]` (clamped), `output_value` = `outputs[0]`.
+  /// - CALLDATASIZE:  `output_value` = calldata length as big-endian U256.
+  fn build_call_context_claim<INTR: InterpreterTypes>(
+    &self,
+    interp: &Interpreter<INTR>,
+    outputs: &[[u8; 32]],
+  ) -> Option<CallContextClaim> {
+    match self.pending_opcode {
+      opcode::CALLER => {
+        let addr = interp.input.caller_address();
+        let mut value = [0u8; 32];
+        value[12..32].copy_from_slice(&addr.into_array());
+        Some(CallContextClaim { opcode: opcode::CALLER, calldata_offset: 0, output_value: value })
+      }
+      opcode::CALLVALUE => {
+        let val = interp.input.call_value();
+        Some(CallContextClaim {
+          opcode: opcode::CALLVALUE,
+          calldata_offset: 0,
+          output_value: val.to_be_bytes::<32>(),
+        })
+      }
+      opcode::CALLDATALOAD => {
+        if outputs.is_empty() {
+          return None;
+        }
+        let offset = if self.pending_inputs.is_empty() {
+          0u64
+        } else {
+          U256::from_be_bytes::<32>(self.pending_inputs[0])
+            .try_into()
+            .unwrap_or(u64::MAX)
+        };
+        Some(CallContextClaim {
+          opcode: opcode::CALLDATALOAD,
+          calldata_offset: offset,
+          output_value: outputs[0],
+        })
+      }
+      opcode::CALLDATASIZE => {
+        let size = interp.input.input().len();
+        let mut value = [0u8; 32];
+        value[24..32].copy_from_slice(&(size as u64).to_be_bytes());
+        Some(CallContextClaim {
+          opcode: opcode::CALLDATASIZE,
+          calldata_offset: 0,
+          output_value: value,
+        })
+      }
+      opcode::PC => {
+        // PC pushes the program counter of the PC opcode itself.
+        if outputs.is_empty() {
+          return None;
+        }
+        Some(CallContextClaim {
+          opcode: opcode::PC,
+          calldata_offset: 0,
+          output_value: outputs[0],
+        })
+      }
+      opcode::MSIZE => {
+        // MSIZE pushes current memory size in bytes (always a multiple of 32).
+        if outputs.is_empty() {
+          return None;
+        }
+        Some(CallContextClaim {
+          opcode: opcode::MSIZE,
+          calldata_offset: 0,
+          output_value: outputs[0],
+        })
+      }
+      opcode::GAS => {
+        // GAS pushes remaining gas after deducting the cost of the GAS opcode.
+        if outputs.is_empty() {
+          return None;
+        }
+        Some(CallContextClaim {
+          opcode: opcode::GAS,
+          calldata_offset: 0,
+          output_value: outputs[0],
+        })
+      }
+      // Block / tx context opcodes: revm already computed and pushed the value;
+      // we simply capture outputs[0] as the witness.
+      opcode::ADDRESS
+      | opcode::ORIGIN
+      | opcode::GASPRICE
+      | opcode::CODESIZE
+      | opcode::RETURNDATASIZE
+      | opcode::COINBASE
+      | opcode::TIMESTAMP
+      | opcode::NUMBER
+      | opcode::DIFFICULTY
+      | opcode::GASLIMIT
+      | opcode::CHAINID
+      | opcode::SELFBALANCE
+      | opcode::BASEFEE
+      | opcode::BLOBBASEFEE => {
+        if outputs.is_empty() {
+          return None;
+        }
+        Some(CallContextClaim {
+          opcode: self.pending_opcode,
+          calldata_offset: 0,
+          output_value: outputs[0],
+        })
+      }
+      _ => None,
+    }
+  }
+
+  /// Build `StorageAccessClaim`s for the current instruction (SLOAD / SSTORE).
+  ///
+  /// - SLOAD:  `pending_inputs[0]` = slot key, `outputs[0]` = loaded value.
+  /// - SSTORE: `pending_inputs[0]` = slot key, `pending_inputs[1]` = written value.
+  fn build_storage_claims(&mut self, outputs: &[[u8; 32]]) -> Vec<StorageAccessClaim> {
+    match self.pending_opcode {
+      opcode::SLOAD => {
+        if self.pending_inputs.len() >= 1 && outputs.len() >= 1 {
+          self.rw_counter += 1;
+          vec![StorageAccessClaim {
+            rw_counter: self.rw_counter,
+            contract: self.pending_contract,
+            slot: self.pending_inputs[0],
+            is_write: false,
+            value: outputs[0],
+          }]
+        } else {
+          vec![]
+        }
+      }
+      opcode::SSTORE => {
+        if self.pending_inputs.len() >= 2 {
+          self.rw_counter += 1;
+          vec![StorageAccessClaim {
+            rw_counter: self.rw_counter,
+            contract: self.pending_contract,
+            slot: self.pending_inputs[0],
+            is_write: true,
+            value: self.pending_inputs[1],
+          }]
+        } else {
+          vec![]
+        }
+      }
+      _ => vec![],
+    }
+  }
+
+  /// Build an `ExternalStateClaim` for BLOCKHASH, EXTCODESIZE, EXTCODEHASH.
+  ///
+  /// `key` is the stack input: block number for BLOCKHASH, contract address
+  /// (zero-padded to 32 bytes) for EXTCODESIZE / EXTCODEHASH.
+  fn build_external_state_claim(&self, outputs: &[[u8; 32]]) -> Option<ExternalStateClaim> {
+    match self.pending_opcode {
+      opcode::BLOCKHASH | opcode::EXTCODESIZE | opcode::EXTCODEHASH => {
+        if self.pending_inputs.is_empty() || outputs.is_empty() {
+          return None;
+        }
+        Some(ExternalStateClaim {
+          opcode: self.pending_opcode,
+          key: self.pending_inputs[0],
+          output_value: outputs[0],
+        })
+      }
+      _ => None,
+    }
+  }
+
+  /// Build `StackAccessClaim`s for the current instruction.
+  ///
+  /// Call order: one pop claim per consumed value (inputs),
+  /// one push claim per produced value (outputs).
+  ///
+  /// `depth_after` for a pop:   stack_len_before - (i + 1)
+  ///   = depth after having popped this and all previous inputs.
+  /// `depth_after` for a push:  depth_after_all_pops + (j + 1)
+  fn build_stack_claims(&mut self, outputs: &[[u8; 32]]) -> Vec<StackAccessClaim> {
+    let mut claims = Vec::new();
+    let n_pops = self.pending_inputs.len();
+    let sp_before = self.pending_stack_depth;
+
+    for (i, val) in self.pending_inputs.iter().enumerate() {
+      self.stack_rw_counter += 1;
+      claims.push(StackAccessClaim {
+        rw_counter: self.stack_rw_counter,
+        depth_after: sp_before.saturating_sub(i + 1),
+        is_push: false,
+        value: *val,
+      });
+    }
+
+    let sp_after_pops = sp_before.saturating_sub(n_pops);
+    for (j, val) in outputs.iter().enumerate() {
+      self.stack_rw_counter += 1;
+      claims.push(StackAccessClaim {
+        rw_counter: self.stack_rw_counter,
+        depth_after: sp_after_pops + (j + 1),
+        is_push: true,
+        value: *val,
+      });
     }
 
     claims
@@ -255,6 +818,65 @@ impl ProvingInspector {
 // ============================================================
 // Public API
 // ============================================================
+
+/// Extract a [`BlockTxContext`] from the revm execution environment.
+///
+/// Should be called after `inspect_one_tx` so the context holds the
+/// actual values used during execution.
+fn extract_block_tx_context<CFG>(
+  block: &revm::context::BlockEnv,
+  tx: &revm::context::TxEnv,
+  cfg: &CFG,
+) -> BlockTxContext
+where
+  CFG: revm::context_interface::Cfg,
+{
+  // COINBASE: Address (20 bytes) zero-padded to 32
+  let mut coinbase = [0u8; 32];
+  coinbase[12..].copy_from_slice(block.beneficiary.as_slice());
+
+  // TIMESTAMP / NUMBER / DIFFICULTY: U256 → big-endian [u8; 32]
+  let timestamp = block.timestamp.to_be_bytes::<32>();
+  let block_number = block.number.to_be_bytes::<32>();
+
+  // PREVRANDAO: prefer post-Merge prevrandao (B256), fall back to difficulty
+  let prevrandao = block
+    .prevrandao
+    .map(|r| *r)
+    .unwrap_or_else(|| block.difficulty.to_be_bytes::<32>());
+
+  // GASLIMIT: u64 → big-endian [u8; 32]
+  let mut gas_limit = [0u8; 32];
+  gas_limit[24..].copy_from_slice(&block.gas_limit.to_be_bytes());
+
+  // CHAINID: from cfg (u64) → big-endian [u8; 32]
+  let mut chain_id = [0u8; 32];
+  chain_id[24..].copy_from_slice(&cfg.chain_id().to_be_bytes());
+
+  // BASEFEE: u64 → big-endian [u8; 32]
+  let mut basefee = [0u8; 32];
+  basefee[24..].copy_from_slice(&block.basefee.to_be_bytes());
+
+  // ORIGIN: tx.caller (Address, 20 bytes) zero-padded to 32
+  let mut origin = [0u8; 32];
+  origin[12..].copy_from_slice(tx.caller.as_slice());
+
+  // GASPRICE: u128 → big-endian [u8; 32]
+  let mut gas_price = [0u8; 32];
+  gas_price[16..].copy_from_slice(&tx.gas_price.to_be_bytes());
+
+  BlockTxContext {
+    coinbase,
+    timestamp,
+    block_number,
+    prevrandao,
+    gas_limit,
+    chain_id,
+    basefee,
+    origin,
+    gas_price,
+  }
+}
 
 /// Execute an EVM transaction and produce a Hilbert-style transition proof
 /// for every instruction.
@@ -281,8 +903,12 @@ pub fn execute_and_prove(
     .inspect_one_tx(tx)
     .map_err(|err| format!("failed to execute tx: {err}"))?;
 
+  let block_tx_context =
+    extract_block_tx_context(&evm.ctx.block, &evm.ctx.tx, &evm.ctx.cfg);
+
   let proof = TransactionProof {
     steps: evm.inspector.proofs.clone(),
+    block_tx_context,
   };
 
   verify_transaction_proof(&proof)?;
@@ -366,6 +992,21 @@ fn verify_transaction_proof(proof: &TransactionProof) -> Result<(), String> {
       ));
     }
   }
+
+  // Collect all memory access claims and prove consistency via MemoryConsistencyAir.
+  let all_mem_claims: Vec<MemAccessClaim> = proof
+    .steps
+    .iter()
+    .flat_map(|s| s.memory_claims.iter().cloned())
+    .collect();
+  if !all_mem_claims.is_empty() {
+    let mem_proof = prove_memory_consistency(&all_mem_claims)
+      .map_err(|e| format!("memory consistency proving failed: {e}"))?;
+    if !verify_memory_consistency(&mem_proof) {
+      return Err("memory consistency verification failed".to_string());
+    }
+  }
+
   Ok(())
 }
 
@@ -485,8 +1126,12 @@ pub fn execute_bytecode_trace(
     .inspect_one_tx(tx)
     .map_err(|err| format!("failed to execute tx: {err}"))?;
 
+  let block_tx_context =
+    extract_block_tx_context(&evm.ctx.block, &evm.ctx.tx, &evm.ctx.cfg);
+
   Ok(TransactionProof {
     steps: evm.inspector.proofs.clone(),
+    block_tx_context,
   })
 }
 

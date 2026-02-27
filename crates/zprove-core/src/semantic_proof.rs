@@ -95,9 +95,6 @@ pub enum Proof {
   ByteOrEq(u8, u8),
   /// `ByteXor(Byte(a), Byte(b)) = Byte(a ^ b)`.
   ByteXorEq(u8, u8),
-  /// 16-bit chunk add axiom:
-  /// `(a16 + b16 + cin) mod 2^16 = c16`.
-  U16AddEq(u16, u16, bool, u16),
   /// 29-bit chunk add axiom:
   /// `(a29 + b29 + cin) mod 2^29 = c29`.
   U29AddEq(u32, u32, bool, u32),
@@ -117,6 +114,10 @@ pub enum Proof {
   IteTrueEq(Term, Term),
   /// `ite(false, a, b) = b`.
   IteFalseEq(Term, Term),
+  /// `ByteMulLow(Byte(a), Byte(b)) = Byte((a * b) & 0xFF)`.
+  ByteMulLowEq(u8, u8),
+  /// `ByteMulHigh(Byte(a), Byte(b)) = Byte((a * b) >> 8)`.
+  ByteMulHighEq(u8, u8),
 }
 
 // ============================================================
@@ -179,21 +180,18 @@ pub const OP_AND_INTRO: u32 = 14;
 pub const OP_EQ_REFL: u32 = 15;
 pub const OP_EQ_SYM: u32 = 16;
 pub const OP_EQ_TRANS: u32 = 17;
-pub const OP_BYTE_ADD_EQ: u32 = 18;
-pub const OP_BYTE_ADD_CARRY_EQ: u32 = 19;
-pub const OP_BYTE_MUL_LOW_EQ: u32 = 20;
-pub const OP_BYTE_MUL_HIGH_EQ: u32 = 21;
-pub const OP_BYTE_AND_EQ: u32 = 22;
-pub const OP_BYTE_OR_EQ: u32 = 23;
-pub const OP_BYTE_XOR_EQ: u32 = 24;
-pub const OP_BYTE_ADD_THIRD_CONGRUENCE: u32 = 25;
-pub const OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE: u32 = 26;
-pub const OP_ITE_TRUE_EQ: u32 = 27;
-pub const OP_ITE_FALSE_EQ: u32 = 28;
-pub const OP_U16_ADD_EQ: u32 = 29;
-pub const OP_U15_MUL_EQ: u32 = 30;
-pub const OP_U29_ADD_EQ: u32 = 31;
-pub const OP_U24_ADD_EQ: u32 = 32;
+pub const OP_BYTE_MUL_LOW_EQ: u32 = 18;
+pub const OP_BYTE_MUL_HIGH_EQ: u32 = 19;
+pub const OP_BYTE_AND_EQ: u32 = 20;
+pub const OP_BYTE_OR_EQ: u32 = 21;
+pub const OP_BYTE_XOR_EQ: u32 = 22;
+pub const OP_BYTE_ADD_THIRD_CONGRUENCE: u32 = 23;
+pub const OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE: u32 = 24;
+pub const OP_ITE_TRUE_EQ: u32 = 25;
+pub const OP_ITE_FALSE_EQ: u32 = 26;
+pub const OP_U15_MUL_EQ: u32 = 27;
+pub const OP_U29_ADD_EQ: u32 = 28;
+pub const OP_U24_ADD_EQ: u32 = 29;
 
 // ---- Return-type tags ----
 pub const RET_BOOL: u32 = 0;
@@ -214,7 +212,7 @@ pub const NUM_PROOF_COLS: usize = 9;
 /// | `op`      | Opcode (`OP_*` constant)                                 |
 /// | `scalar0` | First immediate (byte or bool-as-int)                    |
 /// | `scalar1` | Second immediate (for ByteAndEq, etc.)                   |
-/// | `scalar2` | Third immediate (for ByteAddEq carry, etc.)              |
+/// | `scalar2` | Third immediate (carry-in for add opcodes, etc.)          |
 /// | `arg0`    | Row index of 1st child                                   |
 /// | `arg1`    | Row index of 2nd child                                   |
 /// | `arg2`    | Row index of 3rd child                                   |
@@ -367,36 +365,6 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
       )),
       Box::new(Term::Byte(*a ^ *b)),
     )),
-    Proof::U16AddEq(a, b, cin, c) => {
-      let a_lo = (*a & 0xFF) as u8;
-      let a_hi = (*a >> 8) as u8;
-      let b_lo = (*b & 0xFF) as u8;
-      let b_hi = (*b >> 8) as u8;
-      let c_lo = (*c & 0xFF) as u8;
-      let c_hi = (*c >> 8) as u8;
-
-      let low_total = a_lo as u16 + b_lo as u16 + *cin as u16;
-      let mid_carry = low_total >= 256;
-
-      Ok(WFF::And(
-        Box::new(WFF::Equal(
-          Box::new(Term::ByteAdd(
-            Box::new(Term::Byte(a_lo)),
-            Box::new(Term::Byte(b_lo)),
-            Box::new(Term::Bool(*cin)),
-          )),
-          Box::new(Term::Byte(c_lo)),
-        )),
-        Box::new(WFF::Equal(
-          Box::new(Term::ByteAdd(
-            Box::new(Term::Byte(a_hi)),
-            Box::new(Term::Byte(b_hi)),
-            Box::new(Term::Bool(mid_carry)),
-          )),
-          Box::new(Term::Byte(c_hi)),
-        )),
-      ))
-    }
     Proof::U29AddEq(a, b, _cin, c) => {
       if *a >= (1u32 << 29) || *b >= (1u32 << 29) || *c >= (1u32 << 29) {
         return Err(VerifyError::UnexpectedProofVariant {
@@ -589,6 +557,20 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
         Box::new(b.clone()),
       ))
     }
+    Proof::ByteMulLowEq(a, b) => Ok(WFF::Equal(
+      Box::new(Term::ByteMulLow(
+        Box::new(Term::Byte(*a)),
+        Box::new(Term::Byte(*b)),
+      )),
+      Box::new(Term::Byte(((*a as u16 * *b as u16) & 0xFF) as u8)),
+    )),
+    Proof::ByteMulHighEq(a, b) => Ok(WFF::Equal(
+      Box::new(Term::ByteMulHigh(
+        Box::new(Term::Byte(*a)),
+        Box::new(Term::Byte(*b)),
+      )),
+      Box::new(Term::Byte(((*a as u16 * *b as u16) >> 8) as u8)),
+    )),
   }
 }
 
@@ -1723,6 +1705,364 @@ pub fn prove_not(a: &[u8; 32], _c: &[u8; 32]) -> Proof {
   and_proofs(leaves)
 }
 
+// ============================================================
+// Shift helpers
+// ============================================================
+
+/// Decompose a U256 shift amount into (byte_shift n, bit_shift m).
+///
+/// EVM spec: if shift >= 256, the result is 0 (SHL/SHR) or all-ones (SAR neg).
+/// Returns `None` when shift >= 256 (caller handles the overflow case).
+fn decompose_shift(shift: &[u8; 32]) -> Option<(usize, u8)> {
+  if shift[..31].iter().any(|&b| b != 0) {
+    return None; // shift >= 256
+  }
+  let s = shift[31];
+  Some(((s / 8) as usize, s % 8))
+}
+
+/// Byte-aligned intermediate for SHL: mid[k] = value[k + n] (or 0).
+fn shl_mid(value: &[u8; 32], n: usize) -> [u8; 32] {
+  let mut mid = [0u8; 32];
+  for k in 0..32usize {
+    mid[k] = if k + n < 32 { value[k + n] } else { 0 };
+  }
+  mid
+}
+
+/// Byte-aligned intermediate for SHR: mid[k] = value[k - n] (or 0).
+fn shr_mid(value: &[u8; 32], n: usize) -> [u8; 32] {
+  let mut mid = [0u8; 32];
+  for k in 0..32usize {
+    mid[k] = if k >= n { value[k - n] } else { 0 };
+  }
+  mid
+}
+
+// ============================================================
+// WFF for shift operations  (uses U15MulEq)
+//
+// Key identities for m ∈ 1..=7, factor = (1 << m):
+//   a << m  =  (a * factor) & 0xFF   → U15MulEq low-half
+//   a >> m  =  (a * (256 / factor)) >> 8
+//            = (a * (1 << inv)) >> 8  → U15MulEq high-half  (inv = 8-m)
+//
+// Both fit within 15-bit × 8-bit ≤ 15-bit products because a ≤ 255 < 2^8
+// and factor ≤ 128 < 2^8, so a * factor ≤ 255 * 128 = 32640 < 2^15.
+// ============================================================
+
+// ── internal WFF leaf helpers ─────────────────────────────────────────
+
+/// WFF leaf: ByteMulLow(a, factor) = lo.
+fn wff_mul_lo(a: u8, factor: u8, lo: u8) -> WFF {
+  WFF::Equal(
+    Box::new(Term::ByteMulLow(
+      Box::new(Term::Byte(a)),
+      Box::new(Term::Byte(factor)),
+    )),
+    Box::new(Term::Byte(lo)),
+  )
+}
+
+/// WFF leaf: ByteMulHigh(a, factor) = hi.
+fn wff_mul_hi(a: u8, factor: u8, hi: u8) -> WFF {
+  WFF::Equal(
+    Box::new(Term::ByteMulHigh(
+      Box::new(Term::Byte(a)),
+      Box::new(Term::Byte(factor)),
+    )),
+    Box::new(Term::Byte(hi)),
+  )
+}
+
+/// WFF for `SHL(shift, value) = result`.
+pub fn wff_shl(shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32]) -> WFF {
+  match decompose_shift(shift) {
+    None => wff_xor(result, &ZERO_WORD, &ZERO_WORD),
+    Some((n, 0)) => {
+      let mid = shl_mid(value, n);
+      let leaves: Vec<WFF> = (0..32)
+        .rev()
+        .map(|k| {
+          WFF::Equal(
+            Box::new(Term::ByteXor(
+              Box::new(Term::Byte(mid[k])),
+              Box::new(Term::Byte(0x00)),
+            )),
+            Box::new(Term::Byte(result[k])),
+          )
+        })
+        .collect();
+      and_wffs(leaves)
+    }
+    Some((n, m)) => {
+      let mid = shl_mid(value, n);
+      let factor: u8 = 1 << m; // multiply by 2^m
+      let mut leaves = Vec::with_capacity(32 * 3);
+      for k in 0..32usize {
+        let next = if k < 31 { mid[k + 1] } else { 0 };
+        // lo = (mid[k] * 2^m) & 0xFF  = mid[k] << m
+        let lo = ((mid[k] as u16 * factor as u16) & 0xFF) as u8;
+        // hi = (next * 2^m) >> 8      = next >> (8-m) = next >> inv
+        let hi = ((next as u16 * factor as u16) >> 8) as u8;
+        leaves.push(wff_mul_lo(mid[k], factor, lo));
+        leaves.push(wff_mul_hi(next, factor, hi));
+        leaves.push(WFF::Equal(
+          Box::new(Term::ByteOr(
+            Box::new(Term::Byte(lo)),
+            Box::new(Term::Byte(hi)),
+          )),
+          Box::new(Term::Byte(result[k])),
+        ));
+      }
+      and_wffs(leaves)
+    }
+  }
+}
+
+/// WFF for `SHR(shift, value) = result` (logical).
+pub fn wff_shr(shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32]) -> WFF {
+  match decompose_shift(shift) {
+    None => wff_xor(result, &ZERO_WORD, &ZERO_WORD),
+    Some((n, 0)) => {
+      let mid = shr_mid(value, n);
+      let leaves: Vec<WFF> = (0..32)
+        .rev()
+        .map(|k| {
+          WFF::Equal(
+            Box::new(Term::ByteXor(
+              Box::new(Term::Byte(mid[k])),
+              Box::new(Term::Byte(0x00)),
+            )),
+            Box::new(Term::Byte(result[k])),
+          )
+        })
+        .collect();
+      and_wffs(leaves)
+    }
+    Some((n, m)) => {
+      let mid = shr_mid(value, n);
+      // For SHR by m: a >> m = (a * 2^(8-m)) >> 8
+      let inv: u8 = 8 - m;
+      let factor: u8 = 1 << inv; // multiply by 2^inv then take high byte
+      let mut leaves = Vec::with_capacity(32 * 3);
+      for k in 0..32usize {
+        let prev = if k > 0 { mid[k - 1] } else { 0 };
+        // lo = mid[k] >> m = (mid[k] * 2^inv) >> 8
+        let lo = ((mid[k] as u16 * factor as u16) >> 8) as u8;
+        // hi = prev << inv = (prev * 2^inv) & 0xFF
+        let hi = ((prev as u16 * factor as u16) & 0xFF) as u8;
+        leaves.push(wff_mul_hi(mid[k], factor, lo));
+        leaves.push(wff_mul_lo(prev, factor, hi));
+        leaves.push(WFF::Equal(
+          Box::new(Term::ByteOr(
+            Box::new(Term::Byte(lo)),
+            Box::new(Term::Byte(hi)),
+          )),
+          Box::new(Term::Byte(result[k])),
+        ));
+      }
+      and_wffs(leaves)
+    }
+  }
+}
+
+/// WFF for `SAR(shift, value) = result` (arithmetic).
+pub fn wff_sar(shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32]) -> WFF {
+  let sign_fill = if (value[0] & 0x80) != 0 { 0xFFu8 } else { 0u8 };
+  match decompose_shift(shift) {
+    None => {
+      let fill_word = [sign_fill; 32];
+      wff_xor(result, &fill_word, &ZERO_WORD)
+    }
+    Some((n, 0)) => {
+      let mut mid = [sign_fill; 32];
+      for k in 0..32usize {
+        if k >= n {
+          mid[k] = value[k - n];
+        }
+      }
+      let leaves: Vec<WFF> = (0..32)
+        .rev()
+        .map(|k| {
+          WFF::Equal(
+            Box::new(Term::ByteXor(
+              Box::new(Term::Byte(mid[k])),
+              Box::new(Term::Byte(0x00)),
+            )),
+            Box::new(Term::Byte(result[k])),
+          )
+        })
+        .collect();
+      and_wffs(leaves)
+    }
+    Some((n, m)) => {
+      let mut mid = [sign_fill; 32];
+      for k in 0..32usize {
+        if k >= n {
+          mid[k] = value[k - n];
+        }
+      }
+      let inv: u8 = 8 - m;
+      let factor_shr: u8 = 1 << inv; // used for logical right-shift via mul-high
+      let factor_shl: u8 = 1 << inv; // same value, used for left-shift via mul-low
+      let fill_mask: u8 = (0xFF00u16 >> m) as u8; // sign bits to OR in for negative k=0
+      let mut leaves = Vec::new();
+      for k in 0..32usize {
+        let prev = if k > 0 { mid[k - 1] } else { sign_fill };
+        let lo = ((mid[k] as u16 * factor_shr as u16) >> 8) as u8; // logical SHR
+        let hi = ((prev as u16 * factor_shl as u16) & 0xFF) as u8; // prev << inv
+        if k == 0 {
+          // For the top byte, sign-extend: OR in fill_mask to restore sign bits set to 1.
+          let sar_val = ((mid[0] as i8) >> m) as u8;
+          let shr_val = (mid[0] as u16 * factor_shr as u16 >> 8) as u8;
+          leaves.push(wff_mul_hi(mid[0], factor_shr, shr_val));
+          if sign_fill == 0xFF {
+            // negative: OR the shifted byte with fill_mask
+            leaves.push(WFF::Equal(
+              Box::new(Term::ByteOr(
+                Box::new(Term::Byte(shr_val)),
+                Box::new(Term::Byte(fill_mask)),
+              )),
+              Box::new(Term::Byte(sar_val)),
+            ));
+          }
+          // hi comes from virtual sign_fill byte left-shifted
+          leaves.push(wff_mul_lo(sign_fill, factor_shl, hi));
+          leaves.push(WFF::Equal(
+            Box::new(Term::ByteOr(
+              Box::new(Term::Byte(sar_val)),
+              Box::new(Term::Byte(hi)),
+            )),
+            Box::new(Term::Byte(result[k])),
+          ));
+        } else {
+          leaves.push(wff_mul_hi(mid[k], factor_shr, lo));
+          leaves.push(wff_mul_lo(prev, factor_shl, hi));
+          leaves.push(WFF::Equal(
+            Box::new(Term::ByteOr(
+              Box::new(Term::Byte(lo)),
+              Box::new(Term::Byte(hi)),
+            )),
+            Box::new(Term::Byte(result[k])),
+          ));
+        }
+      }
+      and_wffs(leaves)
+    }
+  }
+}
+
+// ============================================================
+// Prove functions for shift operations  (uses U15MulEq)
+// ============================================================
+
+/// Prove `SHL(shift, value) = result`.
+pub fn prove_shl(shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32]) -> Proof {
+  match decompose_shift(shift) {
+    None => prove_xor(result, &ZERO_WORD, &ZERO_WORD),
+    Some((n, 0)) => {
+      let mid = shl_mid(value, n);
+      let leaves: Vec<Proof> = (0..32).rev().map(|k| Proof::ByteXorEq(mid[k], 0x00)).collect();
+      and_proofs(leaves)
+    }
+    Some((n, m)) => {
+      let mid = shl_mid(value, n);
+      let factor: u8 = 1 << m;
+      let mut leaves = Vec::with_capacity(32 * 3);
+      for k in 0..32usize {
+        let next = if k < 31 { mid[k + 1] } else { 0 };
+        let lo = ((mid[k] as u16 * factor as u16) & 0xFF) as u8;
+        let hi = ((next as u16 * factor as u16) >> 8) as u8;
+        leaves.push(Proof::ByteMulLowEq(mid[k], factor));
+        leaves.push(Proof::ByteMulHighEq(next, factor));
+        leaves.push(Proof::ByteOrEq(lo, hi));
+      }
+      and_proofs(leaves)
+    }
+  }
+}
+
+/// Prove `SHR(shift, value) = result` (logical).
+pub fn prove_shr(shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32]) -> Proof {
+  match decompose_shift(shift) {
+    None => prove_xor(result, &ZERO_WORD, &ZERO_WORD),
+    Some((n, 0)) => {
+      let mid = shr_mid(value, n);
+      let leaves: Vec<Proof> = (0..32).rev().map(|k| Proof::ByteXorEq(mid[k], 0x00)).collect();
+      and_proofs(leaves)
+    }
+    Some((n, m)) => {
+      let mid = shr_mid(value, n);
+      let inv: u8 = 8 - m;
+      let factor: u8 = 1 << inv;
+      let mut leaves = Vec::with_capacity(32 * 3);
+      for k in 0..32usize {
+        let prev = if k > 0 { mid[k - 1] } else { 0 };
+        let lo = ((mid[k] as u16 * factor as u16) >> 8) as u8;
+        let hi = ((prev as u16 * factor as u16) & 0xFF) as u8;
+        leaves.push(Proof::ByteMulHighEq(mid[k], factor));
+        leaves.push(Proof::ByteMulLowEq(prev, factor));
+        leaves.push(Proof::ByteOrEq(lo, hi));
+      }
+      and_proofs(leaves)
+    }
+  }
+}
+
+/// Prove `SAR(shift, value) = result` (arithmetic).
+pub fn prove_sar(shift: &[u8; 32], value: &[u8; 32], result: &[u8; 32]) -> Proof {
+  let sign_fill = if (value[0] & 0x80) != 0 { 0xFFu8 } else { 0u8 };
+  match decompose_shift(shift) {
+    None => {
+      let fill_word = [sign_fill; 32];
+      prove_xor(result, &fill_word, &ZERO_WORD)
+    }
+    Some((n, 0)) => {
+      let mut mid = [sign_fill; 32];
+      for k in 0..32usize {
+        if k >= n {
+          mid[k] = value[k - n];
+        }
+      }
+      let leaves: Vec<Proof> = (0..32).rev().map(|k| Proof::ByteXorEq(mid[k], 0x00)).collect();
+      and_proofs(leaves)
+    }
+    Some((n, m)) => {
+      let mut mid = [sign_fill; 32];
+      for k in 0..32usize {
+        if k >= n {
+          mid[k] = value[k - n];
+        }
+      }
+      let inv: u8 = 8 - m;
+      let factor: u8 = 1 << inv;
+      let fill_mask: u8 = (0xFF00u16 >> m) as u8;
+      let mut leaves = Vec::new();
+      for k in 0..32usize {
+        let prev = if k > 0 { mid[k - 1] } else { sign_fill };
+        let hi = ((prev as u16 * factor as u16) & 0xFF) as u8;
+        if k == 0 {
+          let shr_val = ((mid[0] as u16 * factor as u16) >> 8) as u8;
+          let sar_val = ((mid[0] as i8) >> m) as u8;
+          leaves.push(Proof::ByteMulHighEq(mid[0], factor));
+          if sign_fill == 0xFF {
+            leaves.push(Proof::ByteOrEq(shr_val, fill_mask));
+          }
+          leaves.push(Proof::ByteMulLowEq(sign_fill, factor));
+          leaves.push(Proof::ByteOrEq(sar_val, hi));
+        } else {
+          let lo = ((mid[k] as u16 * factor as u16) >> 8) as u8;
+          leaves.push(Proof::ByteMulHighEq(mid[k], factor));
+          leaves.push(Proof::ByteMulLowEq(prev, factor));
+          leaves.push(Proof::ByteOrEq(lo, hi));
+        }
+      }
+      and_proofs(leaves)
+    }
+  }
+}
+
 /// Prove EQ(a, b) = c.
 ///
 /// Part 1: ByteXorEq for each byte of a vs b.
@@ -1791,6 +2131,160 @@ pub fn prove_slt(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
 /// Prove SGT(a, b) = c.  Reduces to SLT(b, a) = c.
 pub fn prove_sgt(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Proof {
   prove_slt(b, a, c)
+}
+
+// ============================================================
+// Arithmetic helpers for output-binding proofs
+// ============================================================
+
+/// Compute `(a + b) mod n`, where `a, b < n`, handling the 257-bit intermediate.
+///
+/// Since `a, b < n`, the sum is at most `2n - 2 < 2^257`.
+/// If it overflows 256 bits, the quotient is always 1, so the result is
+/// `sum + 2^256 - n` (which fits in 256 bits because `sum < n`).
+fn addmod_inner(a: U256, b: U256, n: U256) -> U256 {
+  let (sum, overflow) = a.overflowing_add(b);
+  if overflow {
+    // a + b = sum + 2^256 ≥ 2^256 ≥ n, so quotient = 1.
+    // result = sum + 2^256 - n  (fits since sum < n)
+    sum.wrapping_add(U256::MAX.wrapping_sub(n).wrapping_add(U256::from(1u64)))
+  } else if sum >= n {
+    sum - n
+  } else {
+    sum
+  }
+}
+
+/// `ADDMOD(a, b, n) = (a + b) mod n`.  Returns `0` when `n = 0`.
+pub fn compute_addmod(a: &[u8; 32], b: &[u8; 32], n: &[u8; 32]) -> [u8; 32] {
+  if is_zero_word(n) {
+    return ZERO_WORD;
+  }
+  let ua = U256::from_be_slice(a);
+  let ub = U256::from_be_slice(b);
+  let un = U256::from_be_slice(n);
+  // Reduce both inputs first so addmod_inner precondition (< n) holds.
+  addmod_inner(ua % un, ub % un, un).to_be_bytes::<32>()
+}
+
+/// `MULMOD(a, b, n) = (a * b) mod n`.  Returns `0` when `n = 0`.
+///
+/// Implemented via binary (Russian peasant) multiplication to avoid a 512-bit
+/// intermediate; each doubling step uses `addmod_inner`.
+pub fn compute_mulmod(a: &[u8; 32], b: &[u8; 32], n: &[u8; 32]) -> [u8; 32] {
+  if is_zero_word(n) {
+    return ZERO_WORD;
+  }
+  let ua = U256::from_be_slice(a);
+  let ub = U256::from_be_slice(b);
+  let un = U256::from_be_slice(n);
+  let mut result = U256::ZERO;
+  let mut base = ua % un;
+  let mut exp = ub;
+  while exp > U256::ZERO {
+    if exp.bit(0) {
+      result = addmod_inner(result, base, un);
+    }
+    base = addmod_inner(base, base, un);
+    exp >>= 1;
+  }
+  result.to_be_bytes::<32>()
+}
+
+/// `EXP(a, b) = a ** b mod 2^256`.  Uses binary exponentiation with wrapping mul.
+pub fn compute_exp(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+  let ua = U256::from_be_slice(a);
+  let ub = U256::from_be_slice(b);
+  let mut result = U256::from(1u64);
+  let mut base = ua;
+  let mut exp = ub;
+  while exp > U256::ZERO {
+    if exp.bit(0) {
+      result = result.wrapping_mul(base);
+    }
+    base = base.wrapping_mul(base);
+    exp >>= 1;
+  }
+  result.to_be_bytes::<32>()
+}
+
+/// `BYTE(i, x)`: the `i`-th byte of `x` (0 = MSB), zero-padded to 32 bytes.
+/// Returns `0` when `i >= 32`.
+pub fn compute_byte(i: &[u8; 32], x: &[u8; 32]) -> [u8; 32] {
+  if i[..31].iter().any(|&v| v != 0) || i[31] >= 32 {
+    return ZERO_WORD;
+  }
+  let mut result = ZERO_WORD;
+  result[31] = x[i[31] as usize];
+  result
+}
+
+/// `SIGNEXTEND(b, x)`: sign-extend `x` from byte `b` (0 = LSB).
+/// Returns `x` unchanged when `b >= 31`.
+pub fn compute_signextend(b: &[u8; 32], x: &[u8; 32]) -> [u8; 32] {
+  if b[..31].iter().any(|&v| v != 0) || b[31] >= 31 {
+    return *x;
+  }
+  let b_val = b[31] as usize;
+  let byte_sign = 31 - b_val; // index into x[] from MSB
+  let fill = if (x[byte_sign] & 0x80) != 0 { 0xFF } else { 0x00 };
+  let mut result = *x;
+  for byte in result[..byte_sign].iter_mut() {
+    *byte = fill;
+  }
+  result
+}
+
+// ============================================================
+// Prove / WFF for remaining arithmetic opcodes
+//
+// All use **output-binding**: prove_xor(out, expected, ZERO_WORD) certifies
+// that `out == expected` because it asserts `out XOR expected = 0` byte-by-byte.
+// ============================================================
+
+/// Prove `BYTE(i, x) = out`.
+pub fn prove_byte(i: &[u8; 32], x: &[u8; 32], out: &[u8; 32]) -> Proof {
+  prove_xor(out, &compute_byte(i, x), &ZERO_WORD)
+}
+/// WFF for `BYTE(i, x) = out`.
+pub fn wff_byte(i: &[u8; 32], x: &[u8; 32], out: &[u8; 32]) -> WFF {
+  wff_xor(out, &compute_byte(i, x), &ZERO_WORD)
+}
+
+/// Prove `SIGNEXTEND(b, x) = out`.
+pub fn prove_signextend(b: &[u8; 32], x: &[u8; 32], out: &[u8; 32]) -> Proof {
+  prove_xor(out, &compute_signextend(b, x), &ZERO_WORD)
+}
+/// WFF for `SIGNEXTEND(b, x) = out`.
+pub fn wff_signextend(b: &[u8; 32], x: &[u8; 32], out: &[u8; 32]) -> WFF {
+  wff_xor(out, &compute_signextend(b, x), &ZERO_WORD)
+}
+
+/// Prove `ADDMOD(a, b, n) = out`.
+pub fn prove_addmod(a: &[u8; 32], b: &[u8; 32], n: &[u8; 32], out: &[u8; 32]) -> Proof {
+  prove_xor(out, &compute_addmod(a, b, n), &ZERO_WORD)
+}
+/// WFF for `ADDMOD(a, b, n) = out`.
+pub fn wff_addmod(a: &[u8; 32], b: &[u8; 32], n: &[u8; 32], out: &[u8; 32]) -> WFF {
+  wff_xor(out, &compute_addmod(a, b, n), &ZERO_WORD)
+}
+
+/// Prove `MULMOD(a, b, n) = out`.
+pub fn prove_mulmod(a: &[u8; 32], b: &[u8; 32], n: &[u8; 32], out: &[u8; 32]) -> Proof {
+  prove_xor(out, &compute_mulmod(a, b, n), &ZERO_WORD)
+}
+/// WFF for `MULMOD(a, b, n) = out`.
+pub fn wff_mulmod(a: &[u8; 32], b: &[u8; 32], n: &[u8; 32], out: &[u8; 32]) -> WFF {
+  wff_xor(out, &compute_mulmod(a, b, n), &ZERO_WORD)
+}
+
+/// Prove `EXP(a, b) = out`.
+pub fn prove_exp(a: &[u8; 32], b: &[u8; 32], out: &[u8; 32]) -> Proof {
+  prove_xor(out, &compute_exp(a, b), &ZERO_WORD)
+}
+/// WFF for `EXP(a, b) = out`.
+pub fn wff_exp(a: &[u8; 32], b: &[u8; 32], out: &[u8; 32]) -> WFF {
+  wff_xor(out, &compute_exp(a, b), &ZERO_WORD)
 }
 
 // ============================================================
@@ -2072,6 +2566,7 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
         op: OP_BYTE_AND_EQ,
         scalar0: *a as u32,
         scalar1: *b as u32,
+        value: (*a & *b) as u32,
         ret_ty: RET_WFF_EQ,
         ..Default::default()
       });
@@ -2083,6 +2578,7 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
         op: OP_BYTE_OR_EQ,
         scalar0: *a as u32,
         scalar1: *b as u32,
+        value: (*a | *b) as u32,
         ret_ty: RET_WFF_EQ,
         ..Default::default()
       });
@@ -2094,26 +2590,8 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
         op: OP_BYTE_XOR_EQ,
         scalar0: *a as u32,
         scalar1: *b as u32,
+        value: (*a ^ *b) as u32,
         ret_ty: RET_WFF_EQ,
-        ..Default::default()
-      });
-      idx
-    }
-    Proof::U16AddEq(a, b, cin, c) => {
-      let carry_in = *cin as u32;
-      let total = *a as u32 + *b as u32 + carry_in;
-      let sum16 = total & 0xFFFF;
-      let carry_out = if total >= 65536 { 1 } else { 0 };
-      let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_U16_ADD_EQ,
-        scalar0: *a as u32,
-        scalar1: *b as u32,
-        scalar2: carry_in,
-        arg0: *c as u32,
-        arg1: carry_out,
-        value: sum16,
-        ret_ty: RET_WFF_AND,
         ..Default::default()
       });
       idx
@@ -2220,6 +2698,30 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>) -> u32 {
         op: OP_ITE_FALSE_EQ,
         arg0: ai,
         arg1: bi,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      idx
+    }
+    Proof::ByteMulLowEq(a, b) => {
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_BYTE_MUL_LOW_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        value: (*a as u32 * *b as u32) & 0xFF,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      idx
+    }
+    Proof::ByteMulHighEq(a, b) => {
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_BYTE_MUL_HIGH_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        value: (*a as u32 * *b as u32) >> 8,
         ret_ty: RET_WFF_EQ,
         ..Default::default()
       });
@@ -2370,28 +2872,6 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
           });
         }
       }
-      OP_U16_ADD_EQ => {
-        if row.scalar0 > 0xFFFF
-          || row.scalar1 > 0xFFFF
-          || row.scalar2 > 1
-          || row.arg0 > 0xFFFF
-          || row.arg1 > 1
-        {
-          return Err(VerifyError::ByteDecideFailed);
-        }
-        let total = row.scalar0 + row.scalar1 + row.scalar2;
-        if row.value != (total & 0xFFFF)
-          || row.arg0 != row.value
-          || row.arg1 != if total >= 65536 { 1 } else { 0 }
-        {
-          return Err(VerifyError::ByteDecideFailed);
-        }
-        if row.ret_ty != RET_WFF_AND {
-          return Err(VerifyError::UnexpectedProofVariant {
-            expected: "u16-add proof row returns conjunction",
-          });
-        }
-      }
       OP_U29_ADD_EQ => {
         if row.scalar0 >= (1u32 << 29)
           || row.scalar1 >= (1u32 << 29)
@@ -2475,8 +2955,44 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
         }
       }
       // ── Proof: byte bitwise axioms (lookup-verifiable) ──
-      OP_BYTE_AND_EQ | OP_BYTE_OR_EQ | OP_BYTE_XOR_EQ => {
+      OP_BYTE_AND_EQ => {
         if row.scalar0 > 255 || row.scalar1 > 255 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        if row.value != row.scalar0 & row.scalar1 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_OR_EQ => {
+        if row.scalar0 > 255 || row.scalar1 > 255 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        if row.value != row.scalar0 | row.scalar1 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_XOR_EQ => {
+        if row.scalar0 > 255 || row.scalar1 > 255 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        if row.value != row.scalar0 ^ row.scalar1 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      // ── Proof: byte mul axioms (lookup-verifiable) ──
+      OP_BYTE_MUL_LOW_EQ => {
+        if row.scalar0 > 255 || row.scalar1 > 255 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        if row.value != (row.scalar0 * row.scalar1) & 0xFF {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_MUL_HIGH_EQ => {
+        if row.scalar0 > 255 || row.scalar1 > 255 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+        if row.value != (row.scalar0 * row.scalar1) >> 8 {
           return Err(VerifyError::ByteDecideFailed);
         }
       }

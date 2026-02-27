@@ -4,7 +4,7 @@
 mod tests {
   use p3_matrix::Matrix;
   use zprove_core::semantic_proof::{
-    NUM_PROOF_COLS, OP_BYTE_ADD_EQ, OP_U24_ADD_EQ, OP_U29_ADD_EQ, Proof, ProofRow, RET_WFF_EQ,
+    NUM_PROOF_COLS, OP_U24_ADD_EQ, OP_U29_ADD_EQ, Proof, ProofRow, RET_WFF_EQ,
     Term, compile_proof, infer_proof, prove_add, prove_mul, wff_add, wff_mul,
   };
   use zprove_core::zk_proof::*;
@@ -21,10 +21,6 @@ mod tests {
       }
       Proof::U24AddEq(a, b, cin, c) => {
         *proof = Proof::U24AddEq(*a ^ 1, *b, *cin, *c);
-        true
-      }
-      Proof::U16AddEq(a, b, cin, c) => {
-        *proof = Proof::U16AddEq(*a, *b, !*cin, *c);
         true
       }
       Proof::AndIntro(p1, p2) => {
@@ -207,54 +203,22 @@ mod tests {
   }
 
   #[test]
-  fn test_build_lut_trace_rejects_out_of_range_u16_add_step() {
-    let steps = vec![LutStep {
-      op: LutOpcode::U16AddEq,
-      in0: 70_000,
-      in1: 1,
-      in2: 0,
-      out0: 1,
-      out1: 0,
-    }];
-
-    let err =
-      build_lut_trace_from_steps(&steps).expect_err("out-of-range u16-add input must be rejected");
-    assert!(err.contains("out of range"));
-  }
-
-  #[test]
-  fn test_build_lut_trace_rejects_out_of_range_byte_add_step() {
-    let steps = vec![LutStep {
-      op: LutOpcode::ByteAddEq,
-      in0: 300,
-      in1: 1,
-      in2: 0,
-      out0: 45,
-      out1: 0,
-    }];
-
-    let err =
-      build_lut_trace_from_steps(&steps).expect_err("out-of-range byte-add input must be rejected");
-    assert!(err.contains("out of range"));
-  }
-
-  #[test]
   fn test_stage_a_trace_rejects_out_of_range_row() {
     let rows = vec![ProofRow {
-      op: OP_BYTE_ADD_EQ,
-      scalar0: 300,
+      op: OP_U29_ADD_EQ,
+      scalar0: 1 << 29,
       scalar1: 1,
       scalar2: 0,
       arg0: 0,
-      arg1: 45,
+      arg1: 0,
       arg2: 0,
-      value: 45,
+      value: 1,
       ret_ty: RET_WFF_EQ,
     }];
 
     let err = generate_stage_a_semantic_trace(&rows)
       .expect_err("out-of-range stage-a row must be rejected");
-    assert!(err.contains("out of range"));
+    assert!(err.contains("unsupported Stage A"));
   }
 
   #[test]
@@ -427,12 +391,13 @@ mod tests {
   fn test_add_family_lut_builder_rejects_foreign_row() {
     let rows = vec![
       ProofRow {
-        op: zprove_core::semantic_proof::OP_BYTE_ADD_EQ,
+        op: zprove_core::semantic_proof::OP_U29_ADD_EQ,
         scalar0: 1,
         scalar1: 2,
-        arg0: 0,
-        value: 3,
         scalar2: 0,
+        arg0: 0,
+        arg1: 0,
+        value: 3,
         ret_ty: RET_WFF_EQ,
         ..Default::default()
       },
@@ -665,10 +630,13 @@ mod preprocessed_rows_tests {
 mod lut_prep_tests {
   use p3_matrix::Matrix;
   use zprove_core::semantic_proof::{ProofRow, compile_proof};
+  use zprove_core::transition::build_batch_manifest;
   use zprove_core::zk_proof::{
-    NUM_LUT_COLS, build_lut_trace_from_proof_rows, lut_scaffold_public_values, prove_lut_with_prep,
-    prove_stack_ir_with_prep, setup_proof_rows_preprocessed, stack_ir_scaffold_public_values,
-    verify_lut_with_prep, verify_stack_ir_with_prep,
+    NUM_LUT_COLS, RECEIPT_BIND_TAG_LUT, RECEIPT_BIND_TAG_STACK,
+    build_lut_trace_from_proof_rows, make_batch_receipt_binding_public_values,
+    prove_batch_lut_with_prep, prove_stack_ir_with_prep, setup_batch_proof_rows_preprocessed,
+    setup_proof_rows_preprocessed, stack_ir_scaffold_public_values,
+    verify_batch_lut_with_prep, verify_stack_ir_with_prep,
   };
 
   // ---------------------------------------------------------------------------
@@ -695,71 +663,86 @@ mod lut_prep_tests {
     assert_eq!(trace.width(), NUM_LUT_COLS, "width must equal NUM_LUT_COLS");
   }
 
+  // Helper: build a batch manifest for a single ADD instruction.
+  fn add_manifest() -> zprove_core::zk_proof::BatchProofRowsManifest {
+    use revm::bytecode::opcode;
+    use zprove_core::semantic_proof::prove_add;
+    let proof = prove_add(&[0u8; 32], &[0u8; 32], &[0u8; 32]);
+    let items: &[(u8, &zprove_core::semantic_proof::Proof)] = &[(opcode::ADD, &proof)];
+    build_batch_manifest(items).expect("manifest build must succeed")
+  }
+
   // ---------------------------------------------------------------------------
-  // Test 2: Prove + verify LUT with shared preprocessed commitment.
+  // Test 2: Prove + verify batch LUT (N=1) roundtrip.
   // ---------------------------------------------------------------------------
   #[test]
   fn test_prove_verify_lut_with_prep_roundtrip() {
-    let rows = add_rows();
-    let pv = lut_scaffold_public_values();
+    let manifest = add_manifest();
+    let pv =
+      make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &manifest.entries);
     let (prep_data, prep_vk) =
-      setup_proof_rows_preprocessed(&rows, &pv).expect("setup must succeed");
-
-    let proof = prove_lut_with_prep(&rows, &prep_data, &pv).expect("prove must succeed");
-    let result = verify_lut_with_prep(&proof, &prep_vk, &pv);
+      setup_batch_proof_rows_preprocessed(&manifest, &pv).expect("setup must succeed");
+    let proof =
+      prove_batch_lut_with_prep(&manifest, &prep_data, &pv).expect("prove must succeed");
+    let result = verify_batch_lut_with_prep(&proof, &prep_vk, &pv);
     assert!(result.is_ok(), "verify must succeed: {:?}", result.err());
   }
 
   // ---------------------------------------------------------------------------
-  // Test 3: Wrong VK fails verification.
+  // Test 3: Wrong VK fails batch LUT verification.
   // ---------------------------------------------------------------------------
   #[test]
   fn test_lut_verify_fails_with_wrong_prep_vk() {
-    let rows = add_rows();
-    let pv = lut_scaffold_public_values();
-    let (prep_data, _vk) = setup_proof_rows_preprocessed(&rows, &pv).expect("setup must succeed");
+    use revm::bytecode::opcode;
+    use zprove_core::semantic_proof::prove_add;
 
-    // Different commitment: mutate first row's op.
-    let mut other_rows = rows.clone();
-    other_rows[0].op = other_rows[0].op.wrapping_add(1);
-    let (_, other_vk) =
-      setup_proof_rows_preprocessed(&other_rows, &pv).expect("other setup must succeed");
+    let manifest = add_manifest();
+    let pv =
+      make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &manifest.entries);
+    let (prep_data, _vk) =
+      setup_batch_proof_rows_preprocessed(&manifest, &pv).expect("setup must succeed");
 
-    let pv = lut_scaffold_public_values();
-    let proof = prove_lut_with_prep(&rows, &prep_data, &pv).expect("prove must succeed");
-    let result = verify_lut_with_prep(&proof, &other_vk, &pv);
+    // Different manifest: mutate first row's op to get a different VK.
+    let mut other_manifest = add_manifest();
+    other_manifest.all_rows[0].op = other_manifest.all_rows[0].op.wrapping_add(1);
+    let (_, other_vk) = setup_batch_proof_rows_preprocessed(&other_manifest, &pv)
+      .expect("other setup must succeed");
+
+    let proof =
+      prove_batch_lut_with_prep(&manifest, &prep_data, &pv).expect("prove must succeed");
+    let result = verify_batch_lut_with_prep(&proof, &other_vk, &pv);
     assert!(result.is_err(), "verify with wrong VK must fail");
   }
 
   // ---------------------------------------------------------------------------
-  // Test 4: StackIR and LUT proofs share the same prep VK (same commitment).
-  //
-  // This is the core Phase 3 security property: a single setup_proof_rows call
-  // produces one VK, and both the StackIR and LUT proofs are generated — and
-  // verify — against that same VK.  A verifier checking both proofs against
-  // the *same* VK confirms they were generated from identical compiled rows.
+  // Test 4: StackIR (single-instruction VK) and batch LUT (batch VK) both
+  // verify their respective proofs with the correct VKs.
   // ---------------------------------------------------------------------------
   #[test]
-  fn test_stack_ir_and_lut_share_same_prep_vk() {
+  fn test_stack_ir_and_batch_lut_verify_with_correct_vks() {
     let rows = add_rows();
     let stack_pv = stack_ir_scaffold_public_values();
-    let lut_pv = lut_scaffold_public_values();
-    let (prep_data, prep_vk) =
+    let (stack_prep_data, stack_prep_vk) =
       setup_proof_rows_preprocessed(&rows, &stack_pv).expect("setup must succeed");
-
     let stack_proof =
-      prove_stack_ir_with_prep(&rows, &prep_data, &stack_pv).expect("stack prove must succeed");
-    let lut_proof =
-      prove_lut_with_prep(&rows, &prep_data, &lut_pv).expect("lut prove must succeed");
-
-    // Both proofs must verify against the *same* VK.
+      prove_stack_ir_with_prep(&rows, &stack_prep_data, &stack_pv)
+        .expect("stack prove must succeed");
     assert!(
-      verify_stack_ir_with_prep(&stack_proof, &prep_vk, &stack_pv).is_ok(),
+      verify_stack_ir_with_prep(&stack_proof, &stack_prep_vk, &stack_pv).is_ok(),
       "StackIR verify must succeed"
     );
+
+    let manifest = add_manifest();
+    let lut_pv =
+      make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &manifest.entries);
+    let (lut_prep_data, lut_prep_vk) =
+      setup_batch_proof_rows_preprocessed(&manifest, &lut_pv).expect("lut setup must succeed");
+    let lut_proof =
+      prove_batch_lut_with_prep(&manifest, &lut_prep_data, &lut_pv)
+        .expect("lut prove must succeed");
     assert!(
-      verify_lut_with_prep(&lut_proof, &prep_vk, &lut_pv).is_ok(),
-      "LUT verify must succeed"
+      verify_batch_lut_with_prep(&lut_proof, &lut_prep_vk, &lut_pv).is_ok(),
+      "Batch LUT verify must succeed"
     );
   }
 }
@@ -792,6 +775,14 @@ mod batch_lut_tests {
       stack_outputs: vec![output],
       semantic_proof: Some(proof),
       memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
+
+      external_state_claim: None,
+      sub_call_claim: None,
     }
   }
 
@@ -941,5 +932,362 @@ mod batch_lut_tests {
       !verify_batch_transaction_zk_receipt(&[bad_stmt], &receipt),
       "opcode mismatch must fail verification"
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Gap 3 test: validate_manifest_rows rejects ByteAnd/Or/Xor with wrong value.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_validate_manifest_rows_gap3_byte_op_wrong_value() {
+    use zprove_core::semantic_proof::{
+      OP_BYTE_AND_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ, ProofRow,
+    };
+    use zprove_core::zk_proof::validate_manifest_rows;
+
+    // Correct ByteAnd rows pass.
+    let good = vec![
+      ProofRow { op: OP_BYTE_AND_EQ, scalar0: 0xAB, scalar1: 0xCD, value: 0xAB & 0xCD, ..Default::default() },
+      ProofRow { op: OP_BYTE_OR_EQ,  scalar0: 0x12, scalar1: 0x34, value: 0x12 | 0x34, ..Default::default() },
+      ProofRow { op: OP_BYTE_XOR_EQ, scalar0: 0xFF, scalar1: 0x0F, value: 0xFF ^ 0x0F, ..Default::default() },
+    ];
+    assert!(validate_manifest_rows(&good), "correct byte-op rows should pass");
+
+    // Wrong AND result fails.
+    let bad_and = vec![ProofRow {
+      op: OP_BYTE_AND_EQ, scalar0: 0xAB, scalar1: 0xCD,
+      value: 0x42, // incorrect: should be 0xAB & 0xCD = 0x89
+      ..Default::default()
+    }];
+    assert!(!validate_manifest_rows(&bad_and), "wrong AND result must be rejected");
+
+    // Wrong OR result fails.
+    let bad_or = vec![ProofRow {
+      op: OP_BYTE_OR_EQ, scalar0: 0x12, scalar1: 0x34,
+      value: 0,   // incorrect: should be 0x36
+      ..Default::default()
+    }];
+    assert!(!validate_manifest_rows(&bad_or), "wrong OR result must be rejected");
+
+    // Wrong XOR result fails.
+    let bad_xor = vec![ProofRow {
+      op: OP_BYTE_XOR_EQ, scalar0: 0xFF, scalar1: 0xFF,
+      value: 0xFF, // incorrect: 0xFF ^ 0xFF = 0x00
+      ..Default::default()
+    }];
+    assert!(!validate_manifest_rows(&bad_xor), "wrong XOR result must be rejected");
+
+    // Out-of-range input fails.
+    let bad_input = vec![ProofRow {
+      op: OP_BYTE_AND_EQ, scalar0: 256, scalar1: 1, value: 0,
+      ..Default::default()
+    }];
+    assert!(!validate_manifest_rows(&bad_input), "out-of-byte-range input must be rejected");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Gap 4 test: validate_manifest_rows rejects out-of-range arithmetic operands.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_validate_manifest_rows_gap4_arithmetic_range() {
+    use zprove_core::semantic_proof::{OP_U24_ADD_EQ, OP_U29_ADD_EQ, ProofRow};
+    use zprove_core::zk_proof::validate_manifest_rows;
+
+    const MAX29: u32 = (1u32 << 29) - 1;
+    const MAX24: u32 = (1u32 << 24) - 1;
+
+    // Correct U29AddEq row passes.
+    let good_u29 = vec![ProofRow {
+      op: OP_U29_ADD_EQ,
+      scalar0: MAX29, scalar1: 0, scalar2: 0,
+      value: MAX29, arg1: 0,
+      ..Default::default()
+    }];
+    assert!(validate_manifest_rows(&good_u29), "valid U29 row must pass");
+
+    // in0 exceeds 2^29 - 1 → rejected.
+    let bad_in0 = vec![ProofRow {
+      op: OP_U29_ADD_EQ,
+      scalar0: MAX29 + 1, scalar1: 0, scalar2: 0,
+      value: 1, arg1: 0,
+      ..Default::default()
+    }];
+    assert!(!validate_manifest_rows(&bad_in0), "U29 in0 > max must be rejected");
+
+    // out0 exceeds range → rejected.
+    let bad_out0 = vec![ProofRow {
+      op: OP_U29_ADD_EQ,
+      scalar0: 0, scalar1: 0, scalar2: 0,
+      value: MAX29 + 1, arg1: 0,
+      ..Default::default()
+    }];
+    assert!(!validate_manifest_rows(&bad_out0), "U29 out0 > max must be rejected");
+
+    // carry-in > 1 → rejected.
+    let bad_carry = vec![ProofRow {
+      op: OP_U29_ADD_EQ,
+      scalar0: 0, scalar1: 0, scalar2: 2,   // carry-in = 2
+      value: 0, arg1: 0,
+      ..Default::default()
+    }];
+    assert!(!validate_manifest_rows(&bad_carry), "U29 carry-in > 1 must be rejected");
+
+    // Correct U24AddEq row passes.
+    let good_u24 = vec![ProofRow {
+      op: OP_U24_ADD_EQ,
+      scalar0: MAX24, scalar1: 0, scalar2: 0,
+      value: MAX24, arg1: 0,
+      ..Default::default()
+    }];
+    assert!(validate_manifest_rows(&good_u24), "valid U24 row must pass");
+
+    // U24 in1 exceeds 2^24 - 1 → rejected.
+    let bad_u24 = vec![ProofRow {
+      op: OP_U24_ADD_EQ,
+      scalar0: 0, scalar1: MAX24 + 1, scalar2: 0,
+      value: 0, arg1: 0,
+      ..Default::default()
+    }];
+    assert!(!validate_manifest_rows(&bad_u24), "U24 in1 > max must be rejected");
+  }
+
+  // ---------------------------------------------------------------------------
+  // Gap 3 end-to-end: AND batch receipt roundtrip uses correct byte-op values.
+  // ---------------------------------------------------------------------------
+  #[test]
+  fn test_batch_and_receipt_roundtrip_correct_values() {
+    // AND of two non-trivial 32-byte values.
+    let a: [u8; 32] = {
+      let mut v = [0u8; 32];
+      for i in 0..32 { v[i] = ((i as u8).wrapping_mul(17)).wrapping_add(3); }
+      v
+    };
+    let b: [u8; 32] = {
+      let mut v = [0u8; 32];
+      for i in 0..32 { v[i] = ((i as u8).wrapping_mul(31)).wrapping_add(7); }
+      v
+    };
+    let expected: [u8; 32] = std::array::from_fn(|i| a[i] & b[i]);
+
+    let itp = make_itp(opcode::AND, &[a, b], expected);
+    let receipt = prove_batch_transaction_zk_receipt(&[itp]).expect("prove must succeed");
+
+    // All manifest rows must pass validation (Gap 3 + Gap 4).
+    assert!(
+      zprove_core::zk_proof::validate_manifest_rows(&receipt.manifest.all_rows),
+      "AND batch manifest rows must pass validation"
+    );
+
+    let stmt = make_stmt(opcode::AND, &[a, b], expected);
+    assert!(
+      verify_batch_transaction_zk_receipt(&[stmt], &receipt),
+      "AND batch receipt roundtrip must verify"
+    );
+  }
+}
+
+// ============================================================
+// Keccak ↔ memory cross-check tests  (BUG-MISS-3)
+// ============================================================
+
+#[cfg(test)]
+mod keccak_memory_cross_check_tests {
+  use zprove_core::zk_proof::{
+    MemLogEntry, KeccakLogEntry, validate_keccak_memory_cross_check,
+    prove_keccak_consistency, verify_keccak_consistency, keccak256_bytes,
+  };
+  use zprove_core::transition::KeccakClaim;
+
+  fn mem_entry(addr: u64, value: [u8; 32]) -> MemLogEntry {
+    MemLogEntry { rw_counter: 0, addr, value }
+  }
+
+  fn keccak_claim(offset: u64, input: &[u8]) -> KeccakClaim {
+    KeccakClaim {
+      offset,
+      size: input.len() as u64,
+      input_bytes: input.to_vec(),
+      output_hash: keccak256_bytes(input),
+    }
+  }
+
+  // ── prove / verify roundtrip ──────────────────────────────────────
+
+  #[test]
+  fn keccak_prove_verify_roundtrip() {
+    let claims = vec![keccak_claim(0, b"hello world")];
+    let proof = prove_keccak_consistency(&claims).expect("prove must succeed");
+    assert!(verify_keccak_consistency(&proof), "roundtrip must verify");
+  }
+
+  #[test]
+  fn keccak_empty_input_roundtrip() {
+    let claims = vec![keccak_claim(0, b"")];
+    let proof = prove_keccak_consistency(&claims).expect("prove must succeed");
+    assert!(verify_keccak_consistency(&proof));
+  }
+
+  #[test]
+  fn keccak_multiple_claims_roundtrip() {
+    let claims = vec![
+      keccak_claim(0,  b"foo"),
+      keccak_claim(32, b"bar"),
+    ];
+    let proof = prove_keccak_consistency(&claims).expect("prove must succeed");
+    assert!(verify_keccak_consistency(&proof));
+  }
+
+  // ── cross-check: correct memory ──────────────────────────────────
+
+  #[test]
+  fn cross_check_single_word_exact_match() {
+    // keccak of exactly one 32-byte aligned word (offset=0, size=32)
+    let mut value = [0u8; 32];
+    value.copy_from_slice(b"ABCDEFGHIJKLMNOPQRSTUVWXYZ012345");
+    let log = vec![KeccakLogEntry {
+      offset: 0,
+      size: 32,
+      input_bytes: value.to_vec(),
+      output_hash: keccak256_bytes(&value),
+    }];
+    let write_log = vec![mem_entry(0, value)];
+    assert!(validate_keccak_memory_cross_check(&log, &write_log, &[]));
+  }
+
+  #[test]
+  fn cross_check_subword_range() {
+    // keccak of bytes [4, 20) inside a single 32-byte word at addr 0
+    let mut word_val = [0u8; 32];
+    for i in 0..32 { word_val[i] = i as u8; }
+    let input_bytes = word_val[4..20].to_vec();
+    let log = vec![KeccakLogEntry {
+      offset: 4,
+      size: 16,
+      input_bytes: input_bytes.clone(),
+      output_hash: keccak256_bytes(&input_bytes),
+    }];
+    let write_log = vec![mem_entry(0, word_val)];
+    assert!(validate_keccak_memory_cross_check(&log, &write_log, &[]));
+  }
+
+  #[test]
+  fn cross_check_spanning_two_words() {
+    // keccak spans bytes [28, 36) — last 4 bytes of word 0 + first 4 bytes of word 32
+    let mut w0 = [0u8; 32]; for i in 0..32 { w0[i] = i as u8; }
+    let mut w1 = [0u8; 32]; for i in 0..32 { w1[i] = (i + 32) as u8; }
+    let mut input_bytes = Vec::new();
+    input_bytes.extend_from_slice(&w0[28..32]);
+    input_bytes.extend_from_slice(&w1[0..4]);
+    let log = vec![KeccakLogEntry {
+      offset: 28,
+      size: 8,
+      input_bytes: input_bytes.clone(),
+      output_hash: keccak256_bytes(&input_bytes),
+    }];
+    let write_log = vec![mem_entry(0, w0), mem_entry(32, w1)];
+    assert!(validate_keccak_memory_cross_check(&log, &write_log, &[]));
+  }
+
+  #[test]
+  fn cross_check_empty_keccak_log() {
+    // No keccak claims → always passes
+    assert!(validate_keccak_memory_cross_check(&[], &[], &[]));
+  }
+
+  // ── cross-check: tampered memory — must reject ───────────────────
+
+  #[test]
+  fn cross_check_wrong_memory_value_fails() {
+    // Memory has value X but keccak claims to have hashed Y
+    let correct_bytes: Vec<u8> = (0u8..32).collect();
+    let mut wrong_word = [0u8; 32];
+    wrong_word.copy_from_slice(&(32u8..64).collect::<Vec<_>>()[..32]);
+
+    let log = vec![KeccakLogEntry {
+      offset: 0,
+      size: 32,
+      input_bytes: correct_bytes.clone(),
+      output_hash: keccak256_bytes(&correct_bytes),
+    }];
+    let write_log = vec![mem_entry(0, wrong_word)]; // wrong bytes in memory
+    assert!(
+      !validate_keccak_memory_cross_check(&log, &write_log, &[]),
+      "tampered memory must fail cross-check"
+    );
+  }
+
+  #[test]
+  fn cross_check_missing_memory_word_fails() {
+    // Memory log doesn't contain the word keccak reads
+    let input_bytes: Vec<u8> = (0u8..32).collect();
+    let log = vec![KeccakLogEntry {
+      offset: 0,
+      size: 32,
+      input_bytes: input_bytes.clone(),
+      output_hash: keccak256_bytes(&input_bytes),
+    }];
+    // write_log / read_log are both empty
+    assert!(
+      !validate_keccak_memory_cross_check(&log, &[], &[]),
+      "missing memory word must fail cross-check"
+    );
+  }
+
+  #[test]
+  fn cross_check_tampered_input_bytes_fails() {
+    // KeccakLogEntry.input_bytes tampered AFTER proof — cross-check catches it
+    let real_bytes: Vec<u8> = (0u8..32).collect();
+    let mut real_word = [0u8; 32];
+    real_word.copy_from_slice(&real_bytes);
+
+    let mut tampered_bytes: Vec<u8> = real_bytes.clone();
+    tampered_bytes[0] = 0xFF; // tamper
+
+    let log = vec![KeccakLogEntry {
+      offset: 0,
+      size: 32,
+      input_bytes: tampered_bytes, // doesn't match memory
+      output_hash: keccak256_bytes(&real_bytes),
+    }];
+    let write_log = vec![mem_entry(0, real_word)];
+    assert!(
+      !validate_keccak_memory_cross_check(&log, &write_log, &[]),
+      "tampered input_bytes must fail cross-check"
+    );
+  }
+
+  #[test]
+  fn cross_check_uses_read_log_for_cross_batch_reads() {
+    // Word is provided via read_log (cross-batch), not write_log
+    let value: Vec<u8> = (0u8..32).collect();
+    let mut word_val = [0u8; 32];
+    word_val.copy_from_slice(&value);
+    let log = vec![KeccakLogEntry {
+      offset: 0,
+      size: 32,
+      input_bytes: value.clone(),
+      output_hash: keccak256_bytes(&value),
+    }];
+    let read_log = vec![mem_entry(0, word_val)];
+    assert!(validate_keccak_memory_cross_check(&log, &[], &read_log));
+  }
+
+  #[test]
+  fn cross_check_write_overrides_read_log() {
+    // Same address in both read_log and write_log — write_log value wins
+    let mut read_val = [0u8; 32];   // "old" value
+    read_val[0] = 0xAA;
+    let mut write_val = [0u8; 32];  // "new" value after write
+    write_val[0] = 0xBB;
+
+    // keccak reads the WRITTEN (new) value
+    let log = vec![KeccakLogEntry {
+      offset: 0,
+      size: 1,
+      input_bytes: vec![0xBB],
+      output_hash: keccak256_bytes(&[0xBB]),
+    }];
+    let write_log = vec![mem_entry(0, write_val)];
+    let read_log  = vec![mem_entry(0, read_val)];
+    assert!(validate_keccak_memory_cross_check(&log, &write_log, &read_log));
   }
 }

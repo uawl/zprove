@@ -11,20 +11,25 @@
 
 use crate::semantic_proof::ProofRow;
 use crate::semantic_proof::{
-  Proof, WFF, compile_proof, infer_proof, prove_add, prove_and, prove_div, prove_eq, prove_gt,
-  prove_iszero, prove_lt, prove_mod, prove_mul, prove_not, prove_or, prove_sdiv, prove_sgt,
-  prove_slt, prove_smod, prove_sub, prove_xor, verify_compiled, wff_add, wff_and, wff_div, wff_eq,
-  wff_gt, wff_iszero, wff_lt, wff_mod, wff_mul, wff_not, wff_or, wff_sdiv, wff_sgt, wff_slt,
-  wff_smod, wff_sub, wff_xor,
+  Proof, WFF, compile_proof, infer_proof, prove_add, prove_addmod, prove_and, prove_byte,
+  prove_div, prove_eq, prove_exp, prove_gt, prove_iszero, prove_lt, prove_mod, prove_mul,
+  prove_mulmod, prove_not, prove_or, prove_sar, prove_sdiv, prove_sgt, prove_shl, prove_shr,
+  prove_signextend, prove_slt, prove_smod, prove_sub, prove_xor, verify_compiled, wff_add,
+  wff_addmod, wff_and, wff_byte, wff_div, wff_eq, wff_exp, wff_gt, wff_iszero, wff_lt, wff_mod,
+  wff_mul, wff_mulmod, wff_not, wff_or, wff_sar, wff_sdiv, wff_sgt, wff_shl, wff_shr,
+  wff_signextend, wff_slt, wff_smod, wff_sub, wff_xor,
 };
 use crate::zk_proof::{
   BatchInstructionMeta, BatchProofRowsManifest, CircleStarkConfig, CircleStarkProof,
-  MemoryConsistencyProof, RECEIPT_BIND_TAG_LUT, RECEIPT_BIND_TAG_STACK,
+  KeccakConsistencyProof, MemoryConsistencyProof, StackConsistencyProof, StorageConsistencyProof,
+  RECEIPT_BIND_TAG_LUT, RECEIPT_BIND_TAG_STACK,
   collect_byte_table_queries_from_rows, make_batch_receipt_binding_public_values,
-  make_receipt_binding_public_values, prove_batch_lut_with_prep, prove_lut_with_prep,
-  prove_lut_with_prep_and_logup, prove_memory_consistency, prove_stack_ir_with_prep,
-  setup_batch_proof_rows_preprocessed, setup_proof_rows_preprocessed, verify_batch_lut_with_prep,
-  verify_lut_with_prep_and_logup, verify_memory_consistency, verify_stack_ir_with_prep,
+  make_receipt_binding_public_values, prove_batch_lut_with_prep, prove_keccak_consistency,
+  prove_memory_consistency, prove_stack_consistency, prove_storage_consistency,
+  prove_stack_ir_with_prep, setup_batch_proof_rows_preprocessed, setup_proof_rows_preprocessed,
+  validate_manifest_rows, verify_batch_lut_with_prep, verify_keccak_consistency,
+  verify_memory_consistency, verify_stack_consistency, verify_storage_consistency,
+  verify_stack_ir_with_prep, validate_keccak_memory_cross_check,
 };
 use p3_uni_stark::PreprocessedVerifierKey;
 use revm::bytecode::opcode;
@@ -49,13 +54,166 @@ pub struct MemAccessClaim {
   pub is_write: bool,
   /// The 32-byte word value.
   pub value: [u8; 32],
-  /// Per-address write version: 0 for the first access to this address,
-  /// incremented by 1 for each *write* to the same address.
-  /// Reads do not increment the version.
-  ///
-  /// Enforced by the AIR: consecutive SMAT rows for the same address must
-  /// satisfy `wv[next] = wv[cur] + is_write[cur]`.
-  pub write_version: u32,
+}
+
+/// A single EVM storage access claim (SLOAD / SSTORE).
+///
+/// `contract` is the 20-byte address of the contract whose storage is accessed.
+/// `slot`     is the 32-byte storage key (EVM U256, big-endian).
+/// `value`    is the 32-byte storage value (EVM U256, big-endian).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageAccessClaim {
+  /// Global read-write counter (monotone across all instructions).
+  pub rw_counter: u64,
+  /// 20-byte contract address.
+  pub contract: [u8; 20],
+  /// 32-byte storage slot key.
+  pub slot: [u8; 32],
+  /// `true` for SSTORE, `false` for SLOAD.
+  pub is_write: bool,
+  /// The 32-byte storage value.
+  pub value: [u8; 32],
+}
+
+/// Return/revert data witness for RETURN and REVERT opcodes.
+///
+/// Records the memory slice returned by the terminating instruction so that
+/// the verifier can confirm what the transaction produced without re-executing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnDataClaim {
+  /// `true` for REVERT, `false` for RETURN.
+  pub is_revert: bool,
+  /// Memory byte offset of the return data.
+  pub offset: u64,
+  /// Length of the return data in bytes.
+  pub size: u64,
+  /// Actual return data bytes (length == `size`).
+  pub data: Vec<u8>,
+}
+
+/// A single EVM stack push or pop claim from one instruction.
+///
+/// Every instruction that touches the stack emits a sequence of claims in
+/// execution order (pops first, then pushes).  `StackConsistencyAir` verifies
+/// that every pop value matches the most recent push to the same depth, and
+/// that the depth sequence is monotone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackAccessClaim {
+  /// Global push/pop counter (monotone across all instructions).
+  pub rw_counter: u64,
+  /// Stack depth *after* this operation (0 = empty stack).
+  pub depth_after: usize,
+  /// `true` for a push, `false` for a pop.
+  pub is_push: bool,
+  /// The 32-byte word value pushed onto or popped from the stack.
+  pub value: [u8; 32],
+}
+
+/// A witness for the KECCAK256 opcode.
+///
+/// Records the memory slice that was hashed and the resulting 32-byte digest
+/// so that verifiers can re-check `keccak256(input_bytes) == output_hash`
+/// without re-executing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeccakClaim {
+  /// Memory byte offset of the input data (from `stack_inputs[0]`).
+  pub offset: u64,
+  /// Length of the input data in bytes (from `stack_inputs[1]`).
+  pub size: u64,
+  /// Raw input bytes (length == `size`).
+  pub input_bytes: Vec<u8>,
+  /// keccak256(input_bytes) — the 32-byte digest pushed to the stack.
+  pub output_hash: [u8; 32],
+}
+
+/// A witness for a sub-call or contract-creation opcode.
+///
+/// Records the callee, value, return data, and success flag so the verifier
+/// can confirm the sub-call result matches the success value pushed onto the
+/// stack at batch level.
+///
+/// `inner_proof` is `None` at Level-0 (oracle witness): the claim is accepted
+/// without recursively verifying the callee trace. A non-None value enables
+/// Level-1 recursive verification.
+#[derive(Debug, Clone)]
+pub struct SubCallClaim {
+  /// Opcode: CALL, CALLCODE, DELEGATECALL, STATICCALL, CREATE, or CREATE2.
+  pub opcode: u8,
+  /// Callee address (20 bytes). For CREATE/CREATE2 this is the deployed address.
+  pub callee: [u8; 20],
+  /// ETH transferred (big-endian U256). Zero for DELEGATECALL/STATICCALL.
+  pub value: [u8; 32],
+  /// Return data bytes from the callee (cloned at call exit).
+  pub return_data: Vec<u8>,
+  /// Whether the sub-call succeeded (`true`) or reverted (`false`).
+  pub success: bool,
+  /// Optional recursive proof of the callee execution trace (Level-1+).
+  pub inner_proof: Option<Box<TransactionProof>>,
+}
+
+/// A witness for external-state-reading opcodes: BLOCKHASH, EXTCODESIZE, EXTCODEHASH.
+///
+/// Records the query key (block number or account address) and the returned
+/// value so the verifier can re-check consistency with the external state at
+/// batch level.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalStateClaim {
+  /// The opcode that produced this claim.
+  /// Supported: BLOCKHASH, EXTCODESIZE, EXTCODEHASH.
+  pub opcode: u8,
+  /// For BLOCKHASH: queried block number (32-byte big-endian U256).
+  /// For EXTCODESIZE / EXTCODEHASH: queried contract address (20 bytes,
+  /// zero-padded to 32 in big-endian).
+  pub key: [u8; 32],
+  /// The 32-byte value pushed to the stack.
+  pub output_value: [u8; 32],
+}
+
+/// A witness for environment-reading opcodes: CALLER, CALLVALUE, CALLDATALOAD, CALLDATASIZE.
+///
+/// Records the value pushed to the stack so the verifier can re-check
+/// consistency with the original call context at batch level.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallContextClaim {
+  /// The opcode that produced this claim.
+  /// Supported: CALLER, CALLVALUE, CALLDATALOAD, CALLDATASIZE, PC, MSIZE, GAS.
+  pub opcode: u8,
+  /// For CALLDATALOAD: byte offset into calldata (from the stack input).
+  /// Zero for all other opcodes.
+  pub calldata_offset: u64,
+  /// The 32-byte value pushed to the stack.
+  pub output_value: [u8; 32],
+}
+
+/// Static block and transaction context captured at execution time.
+///
+/// These fields act as **public inputs** to the ZK proof: the verifier can
+/// reconstruct them independently from the block header and transaction data,
+/// then assert that every matching `CallContextClaim` in the trace is
+/// consistent with these values.
+///
+/// All values are stored as 32-byte big-endian EVM words.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BlockTxContext {
+  /// COINBASE (0x41): block beneficiary address, zero-padded to 32 bytes.
+  pub coinbase: [u8; 32],
+  /// TIMESTAMP (0x42): block timestamp as U256 big-endian.
+  pub timestamp: [u8; 32],
+  /// NUMBER (0x43): block number as U256 big-endian.
+  pub block_number: [u8; 32],
+  /// DIFFICULTY / PREVRANDAO (0x44): post-Merge = prevrandao (B256),
+  /// pre-Merge = difficulty (U256).
+  pub prevrandao: [u8; 32],
+  /// GASLIMIT (0x45): block gas limit as U256 big-endian.
+  pub gas_limit: [u8; 32],
+  /// CHAINID (0x46): chain identifier as U256 big-endian.
+  pub chain_id: [u8; 32],
+  /// BASEFEE (0x48): block base fee as U256 big-endian.
+  pub basefee: [u8; 32],
+  /// ORIGIN (0x32): transaction origin address, zero-padded to 32 bytes.
+  pub origin: [u8; 32],
+  /// GASPRICE (0x3a): effective gas price as U256 big-endian.
+  pub gas_price: [u8; 32],
 }
 
 /// A proof that one EVM instruction correctly transforms the stack.
@@ -75,12 +233,33 @@ pub struct InstructionTransitionProof {
   /// Memory access claims from this instruction.
   /// Non-empty for MLOAD, MSTORE, MSTORE8.
   pub memory_claims: Vec<MemAccessClaim>,
+  /// Storage access claims from this instruction.
+  /// Non-empty for SLOAD, SSTORE.
+  pub storage_claims: Vec<StorageAccessClaim>,
+  /// Stack push/pop claims from this instruction.
+  /// Non-empty for every instruction that touches the stack.
+  pub stack_claims: Vec<StackAccessClaim>,
+  /// Return/revert data witness.  `Some` only for RETURN and REVERT.
+  pub return_data_claim: Option<ReturnDataClaim>,
+  /// Call-context witness.  `Some` for CALLER, CALLVALUE, CALLDATALOAD, CALLDATASIZE.
+  pub call_context_claim: Option<CallContextClaim>,
+  /// KECCAK256 preimage witness.  `Some` only for KECCAK256.
+  pub keccak_claim: Option<KeccakClaim>,
+  /// External-state witness.  `Some` for BLOCKHASH, EXTCODESIZE, EXTCODEHASH.
+  pub external_state_claim: Option<ExternalStateClaim>,
+  /// Sub-call / create witness.  `Some` for CALL, CALLCODE, DELEGATECALL,
+  /// STATICCALL, CREATE, CREATE2.
+  pub sub_call_claim: Option<SubCallClaim>,
 }
 
 /// Complete proof for all steps of a transaction execution.
 #[derive(Debug, Clone)]
 pub struct TransactionProof {
   pub steps: Vec<InstructionTransitionProof>,
+  /// Block and transaction context values, used as public inputs to verify
+  /// that `CallContextClaim`s produced during execution are consistent
+  /// with the actual on-chain context.
+  pub block_tx_context: BlockTxContext,
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +316,11 @@ pub struct InstructionTransitionZkReceipt {
   /// Companion LogUp byte-table proof for AND/OR/XOR operations.
   /// `None` for opcodes without byte-level bitwise operations.
   pub byte_table_proof: Option<p3_uni_stark::Proof<CircleStarkConfig>>,
+  /// Preprocessed verifier key for the StackIR STARK (single-instruction setup).
   pub preprocessed_vk: PreprocessedVerifierKey<CircleStarkConfig>,
+  /// Preprocessed verifier key for the LUT STARK (batch N=1 setup via
+  /// [`BatchLutKernelAirWithPrep`]).
+  pub lut_preprocessed_vk: PreprocessedVerifierKey<CircleStarkConfig>,
   pub expected_wff: WFF,
 }
 
@@ -154,6 +337,7 @@ pub struct InstructionTransitionZkReceipt {
 /// 2. For each i: `infer_proof(pi_i) == manifest.entries[i].wff` — deterministic.
 /// 3. `compute_batch_manifest_digest(&entries) == pis[2..10]` — deterministic.
 /// 4. If `memory_proof` is Some: `verify_memory_consistency` — STARK check.
+/// 5. If `stack_proof` is Some: `verify_stack_consistency` — STARK check.
 pub struct BatchTransactionZkReceipt {
   /// Single LUT STARK proof covering arithmetic of all N instructions.
   pub lut_proof: CircleStarkProof,
@@ -163,9 +347,16 @@ pub struct BatchTransactionZkReceipt {
   pub manifest: BatchProofRowsManifest,
   /// Memory consistency proof.  `None` when the batch has no MLOAD/MSTORE/MSTORE8.
   pub memory_proof: Option<MemoryConsistencyProof>,
-  /// Memory access claims that the memory proof commits to.
-  /// Stored so the verifier can recompute the claim hash.
-  pub memory_claims: Vec<MemAccessClaim>,
+  /// Storage consistency proof.  `None` when the batch has no SLOAD/SSTORE.
+  pub storage_proof: Option<StorageConsistencyProof>,
+  /// Stack consistency proof.  `None` when the batch has no stack-touching instructions.
+  pub stack_proof: Option<StackConsistencyProof>,
+  /// KECCAK256 consistency proof.  `None` when the batch has no KECCAK256 instructions.
+  pub keccak_proof: Option<KeccakConsistencyProof>,
+  /// Return/revert data from the terminating instruction.
+  /// `Some` when the transaction ended with RETURN or REVERT.
+  pub return_data: Option<ReturnDataClaim>,
+  // (logs are stored inside the individual proofs themselves)
 }
 
 // ============================================================
@@ -187,9 +378,49 @@ pub fn opcode_input_count(op: u8) -> usize {
     opcode::EXP => 2,
     opcode::LT | opcode::GT | opcode::SLT | opcode::SGT | opcode::EQ => 2,
     opcode::ISZERO | opcode::NOT => 1,
+    opcode::BYTE | opcode::SIGNEXTEND => 2,
     opcode::AND | opcode::OR | opcode::XOR => 2,
+    opcode::SHL | opcode::SHR | opcode::SAR => 2,
     opcode::MLOAD => 1,
     opcode::MSTORE | opcode::MSTORE8 => 2,
+    opcode::SLOAD => 1,
+    opcode::SSTORE => 2,
+    opcode::RETURN | opcode::REVERT => 2,
+    opcode::KECCAK256 => 2,
+    opcode::CALLER | opcode::CALLVALUE | opcode::CALLDATASIZE => 0,
+    opcode::CALLDATALOAD => 1,
+    opcode::PC | opcode::MSIZE | opcode::GAS => 0,
+    opcode::ADDRESS
+    | opcode::ORIGIN
+    | opcode::GASPRICE
+    | opcode::CODESIZE
+    | opcode::RETURNDATASIZE
+    | opcode::COINBASE
+    | opcode::TIMESTAMP
+    | opcode::NUMBER
+    | opcode::DIFFICULTY
+    | opcode::GASLIMIT
+    | opcode::CHAINID
+    | opcode::SELFBALANCE
+    | opcode::BASEFEE
+    | opcode::BLOBBASEFEE => 0,
+    opcode::BLOCKHASH | opcode::EXTCODESIZE | opcode::EXTCODEHASH | opcode::BALANCE => 1,
+    opcode::RETURNDATACOPY | opcode::MCOPY | opcode::CALLDATACOPY | opcode::CODECOPY => 3,
+    opcode::EXTCODECOPY => 4,
+    opcode::BLOBHASH => 1,
+    opcode::CALL | opcode::CALLCODE => 7,
+    opcode::DELEGATECALL | opcode::STATICCALL => 6,
+    opcode::CREATE => 3,
+    opcode::CREATE2 => 4,
+    opcode::SELFDESTRUCT => 1,
+    opcode::TLOAD => 1,
+    opcode::TSTORE => 2,
+    opcode::LOG0 => 2,
+    opcode::LOG1 => 3,
+    opcode::LOG2 => 4,
+    opcode::LOG3 => 5,
+    opcode::LOG4 => 6,
+    opcode::INVALID => 0,
     opcode::POP => 1,
     opcode::JUMP => 1,
     opcode::JUMPI => 2,
@@ -214,11 +445,44 @@ pub fn opcode_output_count(op: u8) -> usize {
     | opcode::SMOD => 1,
     opcode::ADDMOD | opcode::MULMOD => 1,
     opcode::EXP => 1,
+    opcode::BYTE | opcode::SIGNEXTEND => 1,
     opcode::LT | opcode::GT | opcode::SLT | opcode::SGT | opcode::EQ => 1,
     opcode::ISZERO | opcode::NOT => 1,
     opcode::AND | opcode::OR | opcode::XOR => 1,
+    opcode::SHL | opcode::SHR | opcode::SAR => 1,
     opcode::MLOAD => 1,
     opcode::MSTORE | opcode::MSTORE8 => 0,
+    opcode::SLOAD => 1,
+    opcode::SSTORE => 0,
+    opcode::RETURN | opcode::REVERT => 0,
+    opcode::KECCAK256 => 1,
+    opcode::CALLER | opcode::CALLVALUE | opcode::CALLDATALOAD | opcode::CALLDATASIZE => 1,
+    opcode::PC | opcode::MSIZE | opcode::GAS => 1,
+    opcode::ADDRESS
+    | opcode::ORIGIN
+    | opcode::GASPRICE
+    | opcode::CODESIZE
+    | opcode::RETURNDATASIZE
+    | opcode::COINBASE
+    | opcode::TIMESTAMP
+    | opcode::NUMBER
+    | opcode::DIFFICULTY
+    | opcode::GASLIMIT
+    | opcode::CHAINID
+    | opcode::SELFBALANCE
+    | opcode::BASEFEE
+    | opcode::BLOBBASEFEE => 1,
+    opcode::BLOCKHASH | opcode::EXTCODESIZE | opcode::EXTCODEHASH | opcode::BALANCE => 1,
+    opcode::RETURNDATACOPY | opcode::EXTCODECOPY | opcode::MCOPY
+    | opcode::CALLDATACOPY | opcode::CODECOPY => 0,
+    opcode::BLOBHASH => 1,
+    opcode::CALL | opcode::CALLCODE | opcode::DELEGATECALL | opcode::STATICCALL => 1,
+    opcode::CREATE | opcode::CREATE2 => 1,
+    opcode::SELFDESTRUCT => 0,
+    opcode::TLOAD => 1,
+    opcode::TSTORE => 0,
+    opcode::LOG0 | opcode::LOG1 | opcode::LOG2 | opcode::LOG3 | opcode::LOG4 => 0,
+    opcode::INVALID => 0,
     opcode::POP => 0,
     opcode::JUMP | opcode::JUMPI => 0,
     opcode::JUMPDEST => 0,
@@ -246,10 +510,143 @@ pub fn has_valid_sp_transition(op: u8, sp_before: usize, sp_after: usize) -> boo
 fn is_structural_opcode(op: u8) -> bool {
   matches!(
     op,
-    opcode::STOP | opcode::POP | opcode::JUMP | opcode::JUMPI | opcode::JUMPDEST
+    opcode::STOP | opcode::POP | opcode::JUMP | opcode::JUMPI | opcode::JUMPDEST | opcode::INVALID
   ) || (opcode::PUSH0..=opcode::PUSH32).contains(&op)
     || (opcode::DUP1..=opcode::DUP16).contains(&op)
     || (opcode::SWAP1..=opcode::SWAP16).contains(&op)
+}
+
+/// Memory opcodes have no per-instruction Hilbert proof;
+/// their correctness is established at batch level by `MemoryConsistencyAir`.
+fn is_memory_opcode(op: u8) -> bool {
+  matches!(
+    op,
+    opcode::MLOAD
+      | opcode::MSTORE
+      | opcode::MSTORE8
+      | opcode::RETURNDATACOPY
+      | opcode::EXTCODECOPY
+      | opcode::MCOPY
+      | opcode::CALLDATACOPY
+      | opcode::CODECOPY
+  )
+}
+
+/// Storage opcodes have no per-instruction Hilbert proof;
+/// their correctness is established at batch level by `StorageConsistencyAir`.
+/// Includes transient storage (EIP-1153: TLOAD/TSTORE).
+fn is_storage_opcode(op: u8) -> bool {
+  matches!(op, opcode::SLOAD | opcode::SSTORE | opcode::TLOAD | opcode::TSTORE)
+}
+
+/// Terminating opcodes that carry return data from memory (RETURN / REVERT).
+/// Like memory opcodes, they have no per-instruction Hilbert proof;
+/// correctness is captured by the `ReturnDataClaim` witness.
+fn is_terminating_data_opcode(op: u8) -> bool {
+  matches!(op, opcode::RETURN | opcode::REVERT)
+}
+
+/// Keccak256 opcode (SHA3 / 0x20).
+/// No per-instruction Hilbert proof; correctness is established at batch
+/// level by re-computing `keccak256(preimage)` in `prove_keccak_consistency`.
+fn is_keccak_opcode(op: u8) -> bool {
+  op == opcode::KECCAK256
+}
+
+/// Inline keccak verification for `verify_proof`:
+/// - opcode must be KECCAK256
+/// - keccak_claim must be present
+/// - keccak256(claim.input_bytes) must equal claim.output_hash
+/// - claim.output_hash must match the stack output
+fn verify_keccak_claim_inline(proof: &InstructionTransitionProof) -> bool {
+  if !is_keccak_opcode(proof.opcode) {
+    return false;
+  }
+  let Some(ref claim) = proof.keccak_claim else {
+    return false;
+  };
+  // Verify preimage
+  let computed = crate::zk_proof::keccak256_bytes(&claim.input_bytes);
+  if computed != claim.output_hash {
+    return false;
+  }
+  // Stack output must match the hash
+  if proof.stack_outputs.len() != 1 {
+    return false;
+  }
+  proof.stack_outputs[0] == claim.output_hash
+}
+
+/// Environment / execution-context opcodes whose output comes from the EVM state,
+/// not from arithmetic over stack inputs.
+/// Includes: CALLER, CALLVALUE, CALLDATALOAD, CALLDATASIZE, PC, MSIZE, GAS,
+/// ADDRESS, ORIGIN, GASPRICE, CODESIZE, RETURNDATASIZE, COINBASE, TIMESTAMP,
+/// NUMBER, DIFFICULTY (PREVRANDAO), GASLIMIT, CHAINID, SELFBALANCE, BASEFEE,
+/// BLOBBASEFEE, BLOBHASH (EIP-4844).
+/// Correctness is established at batch level by cross-checking `CallContextClaim`
+/// against the original execution context.
+fn is_env_opcode(op: u8) -> bool {
+  matches!(
+    op,
+    opcode::CALLER
+      | opcode::CALLVALUE
+      | opcode::CALLDATALOAD
+      | opcode::CALLDATASIZE
+      | opcode::PC
+      | opcode::MSIZE
+      | opcode::GAS
+      | opcode::ADDRESS
+      | opcode::ORIGIN
+      | opcode::GASPRICE
+      | opcode::CODESIZE
+      | opcode::RETURNDATASIZE
+      | opcode::COINBASE
+      | opcode::TIMESTAMP
+      | opcode::NUMBER
+      | opcode::DIFFICULTY
+      | opcode::GASLIMIT
+      | opcode::CHAINID
+      | opcode::SELFBALANCE
+      | opcode::BASEFEE
+      | opcode::BLOBBASEFEE
+      | opcode::BLOBHASH
+  )
+}
+
+/// External-state-reading opcodes whose output comes from world state,
+/// not from arithmetic over stack inputs.
+/// Correctness is established at batch level via `ExternalStateClaim`.
+fn is_external_state_opcode(op: u8) -> bool {
+  matches!(
+    op,
+    opcode::BLOCKHASH | opcode::EXTCODESIZE | opcode::EXTCODEHASH | opcode::BALANCE
+  )
+}
+
+/// Event log opcodes (LOG0-LOG4).
+/// These consume memory data and topic stack items but produce no stack output.
+/// The log content is captured in execution receipts; no per-instruction proof needed.
+fn is_log_opcode(op: u8) -> bool {
+  matches!(
+    op,
+    opcode::LOG0 | opcode::LOG1 | opcode::LOG2 | opcode::LOG3 | opcode::LOG4
+  )
+}
+
+/// Sub-call / contract-creation opcodes.
+/// Correctness of the success flag and return data is established at batch
+/// level via `SubCallClaim`.
+fn is_subcall_opcode(op: u8) -> bool {
+  matches!(
+    op,
+    opcode::CALL
+      | opcode::CALLCODE
+      | opcode::DELEGATECALL
+      | opcode::STATICCALL
+      | opcode::CREATE
+      | opcode::CREATE2
+      | opcode::SELFDESTRUCT
+  )
 }
 
 pub fn verify_statement_semantics(statement: &InstructionTransitionStatement) -> bool {
@@ -299,11 +696,70 @@ pub fn prove_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> O
     opcode::SGT => Some(prove_sgt(&inputs[0], &inputs[1], &outputs[0])),
     opcode::EQ => Some(prove_eq(&inputs[0], &inputs[1], &outputs[0])),
     opcode::ISZERO => Some(prove_iszero(&inputs[0], &outputs[0])),
-    // Not yet implemented — no panic, just skip semantic proof
-    opcode::ADDMOD | opcode::MULMOD | opcode::EXP => None,
+    opcode::SHL => Some(prove_shl(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::SHR => Some(prove_shr(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::SAR => Some(prove_sar(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::BYTE => Some(prove_byte(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::SIGNEXTEND => Some(prove_signextend(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::ADDMOD => Some(prove_addmod(&inputs[0], &inputs[1], &inputs[2], &outputs[0])),
+    opcode::MULMOD => Some(prove_mulmod(&inputs[0], &inputs[1], &inputs[2], &outputs[0])),
+    opcode::EXP => Some(prove_exp(&inputs[0], &inputs[1], &outputs[0])),
     // Memory opcodes: no arithmetic proof in the proof tree.
     // Consistency is guaranteed by MemoryConsistencyAir at the batch level.
-    opcode::MLOAD | opcode::MSTORE | opcode::MSTORE8 => None,
+    opcode::MLOAD
+    | opcode::MSTORE
+    | opcode::MSTORE8
+    | opcode::RETURNDATACOPY
+    | opcode::EXTCODECOPY
+    | opcode::MCOPY => None,
+    // Storage opcodes: no arithmetic proof; correctness via StorageConsistencyAir.
+    opcode::SLOAD | opcode::SSTORE => None,
+    // RETURN/REVERT: no arithmetic proof; return data is captured via ReturnDataClaim.
+    opcode::RETURN | opcode::REVERT => None,
+    // Env opcodes: no arithmetic proof; value comes from execution context (CallContextClaim).
+    opcode::CALLER
+    | opcode::CALLVALUE
+    | opcode::CALLDATALOAD
+    | opcode::CALLDATASIZE
+    | opcode::PC
+    | opcode::MSIZE
+    | opcode::GAS
+    | opcode::ADDRESS
+    | opcode::ORIGIN
+    | opcode::GASPRICE
+    | opcode::CODESIZE
+    | opcode::RETURNDATASIZE
+    | opcode::COINBASE
+    | opcode::TIMESTAMP
+    | opcode::NUMBER
+    | opcode::DIFFICULTY
+    | opcode::GASLIMIT
+    | opcode::CHAINID
+    | opcode::SELFBALANCE
+    | opcode::BASEFEE
+    | opcode::BLOBBASEFEE => None,
+    // External state opcodes: no arithmetic proof; value comes from ExternalStateClaim.
+    opcode::BLOCKHASH | opcode::EXTCODESIZE | opcode::EXTCODEHASH | opcode::BALANCE => None,
+    // BLOBHASH: no arithmetic proof; value comes from transaction blob context (CallContextClaim).
+    opcode::BLOBHASH => None,
+    // CALLDATACOPY/CODECOPY: memory copy; correctness via MemoryConsistencyAir.
+    opcode::CALLDATACOPY | opcode::CODECOPY => None,
+    // Sub-call / create opcodes: no arithmetic proof; result captured via SubCallClaim.
+    opcode::CALL
+    | opcode::CALLCODE
+    | opcode::DELEGATECALL
+    | opcode::STATICCALL
+    | opcode::CREATE
+    | opcode::CREATE2
+    | opcode::SELFDESTRUCT => None,
+    // Transient storage (EIP-1153): no arithmetic proof; like SLOAD/SSTORE.
+    opcode::TLOAD | opcode::TSTORE => None,
+    // Event log opcodes: no arithmetic proof; data captured in execution receipt.
+    opcode::LOG0 | opcode::LOG1 | opcode::LOG2 | opcode::LOG3 | opcode::LOG4 => None,
+    // INVALID: terminates execution; no proof.
+    opcode::INVALID => None,
+    // KECCAK256: no arithmetic proof; preimage correctness via KeccakConsistencyProof.
+    opcode::KECCAK256 => None,
     // Structural ops: no semantic proof needed
     _ => None,
   }
@@ -336,10 +792,69 @@ pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Opt
     opcode::SGT => Some(wff_sgt(&inputs[0], &inputs[1], &outputs[0])),
     opcode::EQ => Some(wff_eq(&inputs[0], &inputs[1], &outputs[0])),
     opcode::ISZERO => Some(wff_iszero(&inputs[0], &outputs[0])),
-    // Not yet implemented
-    opcode::ADDMOD | opcode::MULMOD | opcode::EXP => None,
+    opcode::SHL => Some(wff_shl(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::SHR => Some(wff_shr(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::SAR => Some(wff_sar(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::BYTE => Some(wff_byte(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::SIGNEXTEND => Some(wff_signextend(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::ADDMOD => Some(wff_addmod(&inputs[0], &inputs[1], &inputs[2], &outputs[0])),
+    opcode::MULMOD => Some(wff_mulmod(&inputs[0], &inputs[1], &inputs[2], &outputs[0])),
+    opcode::EXP => Some(wff_exp(&inputs[0], &inputs[1], &outputs[0])),
     // Memory opcodes: WFF is handled at batch level via MemoryConsistencyAir
-    opcode::MLOAD | opcode::MSTORE | opcode::MSTORE8 => None,
+    opcode::MLOAD
+    | opcode::MSTORE
+    | opcode::MSTORE8
+    | opcode::RETURNDATACOPY
+    | opcode::EXTCODECOPY
+    | opcode::MCOPY => None,
+    // Storage opcodes: no WFF; consistency via StorageConsistencyAir.
+    opcode::SLOAD | opcode::SSTORE => None,
+    // RETURN/REVERT: no WFF; return data captured via ReturnDataClaim.
+    opcode::RETURN | opcode::REVERT => None,
+    // Env opcodes: no WFF; value comes from execution context (CallContextClaim).
+    opcode::CALLER
+    | opcode::CALLVALUE
+    | opcode::CALLDATALOAD
+    | opcode::CALLDATASIZE
+    | opcode::PC
+    | opcode::MSIZE
+    | opcode::GAS
+    | opcode::ADDRESS
+    | opcode::ORIGIN
+    | opcode::GASPRICE
+    | opcode::CODESIZE
+    | opcode::RETURNDATASIZE
+    | opcode::COINBASE
+    | opcode::TIMESTAMP
+    | opcode::NUMBER
+    | opcode::DIFFICULTY
+    | opcode::GASLIMIT
+    | opcode::CHAINID
+    | opcode::SELFBALANCE
+    | opcode::BASEFEE
+    | opcode::BLOBBASEFEE => None,
+    // External state opcodes: no WFF; value comes from ExternalStateClaim.
+    opcode::BLOCKHASH | opcode::EXTCODESIZE | opcode::EXTCODEHASH | opcode::BALANCE => None,
+    // BLOBHASH: no WFF; value comes from transaction blob context (CallContextClaim).
+    opcode::BLOBHASH => None,
+    // CALLDATACOPY/CODECOPY: memory copy; correctness via MemoryConsistencyAir.
+    opcode::CALLDATACOPY | opcode::CODECOPY => None,
+    // Sub-call / create opcodes: no WFF; result captured via SubCallClaim.
+    opcode::CALL
+    | opcode::CALLCODE
+    | opcode::DELEGATECALL
+    | opcode::STATICCALL
+    | opcode::CREATE
+    | opcode::CREATE2
+    | opcode::SELFDESTRUCT => None,
+    // Transient storage (EIP-1153): no WFF; like SLOAD/SSTORE.
+    opcode::TLOAD | opcode::TSTORE => None,
+    // Event log opcodes: no WFF; data captured in execution receipt.
+    opcode::LOG0 | opcode::LOG1 | opcode::LOG2 | opcode::LOG3 | opcode::LOG4 => None,
+    // INVALID: terminates execution; no proof.
+    opcode::INVALID => None,
+    // KECCAK256: no WFF; preimage correctness via KeccakConsistencyProof.
+    opcode::KECCAK256 => None,
     // Structural ops: no semantic proof needed
     _ => None,
   }
@@ -362,7 +877,15 @@ pub fn verify_proof(proof: &InstructionTransitionProof) -> bool {
       };
       wff == wff_result
     }
-    (None, None) => is_structural_opcode(proof.opcode),
+    (None, None) => is_structural_opcode(proof.opcode)
+      || is_memory_opcode(proof.opcode)
+      || is_storage_opcode(proof.opcode)
+      || is_terminating_data_opcode(proof.opcode)
+      || is_env_opcode(proof.opcode)
+      || is_external_state_opcode(proof.opcode)
+      || is_subcall_opcode(proof.opcode)
+      || is_log_opcode(proof.opcode)
+      || verify_keccak_claim_inline(proof),
     _ => false, // Mismatch between proof presence and expected WFF
   }
 }
@@ -442,14 +965,28 @@ pub(crate) fn prove_instruction_zk_receipt_with_lut_override(
   let rows = compile_proof(semantic_proof);
   let stack_bind_pv =
     make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, proof.opcode, &expected_wff);
-  let lut_bind_pv =
-    make_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, proof.opcode, &expected_wff);
 
+  // StackIR proof: single-instruction setup (unchanged).
   let (prep_data, preprocessed_vk) = setup_proof_rows_preprocessed(&rows, &stack_bind_pv)?;
-
   let stack_ir_proof = prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv)?;
-  let (lut_kernel_proof, byte_table_proof) =
-    prove_lut_with_prep_and_logup(&rows, &prep_data, &lut_bind_pv)?;
+
+  // LUT proof: route through batch (BatchLutKernelAirWithPrep) for N=1.
+  let lut_items: &[(u8, &Proof)] = &[(proof.opcode, semantic_proof)];
+  let lut_manifest = build_batch_manifest(lut_items)?;
+  let lut_bind_pv =
+    make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &lut_manifest.entries);
+  let (lut_prep_data, lut_preprocessed_vk) =
+    setup_batch_proof_rows_preprocessed(&lut_manifest, &lut_bind_pv)?;
+  let lut_kernel_proof =
+    prove_batch_lut_with_prep(&lut_manifest, &lut_prep_data, &lut_bind_pv)?;
+
+  // Byte-table proof for AND/OR/XOR operations.
+  let byte_queries = collect_byte_table_queries_from_rows(&lut_manifest.all_rows);
+  let byte_table_proof = if byte_queries.is_empty() {
+    None
+  } else {
+    Some(crate::byte_table::prove_byte_table(&byte_queries))
+  };
 
   Ok(InstructionTransitionZkReceipt {
     opcode: proof.opcode,
@@ -457,6 +994,7 @@ pub(crate) fn prove_instruction_zk_receipt_with_lut_override(
     lut_kernel_proof,
     byte_table_proof,
     preprocessed_vk,
+    lut_preprocessed_vk,
     expected_wff,
   })
 }
@@ -487,8 +1025,6 @@ pub fn prove_instruction_zk_receipt_timed(
   let rows = compile_proof(semantic_proof);
   let stack_bind_pv =
     make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, proof.opcode, &expected_wff);
-  let lut_bind_pv =
-    make_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, proof.opcode, &expected_wff);
 
   let t0 = Instant::now();
   let (prep_data, preprocessed_vk) = setup_proof_rows_preprocessed(&rows, &stack_bind_pv)?;
@@ -498,12 +1034,20 @@ pub fn prove_instruction_zk_receipt_timed(
   let stack_ir_proof = prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv)?;
   let stack_ir_us = t1.elapsed().as_secs_f64() * 1e6;
 
+  // LUT proof: batch path (N=1), includes batch setup + prove.
   let t2 = Instant::now();
-  let lut_kernel_proof = prove_lut_with_prep(&rows, &prep_data, &lut_bind_pv)?;
+  let lut_items: &[(u8, &Proof)] = &[(proof.opcode, semantic_proof)];
+  let lut_manifest = build_batch_manifest(lut_items)?;
+  let lut_bind_pv =
+    make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &lut_manifest.entries);
+  let (lut_prep_data, lut_preprocessed_vk) =
+    setup_batch_proof_rows_preprocessed(&lut_manifest, &lut_bind_pv)?;
+  let lut_kernel_proof =
+    prove_batch_lut_with_prep(&lut_manifest, &lut_prep_data, &lut_bind_pv)?;
   let lut_us = t2.elapsed().as_secs_f64() * 1e6;
 
   // Time the companion LogUp byte-table proof separately.
-  let byte_queries = collect_byte_table_queries_from_rows(&rows);
+  let byte_queries = collect_byte_table_queries_from_rows(&lut_manifest.all_rows);
   let t3 = Instant::now();
   let byte_table_proof = if byte_queries.is_empty() {
     None
@@ -518,6 +1062,7 @@ pub fn prove_instruction_zk_receipt_timed(
     lut_kernel_proof,
     byte_table_proof,
     preprocessed_vk,
+    lut_preprocessed_vk,
     expected_wff,
   };
   Ok((receipt, (setup_us, stack_ir_us, lut_us, logup_us)))
@@ -643,22 +1188,44 @@ pub fn verify_instruction_zk_receipt(
 
   let stack_bind_pv =
     make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, statement.opcode, &expected_wff);
-  let lut_bind_pv =
-    make_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, statement.opcode, &expected_wff);
 
-  let prep_vk = &receipt.preprocessed_vk;
-
-  if verify_stack_ir_with_prep(&receipt.stack_ir_proof, prep_vk, &stack_bind_pv).is_err() {
+  if verify_stack_ir_with_prep(
+    &receipt.stack_ir_proof,
+    &receipt.preprocessed_vk,
+    &stack_bind_pv,
+  )
+  .is_err()
+  {
     return false;
   }
 
-  verify_lut_with_prep_and_logup(
+  // LUT verification: batch path (BatchLutKernelAirWithPrep).
+  let batch_entries = [BatchInstructionMeta {
+    opcode: statement.opcode,
+    wff: expected_wff.clone(),
+    row_start: 0,
+    row_count: 0,
+  }];
+  let lut_bind_pv =
+    make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &batch_entries);
+  if verify_batch_lut_with_prep(
     &receipt.lut_kernel_proof,
-    receipt.byte_table_proof.as_ref(),
-    prep_vk,
+    &receipt.lut_preprocessed_vk,
     &lut_bind_pv,
   )
-  .is_ok()
+  .is_err()
+  {
+    return false;
+  }
+
+  // Byte-table proof (AND/OR/XOR).
+  if let Some(bp) = &receipt.byte_table_proof {
+    if crate::byte_table::verify_byte_table(bp).is_err() {
+      return false;
+    }
+  }
+
+  true
 }
 
 // ============================================================
@@ -734,42 +1301,78 @@ pub fn prove_batch_transaction_zk_receipt(
   let (prep_data, preprocessed_vk) = setup_batch_proof_rows_preprocessed(&manifest, &lut_bind_pv)?;
   let lut_proof = prove_batch_lut_with_prep(&manifest, &prep_data, &lut_bind_pv)?;
 
-  // Collect memory access claims from all instructions, assigning monotone rw_counters
-  // and per-address write_version counters.
-  let mut all_claims: Vec<MemAccessClaim> = Vec::new();
+  // Collect memory access claims from all instructions, assigning monotone rw_counters.
+  let mut all_mem_claims: Vec<MemAccessClaim> = Vec::new();
+  let mut all_stor_claims: Vec<StorageAccessClaim> = Vec::new();
+  let mut all_keccak_claims: Vec<KeccakClaim> = Vec::new();
   let mut rw_counter: u64 = 0;
-  // next_write_version[addr] = write_version to assign to the *next* access at addr.
-  let mut next_write_version: std::collections::HashMap<u64, u32> =
-    std::collections::HashMap::new();
   for itp in itps {
     for claim in &itp.memory_claims {
       rw_counter += 1;
-      let wv = *next_write_version.get(&claim.addr).unwrap_or(&0);
-      // After a write the version advances; after a read it stays the same.
-      if claim.is_write {
-        *next_write_version.entry(claim.addr).or_insert(0) += 1;
-      }
-      all_claims.push(MemAccessClaim {
+      all_mem_claims.push(MemAccessClaim {
         rw_counter,
         addr: claim.addr,
         is_write: claim.is_write,
         value: claim.value,
-        write_version: wv,
       });
     }
+    for claim in &itp.storage_claims {
+      rw_counter += 1;
+      all_stor_claims.push(StorageAccessClaim {
+        rw_counter,
+        contract: claim.contract,
+        slot: claim.slot,
+        is_write: claim.is_write,
+        value: claim.value,
+      });
+    }
+    if let Some(ref kc) = itp.keccak_claim {
+      all_keccak_claims.push(kc.clone());
+    }
   }
-  let memory_proof = if all_claims.is_empty() {
+  let memory_proof = if all_mem_claims.is_empty() {
     None
   } else {
-    Some(prove_memory_consistency(&all_claims)?)
+    Some(prove_memory_consistency(&all_mem_claims)?)
   };
+  let storage_proof = if all_stor_claims.is_empty() {
+    None
+  } else {
+    Some(prove_storage_consistency(&all_stor_claims)?)
+  };
+  let keccak_proof = if all_keccak_claims.is_empty() {
+    None
+  } else {
+    Some(prove_keccak_consistency(&all_keccak_claims)?)
+  };
+
+  // Collect stack claims from all instructions (rw_counter is shared and already monotone
+  // since the claims are emitted in execution order by the inspector).
+  let all_stack_claims: Vec<StackAccessClaim> = itps
+    .iter()
+    .flat_map(|itp| itp.stack_claims.iter().cloned())
+    .collect();
+  let stack_proof = if all_stack_claims.is_empty() {
+    None
+  } else {
+    Some(prove_stack_consistency(&all_stack_claims)?)
+  };
+
+  // Collect return/revert data from the last terminating instruction (if any).
+  let return_data = itps
+    .iter()
+    .rev()
+    .find_map(|itp| itp.return_data_claim.clone());
 
   Ok(BatchTransactionZkReceipt {
     lut_proof,
     preprocessed_vk,
     manifest,
     memory_proof,
-    memory_claims: all_claims,
+    storage_proof,
+    keccak_proof,
+    stack_proof,
+    return_data,
   })
 }
 
@@ -829,9 +1432,62 @@ pub fn verify_batch_transaction_zk_receipt(
     return false;
   }
 
+  // 4.5. Out-of-circuit manifest row validation (Gap 3 + Gap 4).
+  //
+  // Gap 3: byte AND/OR/XOR rows must commit the correct result value
+  //   (row.value == scalar0 op scalar1).  The LUT AIR binds out0 to
+  //   prep[PREP_COL_VALUE] but does not constrain out0 = in0 op in1.
+  //
+  // Gap 4: arithmetic operands (U29/U24AddEq, U15MulEq) must be within
+  //   their declared bit-width bounds.  M31 field arithmetic can satisfy
+  //   the AIR sum equation with out-of-range inputs, so the check is
+  //   enforced here rather than (only) in the STARK.
+  if !validate_manifest_rows(&receipt.manifest.all_rows) {
+    return false;
+  }
+
   // 5. Memory consistency STARK (if present).
   if let Some(mem_proof) = &receipt.memory_proof {
-    if !verify_memory_consistency(mem_proof, &receipt.memory_claims) {
+    if !verify_memory_consistency(mem_proof) {
+      return false;
+    }
+  }
+
+  // 6. Storage consistency STARK (if present).
+  if let Some(stor_proof) = &receipt.storage_proof {
+    if !verify_storage_consistency(stor_proof) {
+      return false;
+    }
+  }
+
+  // 7. Stack consistency STARK (if present).
+  if let Some(stk_proof) = &receipt.stack_proof {
+    if !verify_stack_consistency(stk_proof) {
+      return false;
+    }
+  }
+
+  // 8. Keccak consistency STARK (if present).
+  if let Some(kec_proof) = &receipt.keccak_proof {
+    if !verify_keccak_consistency(kec_proof) {
+      return false;
+    }
+  }
+
+  // 9. Keccak ↔ memory cross-check (BUG-MISS-3).
+  //
+  // verify_keccak_consistency only checks keccak256(input_bytes) == output_hash.
+  // Without this step a malicious prover could supply a keccak claim whose
+  // input_bytes differ from what the memory proof holds at [offset, offset+size).
+  // We cross-check every keccak claim's bytes against the memory write/read logs.
+  if let (Some(kec_proof), Some(mem_proof)) =
+    (&receipt.keccak_proof, &receipt.memory_proof)
+  {
+    if !validate_keccak_memory_cross_check(
+      &kec_proof.log,
+      &mem_proof.write_log,
+      &mem_proof.read_log,
+    ) {
       return false;
     }
   }

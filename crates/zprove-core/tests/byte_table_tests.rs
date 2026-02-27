@@ -225,7 +225,7 @@ mod byte_table_tests {
       },
       // Non-bitwise step — should NOT appear in the byte-table queries.
       LutStep {
-        op: LutOpcode::ByteAddEq,
+        op: LutOpcode::U29AddEq,
         in0: 1,
         in1: 2,
         in2: 0,

@@ -93,16 +93,6 @@ mod tests {
         corrupted = true;
         break;
       }
-      if r.op == OP_U16_ADD_EQ {
-        r.scalar0 = 70_000; // > 0xFFFF
-        corrupted = true;
-        break;
-      }
-      if r.op == OP_BYTE_ADD_EQ {
-        r.scalar0 = 300; // > 255, triggers range check error
-        corrupted = true;
-        break;
-      }
     }
     assert!(corrupted, "expected at least one add-family row to corrupt");
     assert!(
