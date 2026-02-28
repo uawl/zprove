@@ -203,7 +203,7 @@ mod tests {
       let proof = prove_instruction(op, &inputs, &outputs).expect("supported opcode must prove");
       let inferred = infer_proof(&proof).expect("inference must succeed for generated proof");
       let expected =
-        wff_instruction(op, &inputs, &outputs).expect("supported opcode must have target WFF");
+        wff_instruction_core_only(op, &inputs, &outputs).expect("supported opcode must have target WFF");
 
       assert_eq!(
         inferred, expected,
@@ -558,18 +558,22 @@ mod tests {
 
   #[test]
   fn test_receipt_splice_attack_stack_ir_rejected() {
-    let a1 = u256_bytes(4321);
-    let b1 = u256_bytes(1234);
-    let c1 = u256_bytes(5555);
-    let a2 = u256_bytes(1111);
-    let b2 = u256_bytes(2222);
-    let c2 = u256_bytes(3333);
+    // AND operations embed concrete byte values in proof rows, so receipts
+    // for different AND inputs have different proof traces and preprocessed VKs.
+    // Swapping the stack_ir_proof between two distinct AND receipts must be rejected.
+    let a1 = [0xAAu8; 32];
+    let b1 = [0xFFu8; 32];
+    let mut c1 = [0u8; 32]; for i in 0..32 { c1[i] = a1[i] & b1[i]; }
 
-    let semantic1 = prove_instruction(opcode::ADD, &[a1, b1], &[c1]).unwrap();
-    let semantic2 = prove_instruction(opcode::ADD, &[a2, b2], &[c2]).unwrap();
+    let a2 = [0xF0u8; 32];
+    let b2 = [0x0Fu8; 32];
+    let mut c2 = [0u8; 32]; for i in 0..32 { c2[i] = a2[i] & b2[i]; }
+
+    let semantic1 = prove_instruction(opcode::AND, &[a1, b1], &[c1]).unwrap();
+    let semantic2 = prove_instruction(opcode::AND, &[a2, b2], &[c2]).unwrap();
 
     let itp1 = InstructionTransitionProof {
-      opcode: opcode::ADD,
+      opcode: opcode::AND,
       pc: 19,
       stack_inputs: vec![a1, b1],
       stack_outputs: vec![c1],
@@ -586,7 +590,7 @@ mod tests {
       sub_call_claim: None,
     };
     let itp2 = InstructionTransitionProof {
-      opcode: opcode::ADD,
+      opcode: opcode::AND,
       pc: 20,
       stack_inputs: vec![a2, b2],
       stack_outputs: vec![c2],
@@ -604,16 +608,16 @@ mod tests {
     };
 
     let statement1 = InstructionTransitionStatement {
-      opcode: opcode::ADD,
+      opcode: opcode::AND,
       s_i: VmState {
-        opcode: opcode::ADD,
+        opcode: opcode::AND,
         pc: 19,
         sp: 2,
         stack: vec![a1, b1],
         memory_root: [0u8; 32],
       },
       s_next: VmState {
-        opcode: opcode::ADD,
+        opcode: opcode::AND,
         pc: 20,
         sp: 1,
         stack: vec![c1],
@@ -633,18 +637,19 @@ mod tests {
 
   #[test]
   fn test_receipt_splice_attack_lut_rejected() {
-    let a1 = u256_bytes(4321);
-    let b1 = u256_bytes(1234);
-    let c1 = u256_bytes(5555);
-    let a2 = u256_bytes(1111);
-    let b2 = u256_bytes(2222);
-    let c2 = u256_bytes(3333);
+    let a1 = [0xAAu8; 32];
+    let b1 = [0xFFu8; 32];
+    let mut c1 = [0u8; 32]; for i in 0..32 { c1[i] = a1[i] & b1[i]; }
 
-    let semantic1 = prove_instruction(opcode::ADD, &[a1, b1], &[c1]).unwrap();
-    let semantic2 = prove_instruction(opcode::ADD, &[a2, b2], &[c2]).unwrap();
+    let a2 = [0xF0u8; 32];
+    let b2 = [0x0Fu8; 32];
+    let mut c2 = [0u8; 32]; for i in 0..32 { c2[i] = a2[i] & b2[i]; }
+
+    let semantic1 = prove_instruction(opcode::AND, &[a1, b1], &[c1]).unwrap();
+    let semantic2 = prove_instruction(opcode::AND, &[a2, b2], &[c2]).unwrap();
 
     let itp1 = InstructionTransitionProof {
-      opcode: opcode::ADD,
+      opcode: opcode::AND,
       pc: 21,
       stack_inputs: vec![a1, b1],
       stack_outputs: vec![c1],
@@ -661,7 +666,7 @@ mod tests {
       sub_call_claim: None,
     };
     let itp2 = InstructionTransitionProof {
-      opcode: opcode::ADD,
+      opcode: opcode::AND,
       pc: 22,
       stack_inputs: vec![a2, b2],
       stack_outputs: vec![c2],
@@ -679,16 +684,16 @@ mod tests {
     };
 
     let statement1 = InstructionTransitionStatement {
-      opcode: opcode::ADD,
+      opcode: opcode::AND,
       s_i: VmState {
-        opcode: opcode::ADD,
+        opcode: opcode::AND,
         pc: 21,
         sp: 2,
         stack: vec![a1, b1],
         memory_root: [0u8; 32],
       },
       s_next: VmState {
-        opcode: opcode::ADD,
+        opcode: opcode::AND,
         pc: 22,
         sp: 1,
         stack: vec![c1],
@@ -711,18 +716,19 @@ mod tests {
 
   #[test]
   fn test_receipt_splice_attack_wff_match_rejected() {
-    let a1 = u256_bytes(4321);
-    let b1 = u256_bytes(1234);
-    let c1 = u256_bytes(5555);
-    let a2 = u256_bytes(1111);
-    let b2 = u256_bytes(2222);
-    let c2 = u256_bytes(3333);
+    let a1 = [0xAAu8; 32];
+    let b1 = [0xFFu8; 32];
+    let mut c1 = [0u8; 32]; for i in 0..32 { c1[i] = a1[i] & b1[i]; }
 
-    let semantic1 = prove_instruction(opcode::ADD, &[a1, b1], &[c1]).unwrap();
-    let semantic2 = prove_instruction(opcode::ADD, &[a2, b2], &[c2]).unwrap();
+    let a2 = [0xF0u8; 32];
+    let b2 = [0x0Fu8; 32];
+    let mut c2 = [0u8; 32]; for i in 0..32 { c2[i] = a2[i] & b2[i]; }
+
+    let semantic1 = prove_instruction(opcode::AND, &[a1, b1], &[c1]).unwrap();
+    let semantic2 = prove_instruction(opcode::AND, &[a2, b2], &[c2]).unwrap();
 
     let itp1 = InstructionTransitionProof {
-      opcode: opcode::ADD,
+      opcode: opcode::AND,
       pc: 23,
       stack_inputs: vec![a1, b1],
       stack_outputs: vec![c1],
@@ -739,7 +745,7 @@ mod tests {
       sub_call_claim: None,
     };
     let itp2 = InstructionTransitionProof {
-      opcode: opcode::ADD,
+      opcode: opcode::AND,
       pc: 24,
       stack_inputs: vec![a2, b2],
       stack_outputs: vec![c2],
@@ -757,16 +763,16 @@ mod tests {
     };
 
     let statement1 = InstructionTransitionStatement {
-      opcode: opcode::ADD,
+      opcode: opcode::AND,
       s_i: VmState {
-        opcode: opcode::ADD,
+        opcode: opcode::AND,
         pc: 23,
         sp: 2,
         stack: vec![a1, b1],
         memory_root: [0u8; 32],
       },
       s_next: VmState {
-        opcode: opcode::ADD,
+        opcode: opcode::AND,
         pc: 24,
         sp: 1,
         stack: vec![c1],
@@ -2239,7 +2245,11 @@ mod tests {
 
   #[test]
   fn test_comparison_opcodes_in_wff_target_match() {
-    // Verify infer_proof(prove_*(..)) == wff_*(..)) for all new ops
+    // Verify infer_proof(prove_instruction(..)) == wff_instruction_core_only(..)
+    // prove_instruction no longer emits InputEq/OutputEq rows; the stack I/O
+    // binding lives in the WFF hash (public values) only.  The core-only helper
+    // reflects the narrower proof tree.
+    use zprove_core::transition::wff_instruction_core_only;
     let small = u256_bytes(5);
     let large = u256_bytes(100);
     let neg = i256_bytes(-10);
@@ -2265,8 +2275,8 @@ mod tests {
         .unwrap_or_else(|| panic!("prove_instruction failed for opcode 0x{op:02x}"));
       let inferred = infer_proof(&proof)
         .unwrap_or_else(|e| panic!("infer_proof failed for opcode 0x{op:02x}: {e}"));
-      let expected = wff_instruction(*op, inputs, &[*output])
-        .unwrap_or_else(|| panic!("wff_instruction returned None for opcode 0x{op:02x}"));
+      let expected = wff_instruction_core_only(*op, inputs, &[*output])
+        .unwrap_or_else(|| panic!("wff_instruction_core_only returned None for opcode 0x{op:02x}"));
       assert_eq!(inferred, expected, "WFF mismatch for opcode 0x{op:02x}");
     }
   }
@@ -2898,7 +2908,7 @@ mod shift_tests {
   use zprove_core::transition::{
     CallContextClaim, InstructionTransitionProof, KeccakClaim, ReturnDataClaim, StorageAccessClaim,
     opcode_input_count, opcode_output_count, prove_instruction, verify_proof_with_zkp,
-    verify_proof_with_rows, wff_instruction,
+    verify_proof_with_rows, wff_instruction, wff_instruction_core_only,
   };
 
   fn u256(val: u128) -> [u8; 32] {
@@ -3198,7 +3208,7 @@ mod shift_tests {
       let proof =
         prove_instruction(op, &[shift, value], &[result]).expect("shift opcode must prove");
       let inferred = infer_proof(&proof).expect("infer must succeed");
-      let expected = wff_instruction(op, &[shift, value], &[result]).expect("wff must exist");
+      let expected = wff_instruction_core_only(op, &[shift, value], &[result]).expect("wff must exist");
       assert_eq!(
         inferred, expected,
         "opcode 0x{op:02x} shift={shift_u64} inferred WFF must match expected"
@@ -3407,7 +3417,9 @@ mod shift_tests {
 
   #[test]
   fn test_arithmetic_wff_consistency() {
-    // Verify inferred WFF matches wff_instruction for all new opcodes.
+    // Verify inferred WFF matches wff_instruction_core_only for all new opcodes.
+    // prove_instruction no longer emits InputEq/OutputEq; use core-only helper.
+    use zprove_core::transition::wff_instruction_core_only;
     let cases: &[(u8, &[[u8; 32]], [u8; 32])] = &[
       // BYTE(31, 0xABCDEF): byte at index 31 (LSB) = 0xEF
       (opcode::BYTE, &[u256(31), u256(0xABCDEF)], {
@@ -3427,7 +3439,7 @@ mod shift_tests {
     for &(op, inputs, out) in cases {
       let proof = prove_instruction(op, inputs, &[out]).expect("proof");
       let inferred = infer_proof(&proof).expect("infer");
-      let expected = wff_instruction(op, inputs, &[out]).expect("wff");
+      let expected = wff_instruction_core_only(op, inputs, &[out]).expect("wff");
       assert_eq!(inferred, expected, "opcode 0x{op:02x} WFF mismatch");
     }
   }

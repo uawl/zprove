@@ -20,7 +20,12 @@ mod tests {
       Term::Ite(c, a, b) | Term::ByteAdd(a, b, c) | Term::ByteAddCarry(a, b, c) => {
         1 + term_node_count(c) + term_node_count(a) + term_node_count(b)
       }
-      Term::InputTerm { .. } | Term::OutputTerm { .. } | Term::PcBefore { .. } | Term::PcAfter { .. } => 1,
+      Term::InputTerm { .. } | Term::OutputTerm { .. } | Term::PcBefore { .. } | Term::PcAfter { .. } | Term::CarryTerm { .. }
+      | Term::InputLimb29 { .. } | Term::OutputLimb29 { .. } | Term::InputLimb24 { .. } | Term::OutputLimb24 { .. }
+      | Term::CarryLimb { .. } => 1,
+      Term::Add29(a, b, c) | Term::Add29Carry(a, b, c) | Term::Add24(a, b, c) => {
+        1 + term_node_count(a) + term_node_count(b) + term_node_count(c)
+      }
     }
   }
 

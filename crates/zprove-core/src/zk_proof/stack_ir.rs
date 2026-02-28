@@ -1,10 +1,12 @@
 //! StackIR (register-machine IR) trace builder, AIR, and prove/verify functions.
 
 use super::preprocessed::{
-  PREP_COL_ARG0, PREP_COL_ARG1, PREP_COL_ARG2, PREP_COL_EVM_OPCODE, PREP_COL_OP, PREP_COL_RET_TY,
-  PREP_COL_SCALAR0, PREP_COL_SCALAR1, PREP_COL_SCALAR2, PREP_COL_VALUE, PREP_COL_WFF_DIGEST_START,
+  PREP_COL_ARG0, PREP_COL_ARG1, PREP_COL_ARG2, PREP_COL_BATCH_DIGEST_START, PREP_COL_BATCH_N,
+  PREP_COL_EVM_OPCODE, PREP_COL_OP, PREP_COL_RET_TY, PREP_COL_SCALAR0, PREP_COL_SCALAR1,
+  PREP_COL_SCALAR2, PREP_COL_VALUE, PREP_COL_WFF_DIGEST_START, build_batch_proof_rows_preprocessed_matrix,
   build_proof_rows_preprocessed_matrix,
 };
+use super::batch::BatchProofRowsManifest;
 use super::types::{
   CircleStarkConfig, CircleStarkProof, CircleStarkVerifyResult, RECEIPT_BIND_TAG_STACK, Val,
   default_receipt_bind_public_values_for_tag, make_circle_config,
@@ -372,6 +374,146 @@ pub fn verify_stack_ir_with_prep(
   p3_uni_stark::verify_with_preprocessed(
     &config,
     &StackIrAirWithPrep::for_verify(),
+    proof,
+    public_values,
+    Some(prep_vk),
+  )
+}
+
+// ============================================================
+// Batch StackIR: proves all N instructions' ProofRows in one STARK.
+// Uses the extended batch preprocessed matrix (NUM_BATCH_PREP_COLS = 27).
+// Mirrors `BatchLutKernelAirWithPrep` column binding but with StackIR main trace.
+// ============================================================
+
+/// StackIR AIR for batch mode.  Binds:
+/// - per-row main trace columns to the shared batch preprocessed matrix,
+/// - `pis[1]` to `prep_row[PREP_COL_BATCH_N]` at row 0,
+/// - `pis[2..10]` to `prep_row[PREP_COL_BATCH_DIGEST_START..]` at row 0,
+/// - `pis[0]` to `RECEIPT_BIND_TAG_STACK`.
+pub struct StackIrBatchAirWithPrep {
+  prep_matrix: Option<RowMajorMatrix<Val>>,
+}
+
+impl StackIrBatchAirWithPrep {
+  pub fn new(manifest: &BatchProofRowsManifest, pv: &[Val]) -> Self {
+    Self {
+      prep_matrix: cfg!(debug_assertions)
+        .then(|| build_batch_proof_rows_preprocessed_matrix(manifest, pv)),
+    }
+  }
+
+  pub fn for_verify() -> Self {
+    Self { prep_matrix: None }
+  }
+}
+
+impl BaseAir<Val> for StackIrBatchAirWithPrep {
+  fn width(&self) -> usize {
+    NUM_STACK_IR_COLS
+  }
+
+  fn preprocessed_trace(&self) -> Option<RowMajorMatrix<Val>> {
+    self.prep_matrix.clone()
+  }
+}
+
+impl<AB> Air<AB> for StackIrBatchAirWithPrep
+where
+  AB: AirBuilderWithPublicValues + PairBuilder + AirBuilder<F = Val>,
+{
+  fn eval(&self, builder: &mut AB) {
+    // 1. Tag check.
+    {
+      let pis = builder.public_values();
+      builder.assert_eq(pis[0], AB::Expr::from_u32(RECEIPT_BIND_TAG_STACK));
+    }
+
+    // 2. Batch pv binding at row 0: N and batch manifest digest.
+    {
+      let pi_n: AB::Expr = {
+        let pis = builder.public_values();
+        pis[1].into()
+      };
+      let pi_digest: [AB::Expr; 8] = {
+        let pis = builder.public_values();
+        std::array::from_fn(|k| pis[2 + k].into())
+      };
+      let prep_n: AB::Expr = {
+        let prep = builder.preprocessed();
+        let row = prep
+          .row_slice(0)
+          .expect("StackIrBatchAirWithPrep: empty prep (batch-n bind)");
+        row[PREP_COL_BATCH_N].clone().into()
+      };
+      let prep_digest: [AB::Expr; 8] = {
+        let prep = builder.preprocessed();
+        let row = prep
+          .row_slice(0)
+          .expect("StackIrBatchAirWithPrep: empty prep (batch-digest bind)");
+        std::array::from_fn(|k| row[PREP_COL_BATCH_DIGEST_START + k].clone().into())
+      };
+      builder.when_first_row().assert_eq(prep_n, pi_n);
+      for k in 0..8_usize {
+        builder
+          .when_first_row()
+          .assert_eq(prep_digest[k].clone(), pi_digest[k].clone());
+      }
+    }
+
+    // 3. Per-row: main trace columns must match the batch preprocessed columns.
+    {
+      let prep = builder.preprocessed();
+      let prep_row = prep
+        .row_slice(0)
+        .expect("StackIrBatchAirWithPrep: empty preprocessed trace");
+      let prep_row = &*prep_row;
+      let main = builder.main();
+      let local = main
+        .row_slice(0)
+        .expect("StackIrBatchAirWithPrep: empty main trace");
+      let local = &*local;
+
+      builder.assert_eq(local[STACK_COL_OP].clone(), prep_row[PREP_COL_OP].clone());
+      builder.assert_eq(local[STACK_COL_ARG0].clone(), prep_row[PREP_COL_ARG0].clone());
+      builder.assert_eq(local[STACK_COL_ARG1].clone(), prep_row[PREP_COL_ARG1].clone());
+      builder.assert_eq(local[STACK_COL_ARG2].clone(), prep_row[PREP_COL_ARG2].clone());
+      builder.assert_eq(local[STACK_COL_SCALAR0].clone(), prep_row[PREP_COL_SCALAR0].clone());
+      builder.assert_eq(local[STACK_COL_SCALAR1].clone(), prep_row[PREP_COL_SCALAR1].clone());
+      builder.assert_eq(local[STACK_COL_SCALAR2].clone(), prep_row[PREP_COL_SCALAR2].clone());
+      builder.assert_eq(local[STACK_COL_VALUE].clone(), prep_row[PREP_COL_VALUE].clone());
+      builder.assert_eq(local[STACK_COL_RET_TY].clone(), prep_row[PREP_COL_RET_TY].clone());
+    }
+  }
+}
+
+/// Prove the StackIR STARK for all rows in `manifest` as one batch proof.
+///
+/// Reuses the same `prep_data` as the LUT batch proof
+/// (`setup_batch_proof_rows_preprocessed`).  Only `pis[0]` (the tag) differs.
+pub fn prove_batch_stack_ir_with_prep(
+  manifest: &BatchProofRowsManifest,
+  prep_data: &PreprocessedProverData<CircleStarkConfig>,
+  public_values: &[Val],
+) -> Result<CircleStarkProof, String> {
+  let trace = build_stack_ir_trace_from_rows(&manifest.all_rows)?;
+  let config = make_circle_config();
+  let air = StackIrBatchAirWithPrep::new(manifest, public_values);
+  let proof =
+    p3_uni_stark::prove_with_preprocessed(&config, &air, trace, public_values, Some(prep_data));
+  Ok(proof)
+}
+
+/// Verify a batch StackIR proof generated by [`prove_batch_stack_ir_with_prep`].
+pub fn verify_batch_stack_ir_with_prep(
+  proof: &CircleStarkProof,
+  prep_vk: &PreprocessedVerifierKey<CircleStarkConfig>,
+  public_values: &[Val],
+) -> CircleStarkVerifyResult {
+  let config = make_circle_config();
+  p3_uni_stark::verify_with_preprocessed(
+    &config,
+    &StackIrBatchAirWithPrep::for_verify(),
     proof,
     public_values,
     Some(prep_vk),

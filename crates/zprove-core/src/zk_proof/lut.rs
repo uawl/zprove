@@ -614,7 +614,10 @@ pub fn collect_byte_table_queries_from_rows(
   rows: &[ProofRow],
 ) -> Vec<crate::byte_table::ByteTableQuery> {
   use crate::byte_table::{BYTE_OP_AND, BYTE_OP_OR, BYTE_OP_XOR};
-  use crate::semantic_proof::{OP_BYTE_AND_EQ, OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ};
+  use crate::semantic_proof::{
+    OP_BYTE_AND_EQ, OP_BYTE_AND_SYM, OP_BYTE_NOT_SYM, OP_BYTE_OR_EQ, OP_BYTE_OR_SYM,
+    OP_BYTE_XOR_EQ, OP_BYTE_XOR_SYM,
+  };
   use std::collections::BTreeMap;
 
   let mut acc: BTreeMap<(u8, u8, u32), i32> = BTreeMap::new();
@@ -624,6 +627,12 @@ pub fn collect_byte_table_queries_from_rows(
       op if op == OP_BYTE_AND_EQ => (row.scalar0 as u8, row.scalar1 as u8, BYTE_OP_AND),
       op if op == OP_BYTE_OR_EQ => (row.scalar0 as u8, row.scalar1 as u8, BYTE_OP_OR),
       op if op == OP_BYTE_XOR_EQ => (row.scalar0 as u8, row.scalar1 as u8, BYTE_OP_XOR),
+      // Symbolic variants: concrete bytes in scalar1/scalar2.
+      op if op == OP_BYTE_AND_SYM => (row.scalar1 as u8, row.scalar2 as u8, BYTE_OP_AND),
+      op if op == OP_BYTE_OR_SYM => (row.scalar1 as u8, row.scalar2 as u8, BYTE_OP_OR),
+      op if op == OP_BYTE_XOR_SYM => (row.scalar1 as u8, row.scalar2 as u8, BYTE_OP_XOR),
+      // NOT(a) = a XOR 0xFF — uses XOR table.
+      op if op == OP_BYTE_NOT_SYM => (row.scalar1 as u8, 0xFF, BYTE_OP_XOR),
       _ => continue,
     };
     *acc.entry((a, b, op)).or_insert(0) += 1;
@@ -715,15 +724,20 @@ where
   AB: AirBuilderWithPublicValues + PairBuilder + AirBuilder<F = Val>,
 {
   use crate::semantic_proof::{
-    OP_AND_INTRO, OP_BOOL, OP_BYTE, OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE,
-    OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_AND_EQ, OP_BYTE_MUL_HIGH_EQ, OP_BYTE_MUL_LOW_EQ,
-    OP_BYTE_OR_EQ, OP_BYTE_XOR_EQ, OP_CALL_AXIOM, OP_CREATE_AXIOM, OP_DUP_AXIOM,
+    OP_ADD24, OP_ADD29, OP_ADD29_CARRY, OP_ADD_BYTE_SYM, OP_AND_INTRO, OP_BOOL, OP_BYTE,
+    OP_BYTE_ADD_CARRY_THIRD_CONGRUENCE, OP_BYTE_ADD_THIRD_CONGRUENCE, OP_BYTE_AND_EQ,
+    OP_BYTE_AND_SYM, OP_BYTE_MUL_HIGH_EQ, OP_BYTE_MUL_LOW_EQ, OP_BYTE_NOT_SYM,
+    OP_BYTE_OR_EQ, OP_BYTE_OR_SYM, OP_BYTE_XOR_EQ, OP_BYTE_XOR_SYM,
+    OP_CALL_AXIOM, OP_CARRY_EQ, OP_CARRY_LIMB, OP_CARRY_LIMB_ZERO, OP_CARRY_TERM,
+    OP_CREATE_AXIOM, OP_DUP_AXIOM,
     OP_ENV_AXIOM, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_EXTERNAL_STATE_AXIOM,
-    OP_INPUT_TERM, OP_KECCAK_AXIOM, OP_LOG_AXIOM, OP_MEM_COPY_AXIOM, OP_MLOAD_AXIOM,
-    OP_MSTORE_AXIOM, OP_NOT, OP_OUTPUT_TERM, OP_PC_AFTER, OP_PC_BEFORE, OP_PUSH_AXIOM,
+    OP_INPUT_LIMB24, OP_INPUT_LIMB29, OP_INPUT_TERM, OP_KECCAK_AXIOM, OP_LOG_AXIOM,
+    OP_MEM_COPY_AXIOM, OP_MLOAD_AXIOM, OP_MSTORE_AXIOM, OP_NOT, OP_OUTPUT_LIMB24,
+    OP_OUTPUT_LIMB29, OP_OUTPUT_TERM, OP_PC_AFTER, OP_PC_BEFORE, OP_PUSH_AXIOM,
     OP_SELFDESTRUCT_AXIOM, OP_SLOAD_AXIOM, OP_SSTORE_AXIOM, OP_STRUCTURAL_AXIOM,
-    OP_SWAP_AXIOM, OP_TERMINATE_AXIOM, OP_TRANSIENT_AXIOM, OP_U15_MUL_EQ,
-    OP_U24_ADD_EQ, OP_U29_ADD_EQ,
+    OP_SUB_BYTE_SYM, OP_SWAP_AXIOM, OP_TERMINATE_AXIOM, OP_TRANSIENT_AXIOM, OP_U15_MUL_EQ,
+    OP_U24_ADD_EQ, OP_U24_ADD_SYM, OP_U24_SUB_SYM, OP_U29_ADD_EQ, OP_U29_ADD_SYM,
+    OP_U29_SUB_SYM,
   };
 
   let all_prep_ops: &[u32] = &[
@@ -752,6 +766,15 @@ where
     OP_ENV_AXIOM, OP_EXTERNAL_STATE_AXIOM, OP_TERMINATE_AXIOM,
     OP_CALL_AXIOM, OP_CREATE_AXIOM, OP_SELFDESTRUCT_AXIOM, OP_LOG_AXIOM,
     OP_INPUT_TERM, OP_OUTPUT_TERM, OP_PC_BEFORE, OP_PC_AFTER,
+    // 29/24-bit limb symbolic terms — product-gate selectors must evaluate to zero.
+    OP_INPUT_LIMB29, OP_OUTPUT_LIMB29, OP_INPUT_LIMB24, OP_OUTPUT_LIMB24,
+    // Limb arithmetic terms (syntactic; LogUp provides values).
+    OP_CARRY_LIMB, OP_ADD29, OP_ADD29_CARRY, OP_ADD24,
+    // Syntactic limb-level proof variants.
+    OP_CARRY_LIMB_ZERO, OP_U29_ADD_SYM, OP_U24_ADD_SYM, OP_U29_SUB_SYM, OP_U24_SUB_SYM,
+    // Symbolic byte-level op leaves (AND/OR/XOR/NOT/ADD/SUB sym proofs).
+    OP_BYTE_AND_SYM, OP_BYTE_OR_SYM, OP_BYTE_XOR_SYM, OP_BYTE_NOT_SYM,
+    OP_ADD_BYTE_SYM, OP_SUB_BYTE_SYM, OP_CARRY_TERM, OP_CARRY_EQ,
   ];
 
   let n = all_prep_ops.len();
@@ -1189,7 +1212,11 @@ pub fn prove_and_verify_mul_stack_lut_stark(rows: &[ProofRow]) -> bool {
 
 /// Build LUT steps for byte-level AND/OR/XOR rows.
 pub fn build_lut_steps_from_rows_bit_family(rows: &[ProofRow]) -> Result<Vec<LutStep>, String> {
-  use crate::semantic_proof::{OP_AND_INTRO, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_NOT};
+  use crate::semantic_proof::{
+    OP_AND_INTRO, OP_BYTE_AND_SYM, OP_BYTE_NOT_SYM, OP_BYTE_OR_SYM, OP_BYTE_XOR_SYM,
+    OP_CARRY_EQ, OP_CARRY_TERM, OP_EQ_REFL, OP_EQ_SYM, OP_EQ_TRANS, OP_INPUT_TERM,
+    OP_NOT, OP_OUTPUT_TERM, OP_PC_AFTER, OP_PC_BEFORE,
+  };
   let mut out = Vec::new();
   let mut seen_bitwise = false;
 
@@ -1199,7 +1226,62 @@ pub fn build_lut_steps_from_rows_bit_family(rows: &[ProofRow]) -> Result<Vec<Lut
         || op == OP_EQ_REFL
         || op == OP_EQ_SYM
         || op == OP_EQ_TRANS
-        || op == OP_NOT => {}
+        || op == OP_NOT
+        // Symbolic leaf rows — produce LUT entries for the underlying byte ops.
+        || op == OP_CARRY_TERM
+        || op == OP_CARRY_EQ
+        || op == OP_INPUT_TERM
+        || op == OP_OUTPUT_TERM
+        || op == OP_PC_BEFORE
+        || op == OP_PC_AFTER => {}
+      op if op == OP_BYTE_AND_SYM => {
+        seen_bitwise = true;
+        let (a, b) = (row.scalar1, row.scalar2);
+        out.push(LutStep {
+          op: LutOpcode::ByteAndEq,
+          in0: a,
+          in1: b,
+          in2: 0,
+          out0: a & b,
+          out1: 0,
+        });
+      }
+      op if op == OP_BYTE_OR_SYM => {
+        seen_bitwise = true;
+        let (a, b) = (row.scalar1, row.scalar2);
+        out.push(LutStep {
+          op: LutOpcode::ByteOrEq,
+          in0: a,
+          in1: b,
+          in2: 0,
+          out0: a | b,
+          out1: 0,
+        });
+      }
+      op if op == OP_BYTE_XOR_SYM => {
+        seen_bitwise = true;
+        let (a, b) = (row.scalar1, row.scalar2);
+        out.push(LutStep {
+          op: LutOpcode::ByteXorEq,
+          in0: a,
+          in1: b,
+          in2: 0,
+          out0: a ^ b,
+          out1: 0,
+        });
+      }
+      op if op == OP_BYTE_NOT_SYM => {
+        seen_bitwise = true;
+        let a = row.scalar1;
+        out.push(LutStep {
+          op: LutOpcode::ByteXorEq,
+          in0: a,
+          in1: 0xFF,
+          in2: 0,
+          out0: a ^ 0xFF,
+          out1: 0,
+        });
+      }
       crate::semantic_proof::OP_BYTE_AND_EQ => {
         seen_bitwise = true;
         let (a, b) = (row.scalar0, row.scalar1);

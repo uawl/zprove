@@ -172,7 +172,6 @@ pub fn make_circle_config_with_params(
 
 const WFF_TAG_EQUAL: u8 = 1;
 const WFF_TAG_AND: u8 = 2;
-const WFF_TAG_AXIOM: u8 = 3;
 
 const TERM_TAG_BOOL: u8 = 1;
 const TERM_TAG_NOT: u8 = 2;
@@ -192,6 +191,15 @@ const TERM_TAG_INPUT_TERM: u8 = 15;
 const TERM_TAG_OUTPUT_TERM: u8 = 16;
 const TERM_TAG_PC_BEFORE: u8 = 17;
 const TERM_TAG_PC_AFTER: u8 = 18;
+const TERM_TAG_CARRY_TERM: u8 = 19;
+const TERM_TAG_INPUT_LIMB29: u8 = 20;
+const TERM_TAG_OUTPUT_LIMB29: u8 = 21;
+const TERM_TAG_INPUT_LIMB24: u8 = 22;
+const TERM_TAG_OUTPUT_LIMB24: u8 = 23;
+const TERM_TAG_CARRY_LIMB: u8 = 24;
+const TERM_TAG_ADD29: u8 = 25;
+const TERM_TAG_ADD29_CARRY: u8 = 26;
+const TERM_TAG_ADD24: u8 = 27;
 
 pub(super) fn serialize_term(term: &Term, out: &mut Vec<u8>) {
   match term {
@@ -265,15 +273,17 @@ pub(super) fn serialize_term(term: &Term, out: &mut Vec<u8>) {
       serialize_term(a, out);
       serialize_term(b, out);
     }
-    Term::InputTerm { stack_idx, byte_idx } => {
+    Term::InputTerm { stack_idx, byte_idx, value } => {
       out.push(TERM_TAG_INPUT_TERM);
       out.push(*stack_idx);
       out.push(*byte_idx);
+      out.push(*value);
     }
-    Term::OutputTerm { stack_idx, byte_idx } => {
+    Term::OutputTerm { stack_idx, byte_idx, value } => {
       out.push(TERM_TAG_OUTPUT_TERM);
       out.push(*stack_idx);
       out.push(*byte_idx);
+      out.push(*value);
     }
     Term::PcBefore { byte_idx } => {
       out.push(TERM_TAG_PC_BEFORE);
@@ -282,6 +292,50 @@ pub(super) fn serialize_term(term: &Term, out: &mut Vec<u8>) {
     Term::PcAfter { byte_idx } => {
       out.push(TERM_TAG_PC_AFTER);
       out.push(*byte_idx);
+    }
+    Term::CarryTerm { byte_idx } => {
+      out.push(TERM_TAG_CARRY_TERM);
+      out.push(*byte_idx);
+    }
+    Term::InputLimb29 { stack_idx, limb_idx } => {
+      out.push(TERM_TAG_INPUT_LIMB29);
+      out.push(*stack_idx);
+      out.push(*limb_idx);
+    }
+    Term::OutputLimb29 { stack_idx, limb_idx } => {
+      out.push(TERM_TAG_OUTPUT_LIMB29);
+      out.push(*stack_idx);
+      out.push(*limb_idx);
+    }
+    Term::InputLimb24 { stack_idx } => {
+      out.push(TERM_TAG_INPUT_LIMB24);
+      out.push(*stack_idx);
+    }
+    Term::OutputLimb24 { stack_idx } => {
+      out.push(TERM_TAG_OUTPUT_LIMB24);
+      out.push(*stack_idx);
+    }
+    Term::CarryLimb { limb_idx } => {
+      out.push(TERM_TAG_CARRY_LIMB);
+      out.push(*limb_idx);
+    }
+    Term::Add29(a, b, cin) => {
+      out.push(TERM_TAG_ADD29);
+      serialize_term(a, out);
+      serialize_term(b, out);
+      serialize_term(cin, out);
+    }
+    Term::Add29Carry(a, b, cin) => {
+      out.push(TERM_TAG_ADD29_CARRY);
+      serialize_term(a, out);
+      serialize_term(b, out);
+      serialize_term(cin, out);
+    }
+    Term::Add24(a, b, cin) => {
+      out.push(TERM_TAG_ADD24);
+      serialize_term(a, out);
+      serialize_term(b, out);
+      serialize_term(cin, out);
     }
   }
 }
@@ -298,25 +352,6 @@ pub(super) fn serialize_wff(wff: &WFF, out: &mut Vec<u8>) {
       serialize_wff(a, out);
       serialize_wff(b, out);
     }
-    // ── Axiom variants: serialized as TAG + discriminant byte (no concrete data) ──
-    WFF::PushAxiom => { out.push(WFF_TAG_AXIOM); out.push(0x00); }
-    WFF::DupAxiom { depth } => { out.push(WFF_TAG_AXIOM); out.push(0x01); out.push(*depth); }
-    WFF::SwapAxiom { depth } => { out.push(WFF_TAG_AXIOM); out.push(0x02); out.push(*depth); }
-    WFF::StructuralAxiom { opcode } => { out.push(WFF_TAG_AXIOM); out.push(0x03); out.push(*opcode); }
-    WFF::MloadAxiom => { out.push(WFF_TAG_AXIOM); out.push(0x04); }
-    WFF::MstoreAxiom { opcode } => { out.push(WFF_TAG_AXIOM); out.push(0x05); out.push(*opcode); }
-    WFF::MemCopyAxiom { opcode } => { out.push(WFF_TAG_AXIOM); out.push(0x06); out.push(*opcode); }
-    WFF::SloadAxiom => { out.push(WFF_TAG_AXIOM); out.push(0x07); }
-    WFF::SstoreAxiom => { out.push(WFF_TAG_AXIOM); out.push(0x08); }
-    WFF::TransientAxiom { opcode } => { out.push(WFF_TAG_AXIOM); out.push(0x09); out.push(*opcode); }
-    WFF::KeccakAxiom => { out.push(WFF_TAG_AXIOM); out.push(0x0a); }
-    WFF::EnvAxiom { opcode } => { out.push(WFF_TAG_AXIOM); out.push(0x0b); out.push(*opcode); }
-    WFF::ExternalStateAxiom { opcode } => { out.push(WFF_TAG_AXIOM); out.push(0x0c); out.push(*opcode); }
-    WFF::TerminateAxiom { opcode } => { out.push(WFF_TAG_AXIOM); out.push(0x0d); out.push(*opcode); }
-    WFF::CallAxiom { opcode } => { out.push(WFF_TAG_AXIOM); out.push(0x0e); out.push(*opcode); }
-    WFF::CreateAxiom { opcode } => { out.push(WFF_TAG_AXIOM); out.push(0x0f); out.push(*opcode); }
-    WFF::SelfdestructAxiom => { out.push(WFF_TAG_AXIOM); out.push(0x10); }
-    WFF::LogAxiom { opcode } => { out.push(WFF_TAG_AXIOM); out.push(0x11); out.push(*opcode); }
   }
 }
 

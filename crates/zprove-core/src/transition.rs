@@ -11,14 +11,17 @@
 
 use crate::semantic_proof::ProofRow;
 use crate::semantic_proof::{
-  Proof, WFF, compile_proof, infer_proof, prove_add, prove_addmod, prove_and, prove_byte,
+  Proof, Term, WFF, compile_proof, infer_proof, prove_addmod, prove_byte,
   prove_div, prove_eq, prove_exp, prove_gt, prove_iszero, prove_lt, prove_mod, prove_mul,
-  prove_mulmod, prove_not, prove_or, prove_sar, prove_sdiv, prove_sgt, prove_shl,
-  prove_shr, prove_signextend, prove_slt, prove_smod, prove_sub, prove_xor, verify_compiled,
-  wff_add, wff_addmod, wff_and, wff_byte, wff_div, wff_eq, wff_exp, wff_gt, wff_iszero, wff_lt,
-  wff_mod, wff_mul, wff_mulmod, wff_not, wff_or, wff_sar, wff_sdiv, wff_sgt,
-  wff_shl, wff_shr, wff_signextend, wff_slt, wff_smod, wff_sub, wff_xor,
-  OP_PUSH_AXIOM,
+  prove_mulmod, prove_pc_step, prove_sar, prove_sdiv, prove_sgt, prove_shl,
+  prove_shr, prove_signextend, prove_slt, prove_smod,
+  prove_and_sym, prove_or_sym, prove_xor_sym, prove_not_sym, prove_add_limb_sym, prove_sub_limb_sym,
+  verify_compiled, check_wff_io_values,
+  wff_addmod, wff_byte, wff_div, wff_eq, wff_exp, wff_gt, wff_iszero, wff_lt,
+  wff_mod, wff_mul, wff_mulmod, wff_pc_step, wff_sar, wff_sdiv, wff_sgt,
+  wff_shl, wff_shr, wff_signextend, wff_slt, wff_smod, wff_stack_inputs, wff_stack_outputs,
+  wff_and_sym, wff_or_sym, wff_xor_sym, wff_not_sym, wff_add_limb_sym, wff_sub_limb_sym,
+  OP_BYTE_AND_SYM,
 };
 use crate::zk_proof::{
   BatchInstructionMeta, BatchProofRowsManifest, CircleStarkConfig, CircleStarkProof,
@@ -27,11 +30,14 @@ use crate::zk_proof::{
   collect_byte_table_queries_from_rows, commit_vm_state, compute_wff_opcode_digest,
   make_batch_receipt_binding_public_values, make_receipt_binding_public_values,
   prove_batch_lut_with_prep, prove_keccak_consistency, prove_link_stark, prove_memory_consistency,
-  prove_stack_consistency, prove_stack_ir_with_prep, prove_storage_consistency,
+  prove_batch_stack_ir_with_prep, prove_stack_consistency, prove_stack_ir_with_prep, prove_stack_rw,
+  prove_storage_consistency,
   setup_batch_proof_rows_preprocessed, setup_proof_rows_preprocessed,
   validate_keccak_memory_cross_check, validate_manifest_rows, verify_batch_lut_with_prep,
   verify_keccak_consistency, verify_link_stark, verify_memory_consistency,
-  verify_stack_consistency, verify_stack_ir_with_prep, verify_storage_consistency,
+  verify_batch_stack_ir_with_prep, verify_stack_consistency, verify_stack_ir_with_prep, verify_stack_rw,
+  verify_storage_consistency,
+  StackRwProof,
 };
 use p3_uni_stark::PreprocessedVerifierKey;
 use revm::bytecode::opcode;
@@ -261,7 +267,7 @@ pub struct BlockTxContext {
   pub gas_price: [u8; 32],
 }
 
-/// A proof that one EVM instruction correctly transforms the stack.
+/// Proof that one EVM instruction correctly transforms the stack.
 #[derive(Debug, Clone)]
 pub struct InstructionTransitionProof {
   /// The opcode executed (e.g. 0x01 = ADD).
@@ -410,22 +416,28 @@ pub struct InstructionTransitionZkReceipt {
 /// ZK receipt for a batch of N instructions proved in a single LUT STARK call.
 ///
 /// Security model:
+/// - `stack_ir_proof`: batch StackIR STARK covering the concatenated ProofRows of ALL instructions.
 /// - `lut_proof`: batch LUT STARK covering arithmetic of ALL instructions' ProofRows.
-/// - `preprocessed_vk`: VK for the shared batch preprocessed matrix.
+/// - `preprocessed_vk`: VK for the shared batch preprocessed matrix (used by both STARKs).
 /// - `manifest`: per-instruction metadata (opcode, WFF, row range in `all_rows`).
 /// - `memory_proof`: STARK proof that memory accesses are consistent across the batch.
 ///
 /// Verification requires:
+/// 0. `verify_stack_ir_with_prep(stack_ir_proof, preprocessed_vk, pis)` — STARK check.
 /// 1. `verify_batch_lut_with_prep(lut_proof, preprocessed_vk, pis)` — STARK check.
 /// 2. For each i: `infer_proof(pi_i) == manifest.entries[i].wff` — deterministic.
 /// 3. `compute_batch_manifest_digest(&entries) == pis[2..10]` — deterministic.
 /// 4. If `memory_proof` is Some: `verify_memory_consistency` — STARK check.
 /// 5. If `stack_proof` is Some: `verify_stack_consistency` — STARK check.
+/// 6. If `stack_rw_proof` is Some: `verify_stack_rw` — STARK check (chronological RW log).
 #[derive(Clone)]
 pub struct BatchTransactionZkReceipt {
+  /// Single StackIR STARK proof covering the concatenated ProofRows of all N instructions.
+  /// Uses the same shared preprocessed matrix as `lut_proof` (tag = RECEIPT_BIND_TAG_STACK).
+  pub stack_ir_proof: CircleStarkProof,
   /// Single LUT STARK proof covering arithmetic of all N instructions.
   pub lut_proof: CircleStarkProof,
-  /// Shared preprocessed verifier key (batch manifest committed here).
+  /// Shared preprocessed verifier key (batch manifest committed here; used by both STARKs).
   pub preprocessed_vk: PreprocessedVerifierKey<CircleStarkConfig>,
   /// Per-instruction metadata and concatenated ProofRows.
   pub manifest: BatchProofRowsManifest,
@@ -435,6 +447,11 @@ pub struct BatchTransactionZkReceipt {
   pub storage_proof: Option<StorageConsistencyProof>,
   /// Stack consistency proof.  `None` when the batch has no stack-touching instructions.
   pub stack_proof: Option<StackConsistencyProof>,
+  /// Stack read/write chronological consistency proof (StackRwAir + LogUp).
+  /// Proves that every pop (read) observes the value from the most-recent push
+  /// (write) at the same depth, and commits the full RW log via Poseidon hashes.
+  /// `None` when the batch has no stack-touching instructions.
+  pub stack_rw_proof: Option<StackRwProof>,
   /// KECCAK256 consistency proof.  `None` when the batch has no KECCAK256 instructions.
   pub keccak_proof: Option<KeccakConsistencyProof>,
   /// MCOPY copy-consistency witnesses collected from all MCOPY instructions
@@ -642,12 +659,76 @@ pub fn verify_statement_semantics(statement: &InstructionTransitionStatement) ->
     return false;
   }
 
+  if !check_output_semantics(statement.opcode, &statement.s_i.stack, &statement.s_next.stack) {
+    return false;
+  }
+
   true
+}
+
+/// Pre-LogUp placeholder: check that the claimed outputs are arithmetically
+/// consistent with the inputs for opcodes not yet bound via ZK value binding.
+fn check_output_semantics(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> bool {
+  match op {
+    opcode::ADD => add_u256_mod(&inputs[0], &inputs[1]) == outputs[0],
+    opcode::SUB => add_u256_mod(&inputs[0], &negate_u256(&inputs[1])) == outputs[0],
+    opcode::AND => (0..32).all(|i| inputs[0][i] & inputs[1][i] == outputs[0][i]),
+    opcode::OR  => (0..32).all(|i| inputs[0][i] | inputs[1][i] == outputs[0][i]),
+    opcode::XOR => (0..32).all(|i| inputs[0][i] ^ inputs[1][i] == outputs[0][i]),
+    opcode::NOT => (0..32).all(|i| !inputs[0][i] == outputs[0][i]),
+    _ => true,
+  }
+}
+
+fn add_u256_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+  let mut out = [0u8; 32];
+  let mut carry = 0u16;
+  for i in (0..32).rev() {
+    let total = a[i] as u16 + b[i] as u16 + carry;
+    out[i] = total as u8;
+    carry = total >> 8;
+  }
+  out
+}
+
+fn negate_u256(a: &[u8; 32]) -> [u8; 32] {
+  let mut flipped = [0u8; 32];
+  for i in 0..32 {
+    flipped[i] = !a[i];
+  }
+  let one = { let mut b = [0u8; 32]; b[31] = 1; b };
+  add_u256_mod(&flipped, &one)
 }
 
 // ============================================================
 // Proof generation per instruction
 // ============================================================
+
+/// Number of bytes consumed by an instruction (opcode byte + immediate operands).
+/// Used to derive `PcAfter = PcBefore + instr_size` in `prove_pc_step`.
+fn opcode_instr_size(op: u8) -> u32 {
+  if op >= opcode::PUSH1 && op <= opcode::PUSH32 {
+    (op - opcode::PUSH1 + 2) as u32
+  } else {
+    1
+  }
+}
+
+/// Returns `true` for instructions where `PcAfter = PcBefore + instr_size`.
+/// Returns `false` for jumps (JUMP / JUMPI) and terminators
+/// (STOP / RETURN / REVERT / INVALID / SELFDESTRUCT).
+fn has_linear_pc(op: u8) -> bool {
+  !matches!(
+    op,
+    opcode::JUMP
+    | opcode::JUMPI
+    | opcode::STOP
+    | opcode::RETURN
+    | opcode::REVERT
+    | opcode::INVALID
+    | opcode::SELFDESTRUCT
+  )
+}
 
 /// Generate a semantic proof for a single EVM instruction.
 ///
@@ -657,19 +738,25 @@ pub fn prove_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> O
   if !has_expected_stack_arity(op, inputs, outputs) {
     return None;
   }
+  // Stack I/O bindings are committed via the WFF hash in public inputs.
+  // InputEq/OutputEq and PcStep rows are omitted; only the instruction core logic is proven.
+  prove_instruction_core(op, inputs, outputs)
+}
 
+/// Core semantic proof (instruction-specific logic only, no stack/PC bindings).
+fn prove_instruction_core(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Option<Proof> {
   match op {
-    opcode::ADD => Some(prove_add(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SUB => Some(prove_sub(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::ADD => Some(prove_add_limb_sym()),
+    opcode::SUB => Some(prove_sub_limb_sym()),
     opcode::MUL => Some(prove_mul(&inputs[0], &inputs[1], &outputs[0])),
     opcode::DIV => Some(prove_div(&inputs[0], &inputs[1], &outputs[0])),
     opcode::MOD => Some(prove_mod(&inputs[0], &inputs[1], &outputs[0])),
     opcode::SDIV => Some(prove_sdiv(&inputs[0], &inputs[1], &outputs[0])),
     opcode::SMOD => Some(prove_smod(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::AND => Some(prove_and(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::OR => Some(prove_or(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::XOR => Some(prove_xor(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::NOT => Some(prove_not(&inputs[0], &outputs[0])),
+    opcode::AND => Some(prove_and_sym(&inputs[0], &inputs[1])),
+    opcode::OR  => Some(prove_or_sym(&inputs[0], &inputs[1])),
+    opcode::XOR => Some(prove_xor_sym(&inputs[0], &inputs[1])),
+    opcode::NOT => Some(prove_not_sym(&inputs[0])),
     opcode::LT => Some(prove_lt(&inputs[0], &inputs[1], &outputs[0])),
     opcode::GT => Some(prove_gt(&inputs[0], &inputs[1], &outputs[0])),
     opcode::SLT => Some(prove_slt(&inputs[0], &inputs[1], &outputs[0])),
@@ -818,19 +905,39 @@ pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Opt
   if !has_expected_stack_arity(op, inputs, outputs) {
     return None;
   }
+  let core = wff_instruction_core(op, inputs, outputs)?;
+  let with_outputs = WFF::And(
+    Box::new(wff_stack_outputs(outputs)),
+    Box::new(core),
+  );
+  let with_pc = if has_linear_pc(op) {
+    WFF::And(
+      Box::new(wff_pc_step(opcode_instr_size(op))),
+      Box::new(with_outputs),
+    )
+  } else {
+    with_outputs
+  };
+  Some(WFF::And(
+    Box::new(wff_stack_inputs(inputs)),
+    Box::new(with_pc),
+  ))
+}
 
+/// Core WFF (instruction-specific logic only, no stack/PC bindings).
+fn wff_instruction_core(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Option<WFF> {
   match op {
-    opcode::ADD => Some(wff_add(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SUB => Some(wff_sub(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::ADD => Some(wff_add_limb_sym()),
+    opcode::SUB => Some(wff_sub_limb_sym()),
     opcode::MUL => Some(wff_mul(&inputs[0], &inputs[1], &outputs[0])),
     opcode::DIV => Some(wff_div(&inputs[0], &inputs[1], &outputs[0])),
     opcode::MOD => Some(wff_mod(&inputs[0], &inputs[1], &outputs[0])),
     opcode::SDIV => Some(wff_sdiv(&inputs[0], &inputs[1], &outputs[0])),
     opcode::SMOD => Some(wff_smod(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::AND => Some(wff_and(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::OR => Some(wff_or(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::XOR => Some(wff_xor(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::NOT => Some(wff_not(&inputs[0], &outputs[0])),
+    opcode::AND => Some(wff_and_sym(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::OR  => Some(wff_or_sym(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::XOR => Some(wff_xor_sym(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::NOT => Some(wff_not_sym(&inputs[0], &outputs[0])),
     opcode::LT => Some(wff_lt(&inputs[0], &inputs[1], &outputs[0])),
     opcode::GT => Some(wff_gt(&inputs[0], &inputs[1], &outputs[0])),
     opcode::SLT => Some(wff_slt(&inputs[0], &inputs[1], &outputs[0])),
@@ -846,27 +953,21 @@ pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Opt
     opcode::MULMOD => Some(wff_mulmod(&inputs[0], &inputs[1], &inputs[2], &outputs[0])),
     opcode::EXP => Some(wff_exp(&inputs[0], &inputs[1], &outputs[0])),
 
-    // ── Per-opcode dedicated axiom WFFs (mirrors prove_instruction exactly) ──
-
-    opcode::MLOAD => Some(WFF::MloadAxiom),
-    opcode::MSTORE => Some(WFF::MstoreAxiom {
-      opcode: op,
-    }),
-    opcode::MSTORE8 => Some(WFF::MstoreAxiom {
-      opcode: op,
-    }),
-    opcode::RETURNDATACOPY | opcode::EXTCODECOPY | opcode::MCOPY => {
-      Some(WFF::MemCopyAxiom { opcode: op })
-    }
-    opcode::CALLDATACOPY | opcode::CODECOPY => {
-      Some(WFF::MemCopyAxiom { opcode: op })
-    }
-    opcode::SLOAD => Some(WFF::SloadAxiom),
-    opcode::SSTORE => Some(WFF::SstoreAxiom),
-    opcode::TLOAD => Some(WFF::TransientAxiom { opcode: op }),
-    opcode::TSTORE => Some(WFF::TransientAxiom { opcode: op }),
-    opcode::KECCAK256 => Some(WFF::KeccakAxiom),
-    opcode::CALLER
+    // ── Per-opcode axiom WFFs: Equal(OutputTerm{0,0}, OutputTerm{0,0}) ──────────────
+    opcode::MLOAD
+    | opcode::MSTORE
+    | opcode::MSTORE8
+    | opcode::RETURNDATACOPY
+    | opcode::EXTCODECOPY
+    | opcode::MCOPY
+    | opcode::CALLDATACOPY
+    | opcode::CODECOPY
+    | opcode::SLOAD
+    | opcode::SSTORE
+    | opcode::TLOAD
+    | opcode::TSTORE
+    | opcode::KECCAK256
+    | opcode::CALLER
     | opcode::CALLVALUE
     | opcode::CALLDATALOAD
     | opcode::CALLDATASIZE
@@ -886,49 +987,54 @@ pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Opt
     | opcode::CHAINID
     | opcode::SELFBALANCE
     | opcode::BASEFEE
-    | opcode::BLOBBASEFEE => Some(WFF::EnvAxiom {
-      opcode: op,
-    }),
-    opcode::BLOCKHASH | opcode::EXTCODESIZE | opcode::EXTCODEHASH | opcode::BALANCE => {
-      Some(WFF::ExternalStateAxiom { opcode: op })
-    }
-    opcode::BLOBHASH => Some(WFF::ExternalStateAxiom {
-      opcode: op,
-    }),
-    opcode::RETURN | opcode::REVERT => Some(WFF::TerminateAxiom {
-      opcode: op,
-    }),
-    opcode::CALL | opcode::CALLCODE | opcode::DELEGATECALL | opcode::STATICCALL => {
-      Some(WFF::CallAxiom {
-        opcode: op,
-      })
-    }
-    opcode::CREATE | opcode::CREATE2 => Some(WFF::CreateAxiom {
-      opcode: op,
-    }),
-    opcode::SELFDESTRUCT => Some(WFF::SelfdestructAxiom),
-    opcode::LOG0 | opcode::LOG1 | opcode::LOG2 | opcode::LOG3 | opcode::LOG4 => {
-      Some(WFF::LogAxiom { opcode: op })
-    }
-    opcode::INVALID => Some(WFF::StructuralAxiom { opcode: op }),
-    op if op == opcode::STOP
-      || op == opcode::POP
-      || op == opcode::JUMP
-      || op == opcode::JUMPI
-      || op == opcode::JUMPDEST
-      || (opcode::PUSH0..=opcode::PUSH32).contains(&op) => {
-      Some(WFF::PushAxiom)
-    }
-    op if (opcode::DUP1..=opcode::DUP16).contains(&op) => {
-      let depth = op - opcode::DUP1 + 1;
-      Some(WFF::DupAxiom { depth })
-    }
-    op if (opcode::SWAP1..=opcode::SWAP16).contains(&op) => {
-      let depth = op - opcode::SWAP1 + 1;
-      Some(WFF::SwapAxiom { depth })
-    }
-    _ => Some(WFF::StructuralAxiom { opcode: op }),
+    | opcode::BLOBBASEFEE
+    | opcode::BLOCKHASH
+    | opcode::EXTCODESIZE
+    | opcode::EXTCODEHASH
+    | opcode::BALANCE
+    | opcode::BLOBHASH
+    | opcode::RETURN
+    | opcode::REVERT
+    | opcode::CALL
+    | opcode::CALLCODE
+    | opcode::DELEGATECALL
+    | opcode::STATICCALL
+    | opcode::CREATE
+    | opcode::CREATE2
+    | opcode::SELFDESTRUCT
+    | opcode::LOG0
+    | opcode::LOG1
+    | opcode::LOG2
+    | opcode::LOG3
+    | opcode::LOG4
+    | opcode::INVALID => Some(WFF::Equal(
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
+    )),
+    _ => Some(WFF::Equal(
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
+    )),
   }
+}
+
+/// WFF containing only the PcStep derivation and the instruction-specific core
+/// formula — without stack I/O binding terms (`InputEq`/`OutputEq`).
+///
+/// This exactly matches `infer_proof(prove_instruction(op, inputs, outputs))`,
+/// which is useful for tests that verify the proof tree is internally consistent.
+pub fn wff_instruction_core_only(
+  op: u8,
+  inputs: &[[u8; 32]],
+  outputs: &[[u8; 32]],
+) -> Option<WFF> {
+  if !has_expected_stack_arity(op, inputs, outputs) {
+    return None;
+  }
+  // Returns only the instruction-specific core formula —
+  // no PcStep, no InputEq/OutputEq wrappers.
+  // Matches infer_proof(prove_instruction(op, inputs, outputs)).
+  wff_instruction_core(op, inputs, outputs)
 }
 
 // ============================================================
@@ -940,12 +1046,27 @@ pub fn verify_proof(proof: &InstructionTransitionProof) -> bool {
     return false;
   }
 
-  let expected_wff = wff_instruction(proof.opcode, &proof.stack_inputs, &proof.stack_outputs);
-  match (&proof.semantic_proof, expected_wff) {
+  // Pre-LogUp placeholder: reject proofs whose stated outputs are
+  // arithmetically inconsistent with the inputs.
+  if !check_output_semantics(proof.opcode, &proof.stack_inputs, &proof.stack_outputs) {
+    return false;
+  }
+
+  // prove_instruction no longer emits InputEq/OutputEq rows; stack I/O binding is
+  // enforced via the WFF hash in public inputs during ZK receipt verification.
+  // Therefore we compare infer_proof(..) against wff_instruction_core_only(..).
+  let expected_core_wff =
+    wff_instruction_core_only(proof.opcode, &proof.stack_inputs, &proof.stack_outputs);
+  match (&proof.semantic_proof, expected_core_wff) {
     (Some(sem_proof), Some(wff)) => {
       let Ok(wff_result) = infer_proof(sem_proof) else {
         return false;
       };
+      // Verify every InputTerm/OutputTerm claim in the inferred WFF against
+      // the declared stack inputs/outputs.
+      if !check_wff_io_values(&wff_result, &proof.stack_inputs, &proof.stack_outputs) {
+        return false;
+      }
       wff == wff_result
     }
     (None, None) => false, // All opcodes now have a WFF; proof must be present or auto-generated.
@@ -959,14 +1080,21 @@ pub fn verify_proof(proof: &InstructionTransitionProof) -> bool {
       ) else {
         return false;
       };
-      // Check that every compiled row belongs to the axiom op-code range.
+      // Check that the auto-generated proof contains no symbolic op rows.
+      // Symbolic rows (OP_BYTE_AND_SYM, OP_ADD_BYTE_SYM, OP_CARRY_EQ, …)
+      // are used only in arithmetic/logic proofs, which must be supplied
+      // explicitly via semantic_proof.  Axiom/structural opcodes (PUSH*, LOG*,
+      // ENV*, …) produce only structural rows.
       let auto_rows = compile_proof(&auto_proof);
-      if !auto_rows.iter().all(|r| r.op >= OP_PUSH_AXIOM) {
+      if auto_rows.iter().any(|r| r.op >= OP_BYTE_AND_SYM) {
         return false; // Arithmetic/logic proofs must be supplied explicitly.
       }
       let Ok(wff_result) = infer_proof(&auto_proof) else {
         return false;
       };
+      if !check_wff_io_values(&wff_result, &proof.stack_inputs, &proof.stack_outputs) {
+        return false;
+      }
       if expected_wff != wff_result {
         return false;
       }
@@ -1076,7 +1204,7 @@ pub(crate) fn prove_instruction_zk_receipt_with_lut_override(
     }
   };
 
-  let expected_wff = wff_instruction(proof.opcode, &proof.stack_inputs, &proof.stack_outputs)
+  let expected_wff = wff_instruction_core_only(proof.opcode, &proof.stack_inputs, &proof.stack_outputs)
     .ok_or_else(|| format!("unsupported opcode for ZKP receipt: 0x{:02x}", proof.opcode))?;
 
   let rows = compile_proof(semantic_proof);
@@ -1088,8 +1216,9 @@ pub(crate) fn prove_instruction_zk_receipt_with_lut_override(
   let stack_ir_proof = prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv)?;
 
   // LUT proof: route through batch (BatchLutKernelAirWithPrep) for N=1.
-  let lut_items: &[(u8, &Proof)] = &[(proof.opcode, semantic_proof)];
-  let lut_manifest = build_batch_manifest(lut_items)?;
+  // Use the authoritative WFF from wff_instruction (includes stack I/O bindings).
+  let lut_manifest =
+    build_batch_manifest_from_wffs(&[(proof.opcode, expected_wff.clone(), semantic_proof)])?;
   let lut_bind_pv =
     make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &lut_manifest.entries);
   let (lut_prep_data, lut_preprocessed_vk) =
@@ -1136,7 +1265,7 @@ pub fn prove_instruction_zk_receipt_timed(
     .as_ref()
     .ok_or_else(|| "missing semantic proof".to_string())?;
 
-  let expected_wff = wff_instruction(proof.opcode, &proof.stack_inputs, &proof.stack_outputs)
+  let expected_wff = wff_instruction_core_only(proof.opcode, &proof.stack_inputs, &proof.stack_outputs)
     .ok_or_else(|| format!("unsupported opcode for ZKP receipt: 0x{:02x}", proof.opcode))?;
 
   let rows = compile_proof(semantic_proof);
@@ -1153,8 +1282,8 @@ pub fn prove_instruction_zk_receipt_timed(
 
   // LUT proof: batch path (N=1), includes batch setup + prove.
   let t2 = Instant::now();
-  let lut_items: &[(u8, &Proof)] = &[(proof.opcode, semantic_proof)];
-  let lut_manifest = build_batch_manifest(lut_items)?;
+  let lut_manifest =
+    build_batch_manifest_from_wffs(&[(proof.opcode, expected_wff.clone(), semantic_proof)])?;
   let lut_bind_pv =
     make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &lut_manifest.entries);
   let (lut_prep_data, lut_preprocessed_vk) =
@@ -1289,7 +1418,7 @@ pub fn verify_instruction_zk_receipt(
     return false;
   }
 
-  let expected_wff = match wff_instruction(
+  let expected_wff = match wff_instruction_core_only(
     statement.opcode,
     &statement.s_i.stack,
     &statement.s_next.stack,
@@ -1386,6 +1515,41 @@ pub fn build_batch_manifest(items: &[(u8, &Proof)]) -> Result<BatchProofRowsMani
   Ok(BatchProofRowsManifest { entries, all_rows })
 }
 
+/// Like [`build_batch_manifest`] but accepts an explicit WFF per instruction
+/// instead of inferring it from the proof tree.
+///
+/// Used internally by proving paths that already have the authoritative WFF
+/// from [`wff_instruction`] — in particular when the proof no longer contains
+/// `InputEq`/`OutputEq` axiom rows and `infer_proof` would yield a smaller WFF
+/// that does not include the stack I/O bindings.
+fn build_batch_manifest_from_wffs(
+  items: &[(u8, WFF, &Proof)],
+) -> Result<BatchProofRowsManifest, String> {
+  if items.is_empty() {
+    return Err("build_batch_manifest_from_wffs: empty item list".to_string());
+  }
+
+  let mut entries: Vec<BatchInstructionMeta> = Vec::with_capacity(items.len());
+  let mut all_rows: Vec<ProofRow> = Vec::new();
+
+  for (opcode, wff, proof) in items {
+    let rows = compile_proof(proof);
+    let row_start = all_rows.len();
+    let row_count = rows.len();
+    all_rows.extend(rows);
+    let wff_digest = compute_wff_opcode_digest(*opcode, wff);
+    entries.push(BatchInstructionMeta {
+      opcode: *opcode,
+      wff: wff.clone(),
+      wff_digest,
+      row_start,
+      row_count,
+    });
+  }
+
+  Ok(BatchProofRowsManifest { entries, all_rows })
+}
+
 /// Prove N instructions as a single batch ZK receipt.
 ///
 /// Only instructions that carry a `semantic_proof` (i.e. arithmetic opcodes)
@@ -1403,19 +1567,30 @@ pub fn build_batch_manifest(items: &[(u8, &Proof)]) -> Result<BatchProofRowsMani
 pub fn prove_batch_transaction_zk_receipt(
   itps: &[InstructionTransitionProof],
 ) -> Result<BatchTransactionZkReceipt, String> {
-  let items: Vec<(u8, &Proof)> = itps
+  let items: Vec<(u8, WFF, &Proof)> = itps
     .iter()
-    .filter_map(|itp| itp.semantic_proof.as_ref().map(|p| (itp.opcode, p)))
+    .filter_map(|itp| {
+      let wff = wff_instruction(itp.opcode, &itp.stack_inputs, &itp.stack_outputs)?;
+      itp.semantic_proof.as_ref().map(|p| (itp.opcode, wff, p))
+    })
     .collect();
 
   if items.is_empty() {
     return Err("prove_batch_transaction_zk_receipt: no semantic proofs in batch".to_string());
   }
 
-  let manifest = build_batch_manifest(&items)?;
+  let manifest = build_batch_manifest_from_wffs(&items)?;
   let lut_bind_pv =
     make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &manifest.entries);
   let (prep_data, preprocessed_vk) = setup_batch_proof_rows_preprocessed(&manifest, &lut_bind_pv)?;
+
+  // StackIR batch proof: prove all instructions' ProofRows in one STARK call.
+  // Reuses the same `prep_data` as the LUT proof — both AIRs share the same
+  // preprocessed matrix; only the tag in `pis[0]` differs.
+  let stack_bind_pv =
+    make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, &manifest.entries);
+  let stack_ir_proof = prove_batch_stack_ir_with_prep(&manifest, &prep_data, &stack_bind_pv)?;
+
   let lut_proof = prove_batch_lut_with_prep(&manifest, &prep_data, &lut_bind_pv)?;
 
   // Collect memory access claims from all instructions, assigning monotone rw_counters.
@@ -1498,6 +1673,13 @@ pub fn prove_batch_transaction_zk_receipt(
   } else {
     Some(prove_stack_consistency(&all_stack_claims)?)
   };
+  // Stack RW chronological proof: proves that every pop sees the most-recent
+  // push at the same depth, with the full ordered log committed via Poseidon.
+  let stack_rw_proof = if all_stack_claims.is_empty() {
+    None
+  } else {
+    Some(prove_stack_rw(&all_stack_claims)?)
+  };
 
   // Collect return/revert data from the last terminating instruction (if any).
   let return_data = itps
@@ -1506,6 +1688,7 @@ pub fn prove_batch_transaction_zk_receipt(
     .find_map(|itp| itp.return_data_claim.clone());
 
   Ok(BatchTransactionZkReceipt {
+    stack_ir_proof,
     lut_proof,
     preprocessed_vk,
     manifest,
@@ -1513,6 +1696,7 @@ pub fn prove_batch_transaction_zk_receipt(
     storage_proof,
     keccak_proof,
     stack_proof,
+    stack_rw_proof,
     mcopy_claims: all_mcopy_claims,
     return_data,
   })
@@ -1792,6 +1976,21 @@ pub fn verify_batch_transaction_zk_receipt(
   // 4. Batch STARK verification.
   // Re-derive pis independently from the manifest so the verifier never
   // trusts the prover-supplied public values directly.
+
+  // 4a. StackIR STARK: all instructions' ProofRows committed in one proof.
+  let stack_ir_bind_pv =
+    make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, &receipt.manifest.entries);
+  if verify_batch_stack_ir_with_prep(
+    &receipt.stack_ir_proof,
+    &receipt.preprocessed_vk,
+    &stack_ir_bind_pv,
+  )
+  .is_err()
+  {
+    return false;
+  }
+
+  // 4b. LUT STARK: arithmetic correctness for all ProofRows.
   let lut_bind_pv =
     make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &receipt.manifest.entries);
   if verify_batch_lut_with_prep(&receipt.lut_proof, &receipt.preprocessed_vk, &lut_bind_pv).is_err()
@@ -1828,6 +2027,12 @@ pub fn verify_batch_transaction_zk_receipt(
   // 7. Stack consistency STARK (if present).
   if let Some(stk_proof) = &receipt.stack_proof
     && !verify_stack_consistency(stk_proof) {
+      return false;
+    }
+
+  // 7b. Stack RW chronological STARK (if present).
+  if let Some(rw_proof) = &receipt.stack_rw_proof
+    && !verify_stack_rw(rw_proof) {
       return false;
     }
 

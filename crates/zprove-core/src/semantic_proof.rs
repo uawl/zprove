@@ -20,6 +20,10 @@ type Memo = HashMap<(u32, u32, u32, u32, u32, u32, u32), u32>;
 pub enum Ty {
   Bool,
   Byte,
+  /// 29-bit unsigned integer (limb of a 256-bit word in the 29+24-radix decomposition).
+  U29,
+  /// 24-bit unsigned integer (top limb of a 256-bit word).
+  U24,
 }
 
 // ============================================================
@@ -64,13 +68,46 @@ pub enum Term {
 
   // ---- Symbolic variable terms (resolved at batch-verification time) ----
   /// The `byte_idx`-th byte (big-endian, 0 = MSB) of the `stack_idx`-th stack input word.
-  InputTerm { stack_idx: u8, byte_idx: u8 },
+  /// `value` is the **claimed** concrete byte — accepted optimistically here and
+  /// verified later via a separate stack-log AIR + LogUp multiset argument.
+  InputTerm { stack_idx: u8, byte_idx: u8, value: u8 },
   /// The `byte_idx`-th byte of the `stack_idx`-th stack output word.
-  OutputTerm { stack_idx: u8, byte_idx: u8 },
+  /// `value` carries the same optimistic claim as `InputTerm`.
+  OutputTerm { stack_idx: u8, byte_idx: u8, value: u8 },
   /// The `byte_idx`-th byte of the program counter before execution (4-byte big-endian u32).
   PcBefore { byte_idx: u8 },
   /// The `byte_idx`-th byte of the program counter after execution.
   PcAfter { byte_idx: u8 },
+
+  // ---- Intermediate witness terms (carry / borrow) ----
+  /// The carry bit OUT of byte `byte_idx` during an ADD or SUB (0 or 1).
+  /// For ADD: carry_out[j] = (inputs[0][j] + inputs[1][j] + carry_out[j+1]) >> 8.
+  /// For SUB (`a = b + c`): same carry from adding `b` and `c`.
+  CarryTerm { byte_idx: u8 },
+
+  // ---- 29/24-bit limb symbolic terms ----
+  // A 256-bit EVM word is decomposed as 8 limbs of 29 bits (little-endian)
+  // plus one 24-bit top limb: word = Σ_{j=0}^{7} limb29[j] * 2^(29*j) + limb24 * 2^232.
+  /// The `limb_idx`-th 29-bit LE limb of the `stack_idx`-th stack input word.
+  /// `limb_idx` ∈ 0..=7: limb 0 covers bits 0..29, limb 7 covers bits 203..232.
+  InputLimb29 { stack_idx: u8, limb_idx: u8 },
+  /// The `limb_idx`-th 29-bit LE limb of the `stack_idx`-th stack output word.
+  OutputLimb29 { stack_idx: u8, limb_idx: u8 },
+  /// The 24-bit top limb of the `stack_idx`-th stack input (bits 232..256).
+  InputLimb24 { stack_idx: u8 },
+  /// The 24-bit top limb of the `stack_idx`-th stack output (bits 232..256).
+  OutputLimb24 { stack_idx: u8 },
+
+  // ---- Limb-level arithmetic terms (syntactic; values from LogUp) ----
+  /// The carry bit OUT of the `limb_idx`-th 29-bit limb addition (Bool: 0 or 1).
+  /// `CarryLimb{0} = false` (no incoming carry for the LSB limb of ADD/SUB).
+  CarryLimb { limb_idx: u8 },
+  /// `(a + b + cin) mod 2^29` — 29-bit modular sum (U29).
+  Add29(Box<Term>, Box<Term>, Box<Term>),
+  /// `(a + b + cin) >> 29` — carry out of a 29-bit addition (Bool: 0 or 1).
+  Add29Carry(Box<Term>, Box<Term>, Box<Term>),
+  /// `(a + b + cin) mod 2^24` — 24-bit modular sum (U24, top-limb).
+  Add24(Box<Term>, Box<Term>, Box<Term>),
 }
 
 // ============================================================
@@ -84,49 +121,6 @@ pub enum WFF {
   Equal(Box<Term>, Box<Term>),
   /// `φ ∧ ψ`.
   And(Box<WFF>, Box<WFF>),
-
-  // ── Per-opcode axiom formulas ─────────────────────────────────────────
-  // Each variant represents the proposition that the axiom asserts.
-  // Soundness of the claim is enforced by the corresponding consistency
-  // AIR at the batch level; the axiom proof term is the per-instruction
-  // witness that the claim is well-formed and matches the stack I/O.
-
-  /// PUSH: the pushed value equals `value`.
-  PushAxiom,
-  /// DUP(depth): the top of stack equals the item at `depth`.
-  DupAxiom { depth: u8 },
-  /// SWAP(depth): top and item at `depth` are exchanged.
-  SwapAxiom { depth: u8 },
-  /// Structural no-output opcodes: STOP, POP, JUMP, JUMPI, JUMPDEST, INVALID.
-  StructuralAxiom { opcode: u8 },
-  /// MLOAD: reading address returns a value from memory.
-  MloadAxiom,
-  /// MSTORE / MSTORE8: writing a value to memory.
-  MstoreAxiom { opcode: u8 },
-  /// Memory-copy opcodes (CALLDATACOPY, CODECOPY, RETURNDATACOPY, EXTCODECOPY, MCOPY).
-  MemCopyAxiom { opcode: u8 },
-  /// SLOAD: reading a storage slot returns a value.
-  SloadAxiom,
-  /// SSTORE: writing a value to a storage slot.
-  SstoreAxiom,
-  /// TLOAD / TSTORE (transient storage, EIP-1153).
-  TransientAxiom { opcode: u8 },
-  /// KECCAK256: hash of memory region.
-  KeccakAxiom,
-  /// Environment / context opcodes: the value equals what the EVM state provides.
-  EnvAxiom { opcode: u8 },
-  /// External-state opcodes (BLOCKHASH, EXTCODESIZE, BALANCE, EXTCODEHASH).
-  ExternalStateAxiom { opcode: u8 },
-  /// RETURN / REVERT: specifies offset and size of return data.
-  TerminateAxiom { opcode: u8 },
-  /// CALL / CALLCODE / DELEGATECALL / STATICCALL.
-  CallAxiom { opcode: u8 },
-  /// CREATE / CREATE2: deploys a contract.
-  CreateAxiom { opcode: u8 },
-  /// SELFDESTRUCT.
-  SelfdestructAxiom,
-  /// LOG0-LOG4: emits a log entry.
-  LogAxiom { opcode: u8 },
 }
 
 // ============================================================
@@ -201,6 +195,73 @@ pub enum Proof {
   CreateAxiom { opcode: u8 },
   SelfdestructAxiom,
   LogAxiom { opcode: u8 },
+
+  // ── Stack I/O and PC binding axioms ──────────────────────────────────
+  /// `InputTerm{stack_idx, byte_idx} = Byte(value)` — stack input binding.
+  InputEq { stack_idx: u8, byte_idx: u8, value: u8 },
+  /// `OutputTerm{stack_idx, byte_idx} = Byte(value)` — stack output binding.
+  OutputEq { stack_idx: u8, byte_idx: u8, value: u8 },
+  /// `PcBefore{byte_idx} = Byte(value)` — PC-before binding.
+  PcBeforeEq { byte_idx: u8, value: u8 },
+  /// `PcAfter{j} = ByteAdd(PcBefore{j}, Byte(instr_size_bytes[j]), carry_j)` for all `j`.
+  ///
+  /// Proves the 4-byte big-endian relationship `PcAfter = PcBefore + instr_size`
+  /// using a carry chain over bytes 3..=0.
+  PcStep { instr_size: u32 },
+
+  // ── Symbolic byte-level operation axioms ──────────────────────────────
+  //
+  // These produce WFFs that reference `InputTerm` / `OutputTerm` symbolically,
+  // so the WFF structure is *identical for all executions of the same opcode*.
+  // The concrete byte values `a`, `b` are carried only as witnesses for the
+  // lookup-table check in `verify_compiled`; they do NOT appear in the WFF.
+  //
+  // Soundness: these axioms are used only inside `prove_instruction`, which
+  // wraps them in an outer `AndIntro` with `prove_stack_inputs` /
+  // `prove_stack_outputs` bindings.  The STARK enforces that the witness
+  // values match the binding values column-by-column.
+
+  /// `ByteAnd(InputTerm{0,j}, InputTerm{1,j}) = OutputTerm{0,j}`
+  ByteAndSym { byte_idx: u8, a: u8, b: u8 },
+  /// `ByteOr(InputTerm{0,j}, InputTerm{1,j}) = OutputTerm{0,j}`
+  ByteOrSym { byte_idx: u8, a: u8, b: u8 },
+  /// `ByteXor(InputTerm{0,j}, InputTerm{1,j}) = OutputTerm{0,j}`
+  ByteXorSym { byte_idx: u8, a: u8, b: u8 },
+  /// `ByteXor(InputTerm{0,j}, Byte(0xFF)) = OutputTerm{0,j}`  (NOT is XOR with constant)
+  ByteNotSym { byte_idx: u8, a: u8 },
+  /// `ByteAdd(InputTerm{0,j}, InputTerm{1,j}, CarryTerm{j}) = OutputTerm{0,j}`
+  ///
+  /// Carry is now a symbolic `CarryTerm{j}`, not a concrete `Byte(c)`.  The
+  /// carry value is provided separately via `CarryEq{j, value}`.  This makes
+  /// the WFF for every byte leaf identical for all ADD executions.
+  AddByteSym { byte_idx: u8, a: u8, b: u8 },
+  /// `ByteAdd(InputTerm{1,j}, OutputTerm{0,j}, CarryTerm{j}) = InputTerm{0,j}`
+  ///
+  /// Verifies `a - b = c` as `b + c = a` byte-wise, reusing `CarryTerm` for
+  /// the carry of the addition `b + c`.  No separate borrow machinery needed.
+  SubByteSym { byte_idx: u8, b: u8, c: u8 },
+
+  /// `CarryTerm{byte_idx} = Byte(value)` — binds the carry witness to a concrete byte.
+  CarryEq { byte_idx: u8, value: u8 },
+
+  // ---- Syntactic (value-free) limb-level proof variants -----------------
+  // These reference symbolic limb terms (InputLimb29, OutputLimb29, etc.).
+  // Concrete correctness is deferred to the LogUp binding layer; these proofs
+  // are purely structural and encode a FIXED WFF per opcode.
+
+  /// `CarryLimb{0} = Bool(false)` — the ADD/SUB carry chain starts with carry = 0.
+  CarryLimbZero,
+  /// `Add29(InputLimb29{0,j}, InputLimb29{1,j}, CarryLimb{j}) = OutputLimb29{0,j}`
+  /// AND `Add29Carry(InputLimb29{0,j}, InputLimb29{1,j}, CarryLimb{j}) = CarryLimb{j+1}`.
+  U29AddSym { limb_idx: u8 },
+  /// `Add24(InputLimb24{0}, InputLimb24{1}, CarryLimb{8}) = OutputLimb24{0}`.
+  U24AddSym,
+  /// `Add29(InputLimb29{1,j}, OutputLimb29{0,j}, CarryLimb{j}) = InputLimb29{0,j}`
+  /// AND `Add29Carry(InputLimb29{1,j}, OutputLimb29{0,j}, CarryLimb{j}) = CarryLimb{j+1}`.
+  /// Verifies SUB (`a - b = c`) as `b + c = a` at the limb level.
+  U29SubSym { limb_idx: u8 },
+  /// `Add24(InputLimb24{1}, OutputLimb24{0}, CarryLimb{8}) = InputLimb24{0}`.
+  U24SubSym,
 }
 
 // ============================================================
@@ -302,14 +363,47 @@ pub const OP_OUTPUT_TERM: u32 = 49;
 pub const OP_PC_BEFORE: u32 = 50;
 pub const OP_PC_AFTER: u32 = 51;
 
-// ---- Return-type tags ----
+// ---- Stack I/O and PC binding proof opcodes ----
+pub const OP_INPUT_EQ: u32 = 52;
+pub const OP_OUTPUT_EQ: u32 = 53;
+pub const OP_PC_BEFORE_EQ: u32 = 54;
+pub const OP_PC_STEP: u32 = 55;
+
+// ---- Symbolic byte-level operation proof opcodes ----
+pub const OP_BYTE_AND_SYM: u32 = 56;
+pub const OP_BYTE_OR_SYM: u32 = 57;
+pub const OP_BYTE_XOR_SYM: u32 = 58;
+pub const OP_BYTE_NOT_SYM: u32 = 59;
+pub const OP_ADD_BYTE_SYM: u32 = 60;
+pub const OP_SUB_BYTE_SYM: u32 = 61;
+// ---- Intermediate witness term opcodes ----
+pub const OP_CARRY_TERM: u32 = 62;
+// ---- Intermediate witness binding proof opcodes ----
+pub const OP_CARRY_EQ: u32 = 64;
+// ---- 29/24-bit limb symbolic term opcodes ----
+pub const OP_INPUT_LIMB29: u32 = 65;
+pub const OP_OUTPUT_LIMB29: u32 = 66;
+pub const OP_INPUT_LIMB24: u32 = 67;
+pub const OP_OUTPUT_LIMB24: u32 = 68;
+// ---- Limb-level arithmetic term opcodes ----
+pub const OP_CARRY_LIMB: u32 = 69;
+pub const OP_ADD29: u32 = 70;
+pub const OP_ADD29_CARRY: u32 = 71;
+pub const OP_ADD24: u32 = 72;
+// ---- Limb-level symbolic proof opcodes ----
+pub const OP_U29_ADD_SYM: u32 = 73;
+pub const OP_U24_ADD_SYM: u32 = 74;
+pub const OP_CARRY_LIMB_ZERO: u32 = 75;
+pub const OP_U29_SUB_SYM: u32 = 76;
+pub const OP_U24_SUB_SYM: u32 = 77;
 pub const RET_BOOL: u32 = 0;
 pub const RET_BYTE: u32 = 1;
 pub const RET_WFF_EQ: u32 = 2;
 pub const RET_WFF_AND: u32 = 3;
-/// Axiom WFF: an opcode-specific axiom whose correctness is enforced by the
-/// consistency AIR at batch level, not by inline term evaluation.
-pub const RET_WFF_AXIOM: u32 = 4;
+/// 29-bit limb value return type.
+pub const RET_U29: u32 = 4;
+/// 24-bit limb value return type.
+pub const RET_U24: u32 = 5;
 
 /// Number of columns in the compiled proof row (= STARK trace width).
 pub const NUM_PROOF_COLS: usize = 9;
@@ -346,6 +440,91 @@ pub struct ProofRow {
 // ============================================================
 // Checking Proofs
 // ============================================================
+
+/// Walk a WFF tree and verify every `InputTerm` / `OutputTerm` claim against
+/// the supplied concrete stack arrays.
+///
+/// Returns `true` iff every claim is consistent.
+/// Tautological self-equalities `Equal(T, T)` are skipped — they are used as
+/// placeholder WFFs for axiom opcodes and carry no meaningful constraints.
+pub fn check_wff_io_values(
+  wff: &WFF,
+  stack_inputs: &[[u8; 32]],
+  stack_outputs: &[[u8; 32]],
+) -> bool {
+  match wff {
+    WFF::And(a, b) => {
+      check_wff_io_values(a, stack_inputs, stack_outputs)
+        && check_wff_io_values(b, stack_inputs, stack_outputs)
+    }
+    WFF::Equal(a, b) => {
+      // Skip tautological self-equality (axiom placeholder, e.g. Equal(OutputTerm{0,0,0}, OutputTerm{0,0,0})).
+      if a == b {
+        return true;
+      }
+      check_term_io_values(a, stack_inputs, stack_outputs)
+        && check_term_io_values(b, stack_inputs, stack_outputs)
+    }
+  }
+}
+
+/// Walk a Term tree and verify every `InputTerm` / `OutputTerm` claim.
+fn check_term_io_values(
+  term: &Term,
+  stack_inputs: &[[u8; 32]],
+  stack_outputs: &[[u8; 32]],
+) -> bool {
+  match term {
+    Term::InputTerm { stack_idx, byte_idx, value } => {
+      let s = *stack_idx as usize;
+      let j = *byte_idx as usize;
+      s < stack_inputs.len() && j < 32 && stack_inputs[s][j] == *value
+    }
+    Term::OutputTerm { stack_idx, byte_idx, value } => {
+      let s = *stack_idx as usize;
+      let j = *byte_idx as usize;
+      s < stack_outputs.len() && j < 32 && stack_outputs[s][j] == *value
+    }
+    // Recurse into sub-terms.
+    Term::Not(a) => check_term_io_values(a, stack_inputs, stack_outputs),
+    Term::And(a, b)
+    | Term::Or(a, b)
+    | Term::Xor(a, b)
+    | Term::ByteMulLow(a, b)
+    | Term::ByteMulHigh(a, b)
+    | Term::ByteAnd(a, b)
+    | Term::ByteOr(a, b)
+    | Term::ByteXor(a, b) => {
+      check_term_io_values(a, stack_inputs, stack_outputs)
+        && check_term_io_values(b, stack_inputs, stack_outputs)
+    }
+    Term::Ite(c, a, b) => {
+      check_term_io_values(c, stack_inputs, stack_outputs)
+        && check_term_io_values(a, stack_inputs, stack_outputs)
+        && check_term_io_values(b, stack_inputs, stack_outputs)
+    }
+    Term::ByteAdd(a, b, c)
+    | Term::ByteAddCarry(a, b, c)
+    | Term::Add29(a, b, c)
+    | Term::Add29Carry(a, b, c)
+    | Term::Add24(a, b, c) => {
+      check_term_io_values(a, stack_inputs, stack_outputs)
+        && check_term_io_values(b, stack_inputs, stack_outputs)
+        && check_term_io_values(c, stack_inputs, stack_outputs)
+    }
+    // Pure leaves — no IO term claims.
+    Term::Byte(_)
+    | Term::Bool(_)
+    | Term::PcBefore { .. }
+    | Term::PcAfter { .. }
+    | Term::CarryTerm { .. }
+    | Term::CarryLimb { .. }
+    | Term::InputLimb29 { .. }
+    | Term::OutputLimb29 { .. }
+    | Term::InputLimb24 { .. }
+    | Term::OutputLimb24 { .. } => true,
+  }
+}
 
 pub fn infer_ty(term: &Term) -> Result<Ty, VerifyError> {
   match term {
@@ -420,7 +599,33 @@ pub fn infer_ty(term: &Term) -> Result<Ty, VerifyError> {
     Term::InputTerm { .. }
     | Term::OutputTerm { .. }
     | Term::PcBefore { .. }
-    | Term::PcAfter { .. } => Ok(Ty::Byte),
+    | Term::PcAfter { .. }
+    | Term::CarryTerm { .. } => Ok(Ty::Byte),
+    // Limb-level symbolic terms.
+    Term::InputLimb29 { .. } | Term::OutputLimb29 { .. } => Ok(Ty::U29),
+    Term::InputLimb24 { .. } | Term::OutputLimb24 { .. } => Ok(Ty::U24),
+    Term::CarryLimb { .. } => Ok(Ty::Bool),
+    Term::Add29(a, b, cin) => {
+      if infer_ty(a)? == Ty::U29 && infer_ty(b)? == Ty::U29 && infer_ty(cin)? == Ty::Bool {
+        Ok(Ty::U29)
+      } else {
+        Err(VerifyError::UnexpectedTermVariant { expected: "u29 subterm" })
+      }
+    }
+    Term::Add29Carry(a, b, cin) => {
+      if infer_ty(a)? == Ty::U29 && infer_ty(b)? == Ty::U29 && infer_ty(cin)? == Ty::Bool {
+        Ok(Ty::Bool)
+      } else {
+        Err(VerifyError::UnexpectedTermVariant { expected: "u29 subterm" })
+      }
+    }
+    Term::Add24(a, b, cin) => {
+      if infer_ty(a)? == Ty::U24 && infer_ty(b)? == Ty::U24 && infer_ty(cin)? == Ty::Bool {
+        Ok(Ty::U24)
+      } else {
+        Err(VerifyError::UnexpectedTermVariant { expected: "u24 subterm" })
+      }
+    }
   }
 }
 
@@ -688,25 +893,145 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
       Box::new(Term::Byte(((*a as u16 * *b as u16) >> 8) as u8)),
     )),
 
-    // ── Per-opcode axiom proofs: each infers the matching WFF variant. ──────
-    Proof::PushAxiom => Ok(WFF::PushAxiom),
-    Proof::DupAxiom { depth } => Ok(WFF::DupAxiom { depth: *depth }),
-    Proof::SwapAxiom { depth } => Ok(WFF::SwapAxiom { depth: *depth }),
-    Proof::StructuralAxiom { opcode } => Ok(WFF::StructuralAxiom { opcode: *opcode }),
-    Proof::MloadAxiom => Ok(WFF::MloadAxiom),
-    Proof::MstoreAxiom { opcode } => Ok(WFF::MstoreAxiom { opcode: *opcode }),
-    Proof::MemCopyAxiom { opcode } => Ok(WFF::MemCopyAxiom { opcode: *opcode }),
-    Proof::SloadAxiom => Ok(WFF::SloadAxiom),
-    Proof::SstoreAxiom => Ok(WFF::SstoreAxiom),
-    Proof::TransientAxiom { opcode } => Ok(WFF::TransientAxiom { opcode: *opcode }),
-    Proof::KeccakAxiom => Ok(WFF::KeccakAxiom),
-    Proof::EnvAxiom { opcode } => Ok(WFF::EnvAxiom { opcode: *opcode }),
-    Proof::ExternalStateAxiom { opcode } => Ok(WFF::ExternalStateAxiom { opcode: *opcode }),
-    Proof::TerminateAxiom { opcode } => Ok(WFF::TerminateAxiom { opcode: *opcode }),
-    Proof::CallAxiom { opcode } => Ok(WFF::CallAxiom { opcode: *opcode }),
-    Proof::CreateAxiom { opcode } => Ok(WFF::CreateAxiom { opcode: *opcode }),
-    Proof::SelfdestructAxiom => Ok(WFF::SelfdestructAxiom),
-    Proof::LogAxiom { opcode } => Ok(WFF::LogAxiom { opcode: *opcode }),
+    // ── Per-opcode axiom proofs: each infers Equal(OutputTerm{0,0}, OutputTerm{0,0}). ──────
+    Proof::PushAxiom
+    | Proof::DupAxiom { .. }
+    | Proof::SwapAxiom { .. }
+    | Proof::StructuralAxiom { .. }
+    | Proof::MloadAxiom
+    | Proof::MstoreAxiom { .. }
+    | Proof::MemCopyAxiom { .. }
+    | Proof::SloadAxiom
+    | Proof::SstoreAxiom
+    | Proof::TransientAxiom { .. }
+    | Proof::KeccakAxiom
+    | Proof::EnvAxiom { .. }
+    | Proof::ExternalStateAxiom { .. }
+    | Proof::TerminateAxiom { .. }
+    | Proof::CallAxiom { .. }
+    | Proof::CreateAxiom { .. }
+    | Proof::SelfdestructAxiom
+    | Proof::LogAxiom { .. } => Ok(WFF::Equal(
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
+    )),
+    Proof::InputEq { stack_idx, byte_idx, value } => Ok(WFF::Equal(
+      Box::new(Term::InputTerm { stack_idx: *stack_idx, byte_idx: *byte_idx, value: *value }),
+      Box::new(Term::Byte(*value)),
+    )),
+    Proof::OutputEq { stack_idx, byte_idx, value } => Ok(WFF::Equal(
+      Box::new(Term::OutputTerm { stack_idx: *stack_idx, byte_idx: *byte_idx, value: *value }),
+      Box::new(Term::Byte(*value)),
+    )),
+    Proof::PcBeforeEq { byte_idx, value } => Ok(WFF::Equal(
+      Box::new(Term::PcBefore { byte_idx: *byte_idx }),
+      Box::new(Term::Byte(*value)),
+    )),
+    Proof::PcStep { instr_size } => Ok(wff_pc_step(*instr_size)),
+    // ── Symbolic byte-level ops ──────────────────────────────────────────
+    Proof::ByteAndSym { byte_idx, a, b } => Ok(WFF::Equal(
+      Box::new(Term::ByteAnd(
+        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
+        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
+      )),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a & *b }),
+    )),
+    Proof::ByteOrSym { byte_idx, a, b } => Ok(WFF::Equal(
+      Box::new(Term::ByteOr(
+        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
+        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
+      )),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a | *b }),
+    )),
+    Proof::ByteXorSym { byte_idx, a, b } => Ok(WFF::Equal(
+      Box::new(Term::ByteXor(
+        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
+        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
+      )),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a ^ *b }),
+    )),
+    Proof::ByteNotSym { byte_idx, a } => Ok(WFF::Equal(
+      Box::new(Term::ByteXor(
+        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
+        Box::new(Term::Byte(0xFF)),
+      )),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a ^ 0xFF }),
+    )),
+    Proof::AddByteSym { byte_idx, a, b } => Ok(WFF::Equal(
+      Box::new(Term::ByteAdd(
+        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
+        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
+        Box::new(Term::CarryTerm { byte_idx: *byte_idx }),
+      )),
+      // Output value is (a + b + carry) % 256; carry is unknown at this point
+      // (provided by a separate CarryEq proof), so use 0 as placeholder.
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: 0 }),
+    )),
+    Proof::SubByteSym { byte_idx, b, c } => Ok(WFF::Equal(
+      Box::new(Term::ByteAdd(
+        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
+        Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *c }),
+        Box::new(Term::CarryTerm { byte_idx: *byte_idx }),
+      )),
+      // a = b + c + carry; carry unknown, use 0 as placeholder.
+      Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: 0 }),
+    )),
+    Proof::CarryEq { byte_idx, value } => Ok(WFF::Equal(
+      Box::new(Term::CarryTerm { byte_idx: *byte_idx }),
+      Box::new(Term::Byte(*value)),
+    )),
+    // ── Syntactic (value-free) limb-level proofs ────────────────────────
+    Proof::CarryLimbZero => Ok(WFF::Equal(
+      Box::new(Term::CarryLimb { limb_idx: 0 }),
+      Box::new(Term::Bool(false)),
+    )),
+    Proof::U29AddSym { limb_idx: j } => {
+      let mk_a = || Box::new(Term::InputLimb29 { stack_idx: 0, limb_idx: *j });
+      let mk_b = || Box::new(Term::InputLimb29 { stack_idx: 1, limb_idx: *j });
+      let mk_cin = || Box::new(Term::CarryLimb { limb_idx: *j });
+      Ok(WFF::And(
+        Box::new(WFF::Equal(
+          Box::new(Term::Add29(mk_a(), mk_b(), mk_cin())),
+          Box::new(Term::OutputLimb29 { stack_idx: 0, limb_idx: *j }),
+        )),
+        Box::new(WFF::Equal(
+          Box::new(Term::Add29Carry(mk_a(), mk_b(), mk_cin())),
+          Box::new(Term::CarryLimb { limb_idx: j + 1 }),
+        )),
+      ))
+    }
+    Proof::U24AddSym => Ok(WFF::Equal(
+      Box::new(Term::Add24(
+        Box::new(Term::InputLimb24 { stack_idx: 0 }),
+        Box::new(Term::InputLimb24 { stack_idx: 1 }),
+        Box::new(Term::CarryLimb { limb_idx: 8 }),
+      )),
+      Box::new(Term::OutputLimb24 { stack_idx: 0 }),
+    )),
+    Proof::U29SubSym { limb_idx: j } => {
+      // Verifies a - b = c as b + c = a at the limb level.
+      let mk_b = || Box::new(Term::InputLimb29 { stack_idx: 1, limb_idx: *j });
+      let mk_c = || Box::new(Term::OutputLimb29 { stack_idx: 0, limb_idx: *j });
+      let mk_cin = || Box::new(Term::CarryLimb { limb_idx: *j });
+      Ok(WFF::And(
+        Box::new(WFF::Equal(
+          Box::new(Term::Add29(mk_b(), mk_c(), mk_cin())),
+          Box::new(Term::InputLimb29 { stack_idx: 0, limb_idx: *j }),
+        )),
+        Box::new(WFF::Equal(
+          Box::new(Term::Add29Carry(mk_b(), mk_c(), mk_cin())),
+          Box::new(Term::CarryLimb { limb_idx: j + 1 }),
+        )),
+      ))
+    }
+    Proof::U24SubSym => Ok(WFF::Equal(
+      Box::new(Term::Add24(
+        Box::new(Term::InputLimb24 { stack_idx: 1 }),
+        Box::new(Term::OutputLimb24 { stack_idx: 0 }),
+        Box::new(Term::CarryLimb { limb_idx: 8 }),
+      )),
+      Box::new(Term::InputLimb24 { stack_idx: 0 }),
+    )),
   }
 }
 
@@ -717,13 +1042,14 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
 /// Build a 32-element array of `InputTerm` bytes for the `stack_idx`-th stack input word.
 ///
 /// `result[j]` = byte `j` (big-endian, 0 = MSB) of the `stack_idx`-th input.
-pub fn input_word(stack_idx: u8) -> [Box<Term>; 32] {
-  array::from_fn(|j| Box::new(Term::InputTerm { stack_idx, byte_idx: j as u8 }))
+/// `word[j]` is the claimed concrete byte value, committed in the proof trace.
+pub fn input_word(stack_idx: u8, word: &[u8; 32]) -> [Box<Term>; 32] {
+  array::from_fn(|j| Box::new(Term::InputTerm { stack_idx, byte_idx: j as u8, value: word[j] }))
 }
 
 /// Build a 32-element array of `OutputTerm` bytes for the `stack_idx`-th stack output word.
-pub fn output_word(stack_idx: u8) -> [Box<Term>; 32] {
-  array::from_fn(|j| Box::new(Term::OutputTerm { stack_idx, byte_idx: j as u8 }))
+pub fn output_word(stack_idx: u8, word: &[u8; 32]) -> [Box<Term>; 32] {
+  array::from_fn(|j| Box::new(Term::OutputTerm { stack_idx, byte_idx: j as u8, value: word[j] }))
 }
 
 pub fn word_add(a: &[u8; 32], b: &[u8; 32]) -> [Box<Term>; 32] {
@@ -2738,9 +3064,9 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       memo.insert(key, idx);
       idx
     }
-    // ── Symbolic variable terms (value = 0 placeholder; resolved by consistency AIR) ──
-    Term::InputTerm { stack_idx, byte_idx } => {
-      let key = (OP_INPUT_TERM, 0, 0, 0, *stack_idx as u32, *byte_idx as u32, 0);
+    // ── Symbolic variable terms (value = claimed byte; verified by stack-log LogUp AIR) ──
+    Term::InputTerm { stack_idx, byte_idx, value } => {
+      let key = (OP_INPUT_TERM, 0, 0, 0, *stack_idx as u32, *byte_idx as u32, *value as u32);
       if let Some(&cached) = memo.get(&key) {
         return cached;
       }
@@ -2749,14 +3075,15 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
         op: OP_INPUT_TERM,
         scalar0: *stack_idx as u32,
         scalar1: *byte_idx as u32,
+        value: *value as u32,
         ret_ty: RET_BYTE,
         ..Default::default()
       });
       memo.insert(key, idx);
       idx
     }
-    Term::OutputTerm { stack_idx, byte_idx } => {
-      let key = (OP_OUTPUT_TERM, 0, 0, 0, *stack_idx as u32, *byte_idx as u32, 0);
+    Term::OutputTerm { stack_idx, byte_idx, value } => {
+      let key = (OP_OUTPUT_TERM, 0, 0, 0, *stack_idx as u32, *byte_idx as u32, *value as u32);
       if let Some(&cached) = memo.get(&key) {
         return cached;
       }
@@ -2765,6 +3092,7 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
         op: OP_OUTPUT_TERM,
         scalar0: *stack_idx as u32,
         scalar1: *byte_idx as u32,
+        value: *value as u32,
         ret_ty: RET_BYTE,
         ..Default::default()
       });
@@ -2796,6 +3124,158 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
         op: OP_PC_AFTER,
         scalar0: *byte_idx as u32,
         ret_ty: RET_BYTE,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::CarryTerm { byte_idx } => {
+      let key = (OP_CARRY_TERM, 0, 0, 0, *byte_idx as u32, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_CARRY_TERM,
+        scalar0: *byte_idx as u32,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::InputLimb29 { stack_idx, limb_idx } => {
+      let key = (OP_INPUT_LIMB29, 0, 0, 0, *stack_idx as u32, *limb_idx as u32, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_INPUT_LIMB29,
+        scalar0: *stack_idx as u32,
+        scalar1: *limb_idx as u32,
+        ret_ty: RET_U29,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::OutputLimb29 { stack_idx, limb_idx } => {
+      let key = (OP_OUTPUT_LIMB29, 0, 0, 0, *stack_idx as u32, *limb_idx as u32, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_OUTPUT_LIMB29,
+        scalar0: *stack_idx as u32,
+        scalar1: *limb_idx as u32,
+        ret_ty: RET_U29,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::InputLimb24 { stack_idx } => {
+      let key = (OP_INPUT_LIMB24, 0, 0, 0, *stack_idx as u32, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_INPUT_LIMB24,
+        scalar0: *stack_idx as u32,
+        ret_ty: RET_U24,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::OutputLimb24 { stack_idx } => {
+      let key = (OP_OUTPUT_LIMB24, 0, 0, 0, *stack_idx as u32, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_OUTPUT_LIMB24,
+        scalar0: *stack_idx as u32,
+        ret_ty: RET_U24,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::CarryLimb { limb_idx } => {
+      let key = (OP_CARRY_LIMB, 0, 0, 0, *limb_idx as u32, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_CARRY_LIMB,
+        scalar0: *limb_idx as u32,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::Add29(a, b, cin) => {
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let ci = compile_term_inner(cin, rows, memo);
+      let key = (OP_ADD29, ai, bi, ci, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_ADD29,
+        arg0: ai,
+        arg1: bi,
+        arg2: ci,
+        ret_ty: RET_U29,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::Add29Carry(a, b, cin) => {
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let ci = compile_term_inner(cin, rows, memo);
+      let key = (OP_ADD29_CARRY, ai, bi, ci, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_ADD29_CARRY,
+        arg0: ai,
+        arg1: bi,
+        arg2: ci,
+        ret_ty: RET_BOOL,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::Add24(a, b, cin) => {
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let ci = compile_term_inner(cin, rows, memo);
+      let key = (OP_ADD24, ai, bi, ci, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_ADD24,
+        arg0: ai,
+        arg1: bi,
+        arg2: ci,
+        ret_ty: RET_U24,
         ..Default::default()
       });
       memo.insert(key, idx);
@@ -3118,45 +3598,316 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>, memo: &mut Memo)
       idx
     }
 
-    // ── Per-opcode axiom leaf rows ──────────────────────────────────────────
-    // Each axiom compiles to a single row with:
-    //   op      = OP_*_AXIOM
-    //   scalar0 = EVM opcode byte
-    //   ret_ty  = RET_WFF_AXIOM
-    // The row carries no child indices — it is a leaf.  Its soundness is
-    // enforced by the consistency AIR at batch level, not by verify_compiled.
-    Proof::PushAxiom { .. } => push_axiom_row(OP_PUSH_AXIOM, 0, rows, memo),
-    Proof::DupAxiom { depth, .. } => push_axiom_row(OP_DUP_AXIOM, *depth as u32, rows, memo),
-    Proof::SwapAxiom { depth, .. } => push_axiom_row(OP_SWAP_AXIOM, *depth as u32, rows, memo),
-    Proof::StructuralAxiom { opcode } => push_axiom_row(OP_STRUCTURAL_AXIOM, *opcode as u32, rows, memo),
-    Proof::MloadAxiom { .. } => push_axiom_row(OP_MLOAD_AXIOM, 0, rows, memo),
-    Proof::MstoreAxiom { opcode, .. } => push_axiom_row(OP_MSTORE_AXIOM, *opcode as u32, rows, memo),
-    Proof::MemCopyAxiom { opcode, .. } => push_axiom_row(OP_MEM_COPY_AXIOM, *opcode as u32, rows, memo),
-    Proof::SloadAxiom { .. } => push_axiom_row(OP_SLOAD_AXIOM, 0, rows, memo),
-    Proof::SstoreAxiom { .. } => push_axiom_row(OP_SSTORE_AXIOM, 0, rows, memo),
-    Proof::TransientAxiom { opcode, .. } => push_axiom_row(OP_TRANSIENT_AXIOM, *opcode as u32, rows, memo),
-    Proof::KeccakAxiom { .. } => push_axiom_row(OP_KECCAK_AXIOM, 0, rows, memo),
-    Proof::EnvAxiom { opcode, .. } => push_axiom_row(OP_ENV_AXIOM, *opcode as u32, rows, memo),
-    Proof::ExternalStateAxiom { opcode, .. } => push_axiom_row(OP_EXTERNAL_STATE_AXIOM, *opcode as u32, rows, memo),
-    Proof::TerminateAxiom { opcode, .. } => push_axiom_row(OP_TERMINATE_AXIOM, *opcode as u32, rows, memo),
-    Proof::CallAxiom { opcode, .. } => push_axiom_row(OP_CALL_AXIOM, *opcode as u32, rows, memo),
-    Proof::CreateAxiom { opcode, .. } => push_axiom_row(OP_CREATE_AXIOM, *opcode as u32, rows, memo),
-    Proof::SelfdestructAxiom { .. } => push_axiom_row(OP_SELFDESTRUCT_AXIOM, 0, rows, memo),
-    Proof::LogAxiom { opcode, .. } => push_axiom_row(OP_LOG_AXIOM, *opcode as u32, rows, memo),
+    // ── Per-opcode axiom leaf rows: compile as EqRefl(OutputTerm{0,0}) ────────────────
+    Proof::PushAxiom
+    | Proof::DupAxiom { .. }
+    | Proof::SwapAxiom { .. }
+    | Proof::StructuralAxiom { .. }
+    | Proof::MloadAxiom
+    | Proof::MstoreAxiom { .. }
+    | Proof::MemCopyAxiom { .. }
+    | Proof::SloadAxiom
+    | Proof::SstoreAxiom
+    | Proof::TransientAxiom { .. }
+    | Proof::KeccakAxiom
+    | Proof::EnvAxiom { .. }
+    | Proof::ExternalStateAxiom { .. }
+    | Proof::TerminateAxiom { .. }
+    | Proof::CallAxiom { .. }
+    | Proof::CreateAxiom { .. }
+    | Proof::SelfdestructAxiom
+    | Proof::LogAxiom { .. } => push_output_eq_row(rows, memo),
+    Proof::InputEq { stack_idx, byte_idx, value } => {
+      let key = (OP_INPUT_EQ, 0, 0, 0, *stack_idx as u32, *byte_idx as u32, *value as u32);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_INPUT_EQ,
+        scalar0: *stack_idx as u32,
+        scalar1: *byte_idx as u32,
+        scalar2: *value as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::OutputEq { stack_idx, byte_idx, value } => {
+      let key = (OP_OUTPUT_EQ, 0, 0, 0, *stack_idx as u32, *byte_idx as u32, *value as u32);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_OUTPUT_EQ,
+        scalar0: *stack_idx as u32,
+        scalar1: *byte_idx as u32,
+        scalar2: *value as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::PcBeforeEq { byte_idx, value } => {
+      let key = (OP_PC_BEFORE_EQ, 0, 0, 0, *byte_idx as u32, *value as u32, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_PC_BEFORE_EQ,
+        scalar0: *byte_idx as u32,
+        scalar1: *value as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::PcStep { instr_size } => {
+      let key = (OP_PC_STEP, 0, 0, 0, *instr_size, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_PC_STEP,
+        scalar0: *instr_size,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    // ── Symbolic byte-level ops ──────────────────────────────────────────────
+    Proof::ByteAndSym { byte_idx, a, b } => {
+      let key = (OP_BYTE_AND_SYM, 0, 0, 0, *byte_idx as u32, *a as u32, *b as u32);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_BYTE_AND_SYM,
+        scalar0: *byte_idx as u32,
+        scalar1: *a as u32,
+        scalar2: *b as u32,
+        value: (*a & *b) as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::ByteOrSym { byte_idx, a, b } => {
+      let key = (OP_BYTE_OR_SYM, 0, 0, 0, *byte_idx as u32, *a as u32, *b as u32);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_BYTE_OR_SYM,
+        scalar0: *byte_idx as u32,
+        scalar1: *a as u32,
+        scalar2: *b as u32,
+        value: (*a | *b) as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::ByteXorSym { byte_idx, a, b } => {
+      let key = (OP_BYTE_XOR_SYM, 0, 0, 0, *byte_idx as u32, *a as u32, *b as u32);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_BYTE_XOR_SYM,
+        scalar0: *byte_idx as u32,
+        scalar1: *a as u32,
+        scalar2: *b as u32,
+        value: (*a ^ *b) as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::ByteNotSym { byte_idx, a } => {
+      let key = (OP_BYTE_NOT_SYM, 0, 0, 0, *byte_idx as u32, *a as u32, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_BYTE_NOT_SYM,
+        scalar0: *byte_idx as u32,
+        scalar1: *a as u32,
+        value: (*a ^ 0xFF) as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::AddByteSym { byte_idx, a, b } => {
+      let key = (OP_ADD_BYTE_SYM, 0, 0, 0, *byte_idx as u32, *a as u32, *b as u32);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_ADD_BYTE_SYM,
+        scalar0: *byte_idx as u32,
+        scalar1: *a as u32,
+        scalar2: *b as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::SubByteSym { byte_idx, b, c } => {
+      let key = (OP_SUB_BYTE_SYM, 0, 0, 0, *byte_idx as u32, *b as u32, *c as u32);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_SUB_BYTE_SYM,
+        scalar0: *byte_idx as u32,
+        scalar1: *b as u32,
+        scalar2: *c as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::CarryEq { byte_idx, value } => {
+      let key = (OP_CARRY_EQ, 0, 0, 0, *byte_idx as u32, *value as u32, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_CARRY_EQ,
+        scalar0: *byte_idx as u32,
+        scalar1: *value as u32,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    // ── Syntactic (value-free) limb-level proof variants ─────────────────
+    Proof::CarryLimbZero => {
+      let carry_idx = compile_term_inner(&Term::CarryLimb { limb_idx: 0 }, rows, memo);
+      let zero_idx = compile_term_inner(&Term::Bool(false), rows, memo);
+      let key = (OP_CARRY_LIMB_ZERO, carry_idx, zero_idx, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_CARRY_LIMB_ZERO,
+        arg0: carry_idx,
+        arg1: zero_idx,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::U29AddSym { limb_idx } => {
+      // arg0=InputLimb29{0,j}, arg1=InputLimb29{1,j}, arg2=CarryLimb{j}
+      // scalar0=OutputLimb29{0,j} row ref, scalar1=CarryLimb{j+1} row ref, scalar2=limb_idx
+      let a_idx = compile_term_inner(&Term::InputLimb29 { stack_idx: 0, limb_idx: *limb_idx }, rows, memo);
+      let b_idx = compile_term_inner(&Term::InputLimb29 { stack_idx: 1, limb_idx: *limb_idx }, rows, memo);
+      let cin_idx = compile_term_inner(&Term::CarryLimb { limb_idx: *limb_idx }, rows, memo);
+      let c_idx = compile_term_inner(&Term::OutputLimb29 { stack_idx: 0, limb_idx: *limb_idx }, rows, memo);
+      let cout_idx = compile_term_inner(&Term::CarryLimb { limb_idx: limb_idx + 1 }, rows, memo);
+      let key = (OP_U29_ADD_SYM, a_idx, b_idx, cin_idx, c_idx, cout_idx, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U29_ADD_SYM,
+        scalar0: c_idx,
+        scalar1: cout_idx,
+        scalar2: *limb_idx as u32,
+        arg0: a_idx,
+        arg1: b_idx,
+        arg2: cin_idx,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::U24AddSym => {
+      let a_idx = compile_term_inner(&Term::InputLimb24 { stack_idx: 0 }, rows, memo);
+      let b_idx = compile_term_inner(&Term::InputLimb24 { stack_idx: 1 }, rows, memo);
+      let cin_idx = compile_term_inner(&Term::CarryLimb { limb_idx: 8 }, rows, memo);
+      let c_idx = compile_term_inner(&Term::OutputLimb24 { stack_idx: 0 }, rows, memo);
+      let key = (OP_U24_ADD_SYM, a_idx, b_idx, cin_idx, c_idx, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U24_ADD_SYM,
+        scalar0: c_idx,
+        arg0: a_idx,
+        arg1: b_idx,
+        arg2: cin_idx,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::U29SubSym { limb_idx } => {
+      // b + c = a at limb level: arg0=InputLimb29{1,j}(b), arg1=OutputLimb29{0,j}(c), arg2=CarryLimb{j}
+      // scalar0=InputLimb29{0,j}(a) result, scalar1=CarryLimb{j+1}, scalar2=limb_idx
+      let b_idx = compile_term_inner(&Term::InputLimb29 { stack_idx: 1, limb_idx: *limb_idx }, rows, memo);
+      let c_idx = compile_term_inner(&Term::OutputLimb29 { stack_idx: 0, limb_idx: *limb_idx }, rows, memo);
+      let cin_idx = compile_term_inner(&Term::CarryLimb { limb_idx: *limb_idx }, rows, memo);
+      let a_idx = compile_term_inner(&Term::InputLimb29 { stack_idx: 0, limb_idx: *limb_idx }, rows, memo);
+      let cout_idx = compile_term_inner(&Term::CarryLimb { limb_idx: limb_idx + 1 }, rows, memo);
+      let key = (OP_U29_SUB_SYM, b_idx, c_idx, cin_idx, a_idx, cout_idx, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U29_SUB_SYM,
+        scalar0: a_idx,
+        scalar1: cout_idx,
+        scalar2: *limb_idx as u32,
+        arg0: b_idx,
+        arg1: c_idx,
+        arg2: cin_idx,
+        ret_ty: RET_WFF_AND,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::U24SubSym => {
+      let b_idx = compile_term_inner(&Term::InputLimb24 { stack_idx: 1 }, rows, memo);
+      let c_idx = compile_term_inner(&Term::OutputLimb24 { stack_idx: 0 }, rows, memo);
+      let cin_idx = compile_term_inner(&Term::CarryLimb { limb_idx: 8 }, rows, memo);
+      let a_idx = compile_term_inner(&Term::InputLimb24 { stack_idx: 0 }, rows, memo);
+      let key = (OP_U24_SUB_SYM, b_idx, c_idx, cin_idx, a_idx, 0, 0);
+      if let Some(&cached) = memo.get(&key) { return cached; }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U24_SUB_SYM,
+        scalar0: a_idx,
+        arg0: b_idx,
+        arg1: c_idx,
+        arg2: cin_idx,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
   }
 }
 
-/// Emit a single axiom leaf row, deduplicating by (op, scalar0).
-fn push_axiom_row(op: u32, scalar0: u32, rows: &mut Vec<ProofRow>, memo: &mut Memo) -> u32 {
-  let key = (op, scalar0, 0, 0, 0, 0, 0);
+/// Emit an EqRefl row for OutputTerm{stack_idx: 0, byte_idx: 0}, deduplicating via memo.
+fn push_output_eq_row(rows: &mut Vec<ProofRow>, memo: &mut Memo) -> u32 {
+  let ti = compile_term_inner(
+    &Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 },
+    rows,
+    memo,
+  );
+  let key = (OP_EQ_REFL, ti, 0, 0, 0, 0, 0);
   if let Some(&cached) = memo.get(&key) {
     return cached;
   }
   let idx = rows.len() as u32;
   rows.push(ProofRow {
-    op,
-    scalar0,
-    ret_ty: RET_WFF_AXIOM,
+    op: OP_EQ_REFL,
+    arg0: ti,
+    ret_ty: RET_WFF_EQ,
     ..Default::default()
   });
   memo.insert(key, idx);
@@ -3201,6 +3952,14 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
     };
 
     match row.op {
+      // ── Symbolic term leaves (value is a stack/PC slot; not checked here) ──
+      OP_INPUT_TERM | OP_OUTPUT_TERM | OP_PC_BEFORE | OP_PC_AFTER => {}
+      // ── 29/24-bit limb symbolic term leaves (value resolved at batch-verification time) ──
+      OP_INPUT_LIMB29 | OP_OUTPUT_LIMB29 | OP_INPUT_LIMB24 | OP_OUTPUT_LIMB24 => {}
+      // ── Limb arithmetic term leaves (syntactic; LogUp provides values) ──
+      OP_CARRY_LIMB | OP_ADD29 | OP_ADD29_CARRY | OP_ADD24 => {}
+      // ── Syntactic limb-level proof rows (correctness via LogUp) ──
+      OP_CARRY_LIMB_ZERO | OP_U29_ADD_SYM | OP_U24_ADD_SYM | OP_U29_SUB_SYM | OP_U24_SUB_SYM => {}
       // ── Leaf terms ──
       OP_BOOL => {
         if row.value != row.scalar0 || row.value > 1 {
@@ -3450,32 +4209,53 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
           });
         }
       }
-      // ── Per-opcode axiom rows: leaf nodes, no children to validate ──────
-      // Soundness is guaranteed by the consistency AIR at batch level.
-      OP_PUSH_AXIOM
-      | OP_DUP_AXIOM
-      | OP_SWAP_AXIOM
-      | OP_STRUCTURAL_AXIOM
-      | OP_MLOAD_AXIOM
-      | OP_MSTORE_AXIOM
-      | OP_MEM_COPY_AXIOM
-      | OP_SLOAD_AXIOM
-      | OP_SSTORE_AXIOM
-      | OP_TRANSIENT_AXIOM
-      | OP_KECCAK_AXIOM
-      | OP_ENV_AXIOM
-      | OP_EXTERNAL_STATE_AXIOM
-      | OP_TERMINATE_AXIOM
-      | OP_CALL_AXIOM
-      | OP_CREATE_AXIOM
-      | OP_SELFDESTRUCT_AXIOM
-      | OP_LOG_AXIOM => {
-        if row.ret_ty != RET_WFF_AXIOM {
-          return Err(VerifyError::UnexpectedProofVariant {
-            expected: "axiom row must have RET_WFF_AXIOM",
-          });
+      OP_INPUT_EQ | OP_OUTPUT_EQ => {
+        if row.scalar0 > 255 || row.scalar1 > 255 || row.scalar2 > 255 {
+          return Err(VerifyError::ByteDecideFailed);
         }
-        // No child rows to check; accepted unconditionally here.
+      }
+      OP_PC_BEFORE_EQ => {
+        if row.scalar0 > 3 || row.scalar1 > 255 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_PC_STEP => {
+        // instr_size must be a plausible EVM instruction size (1-based, ≤ 33 for PUSH32)
+        if row.scalar0 == 0 || row.scalar0 > 33 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_BYTE_AND_SYM => {
+        if row.scalar0 > 31 || row.scalar1 > 255 || row.scalar2 > 255 { return Err(VerifyError::ByteDecideFailed); }
+        if row.value != (row.scalar1 & row.scalar2) { return Err(VerifyError::ByteDecideFailed); }
+      }
+      OP_BYTE_OR_SYM => {
+        if row.scalar0 > 31 || row.scalar1 > 255 || row.scalar2 > 255 { return Err(VerifyError::ByteDecideFailed); }
+        if row.value != (row.scalar1 | row.scalar2) { return Err(VerifyError::ByteDecideFailed); }
+      }
+      OP_BYTE_XOR_SYM => {
+        if row.scalar0 > 31 || row.scalar1 > 255 || row.scalar2 > 255 { return Err(VerifyError::ByteDecideFailed); }
+        if row.value != (row.scalar1 ^ row.scalar2) { return Err(VerifyError::ByteDecideFailed); }
+      }
+      OP_BYTE_NOT_SYM => {
+        if row.scalar0 > 31 || row.scalar1 > 255 { return Err(VerifyError::ByteDecideFailed); }
+        if row.value != (row.scalar1 ^ 0xFF) { return Err(VerifyError::ByteDecideFailed); }
+      }
+      OP_ADD_BYTE_SYM => {
+        // scalar0=byte_idx, scalar1=a, scalar2=b (witnesses, not in WFF)
+        if row.scalar0 > 31 || row.scalar1 > 255 || row.scalar2 > 255 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_SUB_BYTE_SYM => {
+        if row.scalar0 > 31 || row.scalar1 > 255 || row.scalar2 > 255 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
+      }
+      OP_CARRY_EQ => {
+        if row.scalar0 > 31 || row.scalar1 > 1 {
+          return Err(VerifyError::ByteDecideFailed);
+        }
       }
       _ => {
         return Err(VerifyError::UnexpectedTermVariant {
@@ -3485,6 +4265,427 @@ pub fn verify_compiled(rows: &[ProofRow]) -> Result<(), VerifyError> {
     }
   }
   Ok(())
+}
+
+// ============================================================
+// Stack I/O and PC binding proofs
+// ============================================================
+
+/// Conjunction of `InputEq` axioms for every byte of every input word.
+///
+/// Proves `InputTerm{s,j} = Byte(inputs[s][j])` for all `s` in `0..inputs.len()`
+/// and `j` in `0..32`.  Soundness is enforced by the stack consistency AIR.
+pub fn prove_stack_inputs(inputs: &[[u8; 32]]) -> Proof {
+  let leaves: Vec<Proof> = inputs
+    .iter()
+    .enumerate()
+    .flat_map(|(s, word)| {
+      (0u8..32).map(move |j| Proof::InputEq {
+        stack_idx: s as u8,
+        byte_idx: j,
+        value: word[j as usize],
+      })
+    })
+    .collect();
+  if leaves.is_empty() {
+    return Proof::EqRefl(Term::Bool(true));
+  }
+  and_proofs(leaves)
+}
+
+/// Conjunction of `OutputEq` axioms for every byte of every output word.
+pub fn prove_stack_outputs(outputs: &[[u8; 32]]) -> Proof {
+  let leaves: Vec<Proof> = outputs
+    .iter()
+    .enumerate()
+    .flat_map(|(s, word)| {
+      (0u8..32).map(move |j| Proof::OutputEq {
+        stack_idx: s as u8,
+        byte_idx: j,
+        value: word[j as usize],
+      })
+    })
+    .collect();
+  if leaves.is_empty() {
+    return Proof::EqRefl(Term::Bool(true));
+  }
+  and_proofs(leaves)
+}
+
+/// Conjunction of `PcBeforeEq` axioms for the 4-byte big-endian representation of `pc`.
+pub fn prove_pc_before(pc: u32) -> Proof {
+  let bytes = pc.to_be_bytes();
+  let leaves: Vec<Proof> = (0u8..4)
+    .map(|j| Proof::PcBeforeEq { byte_idx: j, value: bytes[j as usize] })
+    .collect();
+  and_proofs(leaves)
+}
+
+/// Proof that `PcAfter = PcBefore + instr_size` via carry-chain arithmetic.
+///
+/// `instr_size` must match the number of bytes consumed by the instruction (1 for
+/// most opcodes, 2..=33 for PUSH1..PUSH32).
+pub fn prove_pc_step(instr_size: u32) -> Proof {
+  Proof::PcStep { instr_size }
+}
+
+/// WFF for stack input bindings: `AND` over `InputTerm{s,j,v} = Byte(v)` where `v = inputs[s][j]`.
+pub fn wff_stack_inputs(inputs: &[[u8; 32]]) -> WFF {
+  let leaves: Vec<WFF> = inputs
+    .iter()
+    .enumerate()
+    .flat_map(|(s, word)| {
+      (0u8..32).map(move |j| WFF::Equal(
+        Box::new(Term::InputTerm { stack_idx: s as u8, byte_idx: j, value: word[j as usize] }),
+        Box::new(Term::Byte(word[j as usize])),
+      ))
+    })
+    .collect();
+  if leaves.is_empty() {
+    return WFF::Equal(Box::new(Term::Bool(true)), Box::new(Term::Bool(true)));
+  }
+  and_wffs(leaves)
+}
+
+/// WFF for stack output bindings: `AND` over `OutputTerm{s,j,v} = Byte(v)` where `v = outputs[s][j]`.
+pub fn wff_stack_outputs(outputs: &[[u8; 32]]) -> WFF {
+  let leaves: Vec<WFF> = outputs
+    .iter()
+    .enumerate()
+    .flat_map(|(s, word)| {
+      (0u8..32).map(move |j| WFF::Equal(
+        Box::new(Term::OutputTerm { stack_idx: s as u8, byte_idx: j, value: word[j as usize] }),
+        Box::new(Term::Byte(word[j as usize])),
+      ))
+    })
+    .collect();
+  if leaves.is_empty() {
+    return WFF::Equal(Box::new(Term::Bool(true)), Box::new(Term::Bool(true)));
+  }
+  and_wffs(leaves)
+}
+
+/// WFF for PC-before binding: `AND` over `PcBefore{j} = Byte(pc_bytes[j])`.
+pub fn wff_pc_before(pc: u32) -> WFF {
+  let bytes = pc.to_be_bytes();
+  let leaves: Vec<WFF> = (0u8..4)
+    .map(|j| WFF::Equal(
+      Box::new(Term::PcBefore { byte_idx: j }),
+      Box::new(Term::Byte(bytes[j as usize])),
+    ))
+    .collect();
+  and_wffs(leaves)
+}
+
+/// WFF expressing `PcAfter = PcBefore + instr_size` via a 4-byte carry chain.
+///
+/// For each byte index `j` (0 = MSB, 3 = LSB):
+/// `PcAfter{j} = ByteAdd(PcBefore{j}, Byte(instr_size_bytes[j]), carry_into_j)`
+/// where `carry_into_j` is `ByteAddCarry` from byte `j+1` (with `carry_into_3 = Byte(0)`).
+pub fn wff_pc_step(instr_size: u32) -> WFF {
+  let sb = instr_size.to_be_bytes(); // sb[0]=MSB … sb[3]=LSB
+
+  // Build carry terms from LSB toward MSB.
+  let mk_carry = |j: u8, c_in: Box<Term>| -> Term {
+    Term::ByteAddCarry(
+      Box::new(Term::PcBefore { byte_idx: j }),
+      Box::new(Term::Byte(sb[j as usize])),
+      c_in,
+    )
+  };
+
+  let c3_in = Box::new(Term::Byte(0));
+  let c2_in = Box::new(mk_carry(3, c3_in.clone()));
+  let c1_in = Box::new(mk_carry(2, c2_in.clone()));
+  let c0_in = Box::new(mk_carry(1, c1_in.clone()));
+
+  let eq_j = |j: u8, c_in: Box<Term>| WFF::Equal(
+    Box::new(Term::PcAfter { byte_idx: j }),
+    Box::new(Term::ByteAdd(
+      Box::new(Term::PcBefore { byte_idx: j }),
+      Box::new(Term::Byte(sb[j as usize])),
+      c_in,
+    )),
+  );
+
+  WFF::And(
+    Box::new(eq_j(0, c0_in)),
+    Box::new(WFF::And(
+      Box::new(eq_j(1, c1_in)),
+      Box::new(WFF::And(
+        Box::new(eq_j(2, c2_in)),
+        Box::new(eq_j(3, c3_in)),
+      )),
+    )),
+  )
+}
+
+// ============================================================
+// Symbolic prove_* / wff_* (value-free WFF, witnesses only for verification)
+// ============================================================
+//
+// Design: all input/output references in the WFF use InputTerm / OutputTerm
+// symbolic variables.  Concrete byte values are passed ONLY as witnesses so
+// that `verify_compiled` and the STARK can check lookup tables.
+// Two executions of the same opcode produce *identical* WFF trees, enabling
+// opcode-level WFF caching and digest reuse.
+
+/// Symbolic AND — `ByteAnd(InputTerm{0,j}, InputTerm{1,j}) = OutputTerm{0,j}` for j 31..=0.
+pub fn prove_and_sym(a: &[u8; 32], b: &[u8; 32]) -> Proof {
+  let leaves: Vec<Proof> = (0..32u8)
+    .rev()
+    .map(|j| Proof::ByteAndSym { byte_idx: j, a: a[j as usize], b: b[j as usize] })
+    .collect();
+  and_proofs(leaves)
+}
+
+/// Symbolic OR — `ByteOr(InputTerm{0,j}, InputTerm{1,j}) = OutputTerm{0,j}` for j 31..=0.
+pub fn prove_or_sym(a: &[u8; 32], b: &[u8; 32]) -> Proof {
+  let leaves: Vec<Proof> = (0..32u8)
+    .rev()
+    .map(|j| Proof::ByteOrSym { byte_idx: j, a: a[j as usize], b: b[j as usize] })
+    .collect();
+  and_proofs(leaves)
+}
+
+/// Symbolic XOR — `ByteXor(InputTerm{0,j}, InputTerm{1,j}) = OutputTerm{0,j}` for j 31..=0.
+pub fn prove_xor_sym(a: &[u8; 32], b: &[u8; 32]) -> Proof {
+  let leaves: Vec<Proof> = (0..32u8)
+    .rev()
+    .map(|j| Proof::ByteXorSym { byte_idx: j, a: a[j as usize], b: b[j as usize] })
+    .collect();
+  and_proofs(leaves)
+}
+
+/// Symbolic NOT — `ByteXor(InputTerm{0,j}, Byte(0xFF)) = OutputTerm{0,j}` for j 31..=0.
+pub fn prove_not_sym(a: &[u8; 32]) -> Proof {
+  let leaves: Vec<Proof> = (0..32u8)
+    .rev()
+    .map(|j| Proof::ByteNotSym { byte_idx: j, a: a[j as usize] })
+    .collect();
+  and_proofs(leaves)
+}
+
+/// Symbolic ADD — `ByteAdd(InputTerm{0,j}, InputTerm{1,j}, Byte(carry_j)) = OutputTerm{0,j}`.
+///
+/// Carry chain is computed from the concrete `a[j]`, `b[j]` bytes (big-endian, j=0 is MSB).
+pub fn prove_add_sym(a: &[u8; 32], b: &[u8; 32]) -> Proof {
+  // carry_out[j] = carry OUT of byte j = carry INTO byte j-1 (big-endian).
+  // carry_out[31] (LSB) = carry from bit position below, which doesn't exist = 0.
+  let mut carry_out = [0u8; 32]; // carry_out[j] = carry produced by byte j
+  for j in (0..32usize).rev() {
+    let prev_carry = if j < 31 { carry_out[j + 1] } else { 0u8 };
+    let s = a[j] as u16 + b[j] as u16 + prev_carry as u16;
+    carry_out[j] = (s >> 8) as u8;
+  }
+  // For each byte j: CarryEq{j, carry_out[j]} ∧ AddByteSym{j, a[j], b[j]}
+  // All bundled as a single AND conjunction.
+  let mut leaves: Vec<Proof> = Vec::with_capacity(64);
+  for j in (0..32u8).rev() {
+    // CarryTerm{j} is the carry INTO byte j = carry_out[j+1] (or 0 for LSB)
+    let carry_into_j = if j < 31 { carry_out[j as usize + 1] } else { 0u8 };
+    leaves.push(Proof::CarryEq { byte_idx: j, value: carry_into_j });
+    leaves.push(Proof::AddByteSym { byte_idx: j, a: a[j as usize], b: b[j as usize] });
+  }
+  and_proofs(leaves)
+}
+
+/// Symbolic SUB — `ByteAdd(InputTerm{1,j}, OutputTerm{0,j}, Byte(borrow_j)) = InputTerm{0,j}`.
+///
+/// Proves `a - b = c` as `b + c + borrow = a` byte-wise.
+pub fn prove_sub_sym(a: &[u8; 32], b: &[u8; 32]) -> Proof {
+  // Verify a - b = c  as  b + c = a,  reusing CarryTerm.
+  let c = sub_u256_be(a, b);
+  let mut carry_out = [0u8; 32];
+  for j in (0..32usize).rev() {
+    let prev_carry = if j < 31 { carry_out[j + 1] } else { 0u8 };
+    let s = b[j] as u16 + c[j] as u16 + prev_carry as u16;
+    carry_out[j] = (s >> 8) as u8;
+  }
+  let mut leaves: Vec<Proof> = Vec::with_capacity(64);
+  for j in (0..32u8).rev() {
+    let carry_into_j = if j < 31 { carry_out[j as usize + 1] } else { 0u8 };
+    leaves.push(Proof::CarryEq { byte_idx: j, value: carry_into_j });
+    leaves.push(Proof::SubByteSym { byte_idx: j, b: b[j as usize], c: c[j as usize] });
+  }
+  and_proofs(leaves)
+}
+
+// ---- Corresponding wff_*_sym functions ----
+//
+// All return value-free WFFs (no Byte(concrete) for inputs/outputs).
+
+/// WFF for AND with concrete claimed values.
+/// `a[j]` = claimed byte j of input 0, `b[j]` = input 1, `c[j]` = output 0 (= a[j] & b[j]).
+/// Values are accepted optimistically and will be verified via stack-log LogUp.
+pub fn wff_and_sym(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let leaves: Vec<WFF> = (0..32u8)
+    .rev()
+    .map(|j| WFF::Equal(
+      Box::new(Term::ByteAnd(
+        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: j, value: a[j as usize] }),
+        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: j, value: b[j as usize] }),
+      )),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: j, value: c[j as usize] }),
+    ))
+    .collect();
+  and_wffs(leaves)
+}
+
+/// WFF for OR with concrete claimed values.
+pub fn wff_or_sym(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let leaves: Vec<WFF> = (0..32u8)
+    .rev()
+    .map(|j| WFF::Equal(
+      Box::new(Term::ByteOr(
+        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: j, value: a[j as usize] }),
+        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: j, value: b[j as usize] }),
+      )),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: j, value: c[j as usize] }),
+    ))
+    .collect();
+  and_wffs(leaves)
+}
+
+/// WFF for XOR with concrete claimed values.
+pub fn wff_xor_sym(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let leaves: Vec<WFF> = (0..32u8)
+    .rev()
+    .map(|j| WFF::Equal(
+      Box::new(Term::ByteXor(
+        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: j, value: a[j as usize] }),
+        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: j, value: b[j as usize] }),
+      )),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: j, value: c[j as usize] }),
+    ))
+    .collect();
+  and_wffs(leaves)
+}
+
+/// WFF for NOT — `ByteXor(InputTerm{0,j,a[j]}, Byte(0xFF)) = OutputTerm{0,j,a[j]^0xFF}`.
+/// `a[j]` = claimed input byte; `c[j]` = claimed output byte (should equal `a[j] ^ 0xFF`).
+pub fn wff_not_sym(a: &[u8; 32], c: &[u8; 32]) -> WFF {
+  let leaves: Vec<WFF> = (0..32u8)
+    .rev()
+    .map(|j| WFF::Equal(
+      Box::new(Term::ByteXor(
+        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: j, value: a[j as usize] }),
+        Box::new(Term::Byte(0xFF)),
+      )),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: j, value: c[j as usize] }),
+    ))
+    .collect();
+  and_wffs(leaves)
+}
+
+/// WFF for ADD: `ByteAdd(InputTerm{0,j,a}, InputTerm{1,j,b}, CarryTerm{j}) = OutputTerm{0,j,out}`
+/// combined with `CarryTerm{j} = Byte(carry_into_j)` bindings.
+///
+/// `InputTerm` / `OutputTerm` carry concrete claimed values (verified later via LogUp).
+pub fn wff_add_sym(a: &[u8; 32], b: &[u8; 32]) -> WFF {
+  let mut carry_out = [0u8; 32];
+  for j in (0..32usize).rev() {
+    let prev_carry = if j < 31 { carry_out[j + 1] } else { 0u8 };
+    let s = a[j] as u16 + b[j] as u16 + prev_carry as u16;
+    carry_out[j] = (s >> 8) as u8;
+  }
+  let mut leaves: Vec<WFF> = Vec::with_capacity(64);
+  for j in (0..32u8).rev() {
+    let carry_into_j = if j < 31 { carry_out[j as usize + 1] } else { 0u8 };
+    let out_j = ((a[j as usize] as u16 + b[j as usize] as u16 + carry_into_j as u16) % 256) as u8;
+    // CarryTerm{j} = Byte(carry_into_j)
+    leaves.push(WFF::Equal(
+      Box::new(Term::CarryTerm { byte_idx: j }),
+      Box::new(Term::Byte(carry_into_j)),
+    ));
+    // ByteAdd(InputTerm{0,j,a[j]}, InputTerm{1,j,b[j]}, CarryTerm{j}) = OutputTerm{0,j,out_j}
+    leaves.push(WFF::Equal(
+      Box::new(Term::ByteAdd(
+        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: j, value: a[j as usize] }),
+        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: j, value: b[j as usize] }),
+        Box::new(Term::CarryTerm { byte_idx: j }),
+      )),
+      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: j, value: out_j }),
+    ));
+  }
+  and_wffs(leaves)
+}
+
+/// WFF for SUB with borrow witnesses (same structure as `wff_add_sym`).
+pub fn wff_sub_sym(a: &[u8; 32], b: &[u8; 32]) -> WFF {
+  // a = b + c  →  ByteAdd(Input{1,j,b[j]}, Output{0,j,c[j]}, CarryTerm{j}) = Input{0,j,a[j]}
+  let c = sub_u256_be(a, b);
+  let mut carry_out = [0u8; 32];
+  for j in (0..32usize).rev() {
+    let prev_carry = if j < 31 { carry_out[j + 1] } else { 0u8 };
+    let s = b[j] as u16 + c[j] as u16 + prev_carry as u16;
+    carry_out[j] = (s >> 8) as u8;
+  }
+  let mut leaves: Vec<WFF> = Vec::with_capacity(64);
+  for j in (0..32u8).rev() {
+    let carry_into_j = if j < 31 { carry_out[j as usize + 1] } else { 0u8 };
+    leaves.push(WFF::Equal(
+      Box::new(Term::CarryTerm { byte_idx: j }),
+      Box::new(Term::Byte(carry_into_j)),
+    ));
+    leaves.push(WFF::Equal(
+      Box::new(Term::ByteAdd(
+        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: j, value: b[j as usize] }),
+        Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: j, value: c[j as usize] }),
+        Box::new(Term::CarryTerm { byte_idx: j }),
+      )),
+      Box::new(Term::InputTerm { stack_idx: 0, byte_idx: j, value: a[j as usize] }),
+    ));
+  }
+  and_wffs(leaves)
+}
+
+// ============================================================
+// Syntactic (value-free) limb-level prove_* / wff_* for ADD and SUB
+// ============================================================
+//
+// These functions produce a FIXED proof / WFF that is identical for EVERY
+// execution of the same opcode.  Concrete word values are not embedded here;
+// correctness is enforced at batch-verification time via LogUp binding that
+// ties each `InputLimb29` / `OutputLimb29` symbolic term to the actual 29-bit
+// chunk of the corresponding stack word.
+
+/// Syntactic proof for ADD — no concrete values.
+/// The proof tree is identical for every ADD execution.
+///
+/// Structure:
+/// ```text
+/// And(CarryLimbZero, And(U29AddSym{0}, And(U29AddSym{1}, … And(U29AddSym{7}, U24AddSym))))
+/// ```
+pub fn prove_add_limb_sym() -> Proof {
+  let mut proofs = Vec::with_capacity(10);
+  proofs.push(Proof::CarryLimbZero);
+  for j in 0u8..8 {
+    proofs.push(Proof::U29AddSym { limb_idx: j });
+  } 
+  proofs.push(Proof::U24AddSym);
+  and_proofs(proofs)
+}
+
+/// Fixed WFF for ADD using symbolic limb terms — identical for every ADD execution.
+pub fn wff_add_limb_sym() -> WFF {
+  infer_proof(&prove_add_limb_sym()).expect("wff_add_limb_sym: infer_proof failed")
+}
+
+/// Syntactic proof for SUB (`a - b = c` verified as `b + c = a`) — no concrete values.
+pub fn prove_sub_limb_sym() -> Proof {
+  let mut proofs = Vec::with_capacity(10);
+  proofs.push(Proof::CarryLimbZero);
+  for j in 0u8..8 {
+    proofs.push(Proof::U29SubSym { limb_idx: j });
+  }
+  proofs.push(Proof::U24SubSym);
+  and_proofs(proofs)
+}
+
+/// Fixed WFF for SUB using symbolic limb terms.
+pub fn wff_sub_limb_sym() -> WFF {
+  infer_proof(&prove_sub_limb_sym()).expect("wff_sub_limb_sym: infer_proof failed")
 }
 
 // ============================================================
