@@ -61,6 +61,16 @@ pub enum Term {
   ByteOr(Box<Term>, Box<Term>),
   /// `ByteXor(a, b) = a ^ b`.
   ByteXor(Box<Term>, Box<Term>),
+
+  // ---- Symbolic variable terms (resolved at batch-verification time) ----
+  /// The `byte_idx`-th byte (big-endian, 0 = MSB) of the `stack_idx`-th stack input word.
+  InputTerm { stack_idx: u8, byte_idx: u8 },
+  /// The `byte_idx`-th byte of the `stack_idx`-th stack output word.
+  OutputTerm { stack_idx: u8, byte_idx: u8 },
+  /// The `byte_idx`-th byte of the program counter before execution (4-byte big-endian u32).
+  PcBefore { byte_idx: u8 },
+  /// The `byte_idx`-th byte of the program counter after execution.
+  PcAfter { byte_idx: u8 },
 }
 
 // ============================================================
@@ -82,41 +92,41 @@ pub enum WFF {
   // witness that the claim is well-formed and matches the stack I/O.
 
   /// PUSH: the pushed value equals `value`.
-  PushAxiom { value: [u8; 32] },
+  PushAxiom,
   /// DUP(depth): the top of stack equals the item at `depth`.
-  DupAxiom { depth: u8, value: [u8; 32] },
-  /// SWAP(depth): top becomes `new_top`, item at `depth` becomes `new_deep`.
-  SwapAxiom { depth: u8, new_top: [u8; 32], new_deep: [u8; 32] },
+  DupAxiom { depth: u8 },
+  /// SWAP(depth): top and item at `depth` are exchanged.
+  SwapAxiom { depth: u8 },
   /// Structural no-output opcodes: STOP, POP, JUMP, JUMPI, JUMPDEST, INVALID.
   StructuralAxiom { opcode: u8 },
-  /// MLOAD: reading addr returns value.
-  MloadAxiom { addr: [u8; 32], value: [u8; 32] },
-  /// MSTORE / MSTORE8: writing value to addr.
-  MstoreAxiom { opcode: u8, addr: [u8; 32], value: [u8; 32] },
-  /// Memory-copy opcodes: dest, offset, size triple.
-  MemCopyAxiom { opcode: u8, dest_or_ret: [u8; 32], offset: [u8; 32], size: [u8; 32] },
-  /// SLOAD: reading slot returns value.
-  SloadAxiom { slot: [u8; 32], value: [u8; 32] },
-  /// SSTORE: writing value to slot.
-  SstoreAxiom { slot: [u8; 32], value: [u8; 32] },
+  /// MLOAD: reading address returns a value from memory.
+  MloadAxiom,
+  /// MSTORE / MSTORE8: writing a value to memory.
+  MstoreAxiom { opcode: u8 },
+  /// Memory-copy opcodes (CALLDATACOPY, CODECOPY, RETURNDATACOPY, EXTCODECOPY, MCOPY).
+  MemCopyAxiom { opcode: u8 },
+  /// SLOAD: reading a storage slot returns a value.
+  SloadAxiom,
+  /// SSTORE: writing a value to a storage slot.
+  SstoreAxiom,
   /// TLOAD / TSTORE (transient storage, EIP-1153).
-  TransientAxiom { opcode: u8, slot: [u8; 32], value: [u8; 32] },
-  /// KECCAK256: hash of memory[offset..offset+size] equals output_hash.
-  KeccakAxiom { offset: [u8; 32], size: [u8; 32], output_hash: [u8; 32] },
+  TransientAxiom { opcode: u8 },
+  /// KECCAK256: hash of memory region.
+  KeccakAxiom,
   /// Environment / context opcodes: the value equals what the EVM state provides.
-  EnvAxiom { opcode: u8, value: [u8; 32] },
+  EnvAxiom { opcode: u8 },
   /// External-state opcodes (BLOCKHASH, EXTCODESIZE, BALANCE, EXTCODEHASH).
-  ExternalStateAxiom { opcode: u8, key: [u8; 32], value: [u8; 32] },
-  /// RETURN / REVERT: offset and size of return data.
-  TerminateAxiom { opcode: u8, offset: [u8; 32], size: [u8; 32] },
-  /// CALL / CALLCODE / DELEGATECALL / STATICCALL: success flag.
-  CallAxiom { opcode: u8, success: [u8; 32] },
-  /// CREATE / CREATE2: deployed address.
-  CreateAxiom { opcode: u8, deployed: [u8; 32] },
-  /// SELFDESTRUCT: target address.
-  SelfdestructAxiom { target: [u8; 32] },
-  /// LOG0-LOG4: topic count and memory region.
-  LogAxiom { opcode: u8, offset: [u8; 32], size: [u8; 32] },
+  ExternalStateAxiom { opcode: u8 },
+  /// RETURN / REVERT: specifies offset and size of return data.
+  TerminateAxiom { opcode: u8 },
+  /// CALL / CALLCODE / DELEGATECALL / STATICCALL.
+  CallAxiom { opcode: u8 },
+  /// CREATE / CREATE2: deploys a contract.
+  CreateAxiom { opcode: u8 },
+  /// SELFDESTRUCT.
+  SelfdestructAxiom,
+  /// LOG0-LOG4: emits a log entry.
+  LogAxiom { opcode: u8 },
 }
 
 // ============================================================
@@ -173,24 +183,24 @@ pub enum Proof {
 
   // ── Per-opcode axiom proof terms ──────────────────────────────────────
   // Leaf nodes: no sub-proofs.  Each encodes exactly the WFF it witnesses.
-  PushAxiom { value: [u8; 32] },
-  DupAxiom { depth: u8, value: [u8; 32] },
-  SwapAxiom { depth: u8, new_top: [u8; 32], new_deep: [u8; 32] },
+  PushAxiom,
+  DupAxiom { depth: u8 },
+  SwapAxiom { depth: u8 },
   StructuralAxiom { opcode: u8 },
-  MloadAxiom { addr: [u8; 32], value: [u8; 32] },
-  MstoreAxiom { opcode: u8, addr: [u8; 32], value: [u8; 32] },
-  MemCopyAxiom { opcode: u8, dest_or_ret: [u8; 32], offset: [u8; 32], size: [u8; 32] },
-  SloadAxiom { slot: [u8; 32], value: [u8; 32] },
-  SstoreAxiom { slot: [u8; 32], value: [u8; 32] },
-  TransientAxiom { opcode: u8, slot: [u8; 32], value: [u8; 32] },
-  KeccakAxiom { offset: [u8; 32], size: [u8; 32], output_hash: [u8; 32] },
-  EnvAxiom { opcode: u8, value: [u8; 32] },
-  ExternalStateAxiom { opcode: u8, key: [u8; 32], value: [u8; 32] },
-  TerminateAxiom { opcode: u8, offset: [u8; 32], size: [u8; 32] },
-  CallAxiom { opcode: u8, success: [u8; 32] },
-  CreateAxiom { opcode: u8, deployed: [u8; 32] },
-  SelfdestructAxiom { target: [u8; 32] },
-  LogAxiom { opcode: u8, offset: [u8; 32], size: [u8; 32] },
+  MloadAxiom,
+  MstoreAxiom { opcode: u8 },
+  MemCopyAxiom { opcode: u8 },
+  SloadAxiom,
+  SstoreAxiom,
+  TransientAxiom { opcode: u8 },
+  KeccakAxiom,
+  EnvAxiom { opcode: u8 },
+  ExternalStateAxiom { opcode: u8 },
+  TerminateAxiom { opcode: u8 },
+  CallAxiom { opcode: u8 },
+  CreateAxiom { opcode: u8 },
+  SelfdestructAxiom,
+  LogAxiom { opcode: u8 },
 }
 
 // ============================================================
@@ -285,6 +295,12 @@ pub const OP_CALL_AXIOM: u32 = 44;
 pub const OP_CREATE_AXIOM: u32 = 45;
 pub const OP_SELFDESTRUCT_AXIOM: u32 = 46;
 pub const OP_LOG_AXIOM: u32 = 47;
+
+// ---- Symbolic variable term opcodes ----
+pub const OP_INPUT_TERM: u32 = 48;
+pub const OP_OUTPUT_TERM: u32 = 49;
+pub const OP_PC_BEFORE: u32 = 50;
+pub const OP_PC_AFTER: u32 = 51;
 
 // ---- Return-type tags ----
 pub const RET_BOOL: u32 = 0;
@@ -401,6 +417,10 @@ pub fn infer_ty(term: &Term) -> Result<Ty, VerifyError> {
         })
       }
     }
+    Term::InputTerm { .. }
+    | Term::OutputTerm { .. }
+    | Term::PcBefore { .. }
+    | Term::PcAfter { .. } => Ok(Ty::Byte),
   }
 }
 
@@ -669,50 +689,42 @@ pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
     )),
 
     // ── Per-opcode axiom proofs: each infers the matching WFF variant. ──────
-    Proof::PushAxiom { value } => Ok(WFF::PushAxiom { value: *value }),
-    Proof::DupAxiom { depth, value } => Ok(WFF::DupAxiom { depth: *depth, value: *value }),
-    Proof::SwapAxiom { depth, new_top, new_deep } => {
-      Ok(WFF::SwapAxiom { depth: *depth, new_top: *new_top, new_deep: *new_deep })
-    }
+    Proof::PushAxiom => Ok(WFF::PushAxiom),
+    Proof::DupAxiom { depth } => Ok(WFF::DupAxiom { depth: *depth }),
+    Proof::SwapAxiom { depth } => Ok(WFF::SwapAxiom { depth: *depth }),
     Proof::StructuralAxiom { opcode } => Ok(WFF::StructuralAxiom { opcode: *opcode }),
-    Proof::MloadAxiom { addr, value } => Ok(WFF::MloadAxiom { addr: *addr, value: *value }),
-    Proof::MstoreAxiom { opcode, addr, value } => {
-      Ok(WFF::MstoreAxiom { opcode: *opcode, addr: *addr, value: *value })
-    }
-    Proof::MemCopyAxiom { opcode, dest_or_ret, offset, size } => {
-      Ok(WFF::MemCopyAxiom { opcode: *opcode, dest_or_ret: *dest_or_ret, offset: *offset, size: *size })
-    }
-    Proof::SloadAxiom { slot, value } => Ok(WFF::SloadAxiom { slot: *slot, value: *value }),
-    Proof::SstoreAxiom { slot, value } => Ok(WFF::SstoreAxiom { slot: *slot, value: *value }),
-    Proof::TransientAxiom { opcode, slot, value } => {
-      Ok(WFF::TransientAxiom { opcode: *opcode, slot: *slot, value: *value })
-    }
-    Proof::KeccakAxiom { offset, size, output_hash } => {
-      Ok(WFF::KeccakAxiom { offset: *offset, size: *size, output_hash: *output_hash })
-    }
-    Proof::EnvAxiom { opcode, value } => Ok(WFF::EnvAxiom { opcode: *opcode, value: *value }),
-    Proof::ExternalStateAxiom { opcode, key, value } => {
-      Ok(WFF::ExternalStateAxiom { opcode: *opcode, key: *key, value: *value })
-    }
-    Proof::TerminateAxiom { opcode, offset, size } => {
-      Ok(WFF::TerminateAxiom { opcode: *opcode, offset: *offset, size: *size })
-    }
-    Proof::CallAxiom { opcode, success } => {
-      Ok(WFF::CallAxiom { opcode: *opcode, success: *success })
-    }
-    Proof::CreateAxiom { opcode, deployed } => {
-      Ok(WFF::CreateAxiom { opcode: *opcode, deployed: *deployed })
-    }
-    Proof::SelfdestructAxiom { target } => Ok(WFF::SelfdestructAxiom { target: *target }),
-    Proof::LogAxiom { opcode, offset, size } => {
-      Ok(WFF::LogAxiom { opcode: *opcode, offset: *offset, size: *size })
-    }
+    Proof::MloadAxiom => Ok(WFF::MloadAxiom),
+    Proof::MstoreAxiom { opcode } => Ok(WFF::MstoreAxiom { opcode: *opcode }),
+    Proof::MemCopyAxiom { opcode } => Ok(WFF::MemCopyAxiom { opcode: *opcode }),
+    Proof::SloadAxiom => Ok(WFF::SloadAxiom),
+    Proof::SstoreAxiom => Ok(WFF::SstoreAxiom),
+    Proof::TransientAxiom { opcode } => Ok(WFF::TransientAxiom { opcode: *opcode }),
+    Proof::KeccakAxiom => Ok(WFF::KeccakAxiom),
+    Proof::EnvAxiom { opcode } => Ok(WFF::EnvAxiom { opcode: *opcode }),
+    Proof::ExternalStateAxiom { opcode } => Ok(WFF::ExternalStateAxiom { opcode: *opcode }),
+    Proof::TerminateAxiom { opcode } => Ok(WFF::TerminateAxiom { opcode: *opcode }),
+    Proof::CallAxiom { opcode } => Ok(WFF::CallAxiom { opcode: *opcode }),
+    Proof::CreateAxiom { opcode } => Ok(WFF::CreateAxiom { opcode: *opcode }),
+    Proof::SelfdestructAxiom => Ok(WFF::SelfdestructAxiom),
+    Proof::LogAxiom { opcode } => Ok(WFF::LogAxiom { opcode: *opcode }),
   }
 }
 
 // ============================================================
 // Word-level functions
 // ============================================================
+
+/// Build a 32-element array of `InputTerm` bytes for the `stack_idx`-th stack input word.
+///
+/// `result[j]` = byte `j` (big-endian, 0 = MSB) of the `stack_idx`-th input.
+pub fn input_word(stack_idx: u8) -> [Box<Term>; 32] {
+  array::from_fn(|j| Box::new(Term::InputTerm { stack_idx, byte_idx: j as u8 }))
+}
+
+/// Build a 32-element array of `OutputTerm` bytes for the `stack_idx`-th stack output word.
+pub fn output_word(stack_idx: u8) -> [Box<Term>; 32] {
+  array::from_fn(|j| Box::new(Term::OutputTerm { stack_idx, byte_idx: j as u8 }))
+}
 
 pub fn word_add(a: &[u8; 32], b: &[u8; 32]) -> [Box<Term>; 32] {
   let mut carry = Box::new(Term::Bool(false));
@@ -2720,6 +2732,69 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
         arg0: ai,
         arg1: bi,
         value: val,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    // ── Symbolic variable terms (value = 0 placeholder; resolved by consistency AIR) ──
+    Term::InputTerm { stack_idx, byte_idx } => {
+      let key = (OP_INPUT_TERM, 0, 0, 0, *stack_idx as u32, *byte_idx as u32, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_INPUT_TERM,
+        scalar0: *stack_idx as u32,
+        scalar1: *byte_idx as u32,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::OutputTerm { stack_idx, byte_idx } => {
+      let key = (OP_OUTPUT_TERM, 0, 0, 0, *stack_idx as u32, *byte_idx as u32, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_OUTPUT_TERM,
+        scalar0: *stack_idx as u32,
+        scalar1: *byte_idx as u32,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::PcBefore { byte_idx } => {
+      let key = (OP_PC_BEFORE, 0, 0, 0, *byte_idx as u32, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_PC_BEFORE,
+        scalar0: *byte_idx as u32,
+        ret_ty: RET_BYTE,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::PcAfter { byte_idx } => {
+      let key = (OP_PC_AFTER, 0, 0, 0, *byte_idx as u32, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_PC_AFTER,
+        scalar0: *byte_idx as u32,
         ret_ty: RET_BYTE,
         ..Default::default()
       });

@@ -18,6 +18,7 @@ use crate::semantic_proof::{
   wff_add, wff_addmod, wff_and, wff_byte, wff_div, wff_eq, wff_exp, wff_gt, wff_iszero, wff_lt,
   wff_mod, wff_mul, wff_mulmod, wff_not, wff_or, wff_sar, wff_sdiv, wff_sgt,
   wff_shl, wff_shr, wff_signextend, wff_slt, wff_smod, wff_sub, wff_xor,
+  OP_PUSH_AXIOM,
 };
 use crate::zk_proof::{
   BatchInstructionMeta, BatchProofRowsManifest, CircleStarkConfig, CircleStarkProof,
@@ -697,67 +698,34 @@ pub fn prove_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> O
     // ── Per-opcode dedicated axioms ─────────────────────────────────────────
 
     // Memory read/write
-    opcode::MLOAD => Some(Proof::MloadAxiom {
-      addr: inputs[0],
-      value: outputs[0],
-    }),
+    opcode::MLOAD => Some(Proof::MloadAxiom),
     opcode::MSTORE => Some(Proof::MstoreAxiom {
       opcode: op,
-      addr: inputs[0],
-      value: inputs[1],
     }),
     opcode::MSTORE8 => Some(Proof::MstoreAxiom {
       opcode: op,
-      addr: inputs[0],
-      value: inputs[1],
     }),
 
     // Memory-copy family
     opcode::RETURNDATACOPY | opcode::EXTCODECOPY | opcode::MCOPY => {
-      let zero = [0u8; 32];
-      Some(Proof::MemCopyAxiom {
-        opcode: op,
-        dest_or_ret: if inputs.len() >= 1 { inputs[0] } else { zero },
-        offset:      if inputs.len() >= 2 { inputs[1] } else { zero },
-        size:        if inputs.len() >= 3 { inputs[2] } else { zero },
-      })
+      Some(Proof::MemCopyAxiom { opcode: op })
     }
     opcode::CALLDATACOPY | opcode::CODECOPY => {
-      let zero = [0u8; 32];
-      Some(Proof::MemCopyAxiom {
-        opcode: op,
-        dest_or_ret: if inputs.len() >= 1 { inputs[0] } else { zero },
-        offset:      if inputs.len() >= 2 { inputs[1] } else { zero },
-        size:        if inputs.len() >= 3 { inputs[2] } else { zero },
-      })
+      Some(Proof::MemCopyAxiom { opcode: op })
     }
 
     // Storage
-    opcode::SLOAD => Some(Proof::SloadAxiom {
-      slot:  inputs[0],
-      value: outputs[0],
-    }),
-    opcode::SSTORE => Some(Proof::SstoreAxiom {
-      slot:  inputs[0],
-      value: inputs[1],
-    }),
+    opcode::SLOAD => Some(Proof::SloadAxiom),
+    opcode::SSTORE => Some(Proof::SstoreAxiom),
     opcode::TLOAD => Some(Proof::TransientAxiom {
       opcode: op,
-      slot:  inputs[0],
-      value: outputs[0],
     }),
     opcode::TSTORE => Some(Proof::TransientAxiom {
       opcode: op,
-      slot:  inputs[0],
-      value: inputs[1],
     }),
 
     // Keccak
-    opcode::KECCAK256 => Some(Proof::KeccakAxiom {
-      offset:      inputs[0],
-      size:        inputs[1],
-      output_hash: outputs[0],
-    }),
+    opcode::KECCAK256 => Some(Proof::KeccakAxiom),
 
     // Environment / call-context opcodes
     opcode::CALLER
@@ -782,49 +750,38 @@ pub fn prove_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> O
     | opcode::BASEFEE
     | opcode::BLOBBASEFEE => Some(Proof::EnvAxiom {
       opcode: op,
-      value: if !outputs.is_empty() { outputs[0] } else { [0u8; 32] },
     }),
 
     // External state
     opcode::BLOCKHASH | opcode::EXTCODESIZE | opcode::EXTCODEHASH | opcode::BALANCE => {
       Some(Proof::ExternalStateAxiom {
         opcode: op,
-        key:   inputs[0],
-        value: outputs[0],
       })
     }
     opcode::BLOBHASH => Some(Proof::ExternalStateAxiom {
       opcode: op,
-      key:   inputs[0],
-      value: outputs[0],
     }),
 
     // Terminate
     opcode::RETURN | opcode::REVERT => Some(Proof::TerminateAxiom {
       opcode: op,
-      offset: inputs[0],
-      size:   inputs[1],
     }),
 
     // Sub-call / create
     opcode::CALL | opcode::CALLCODE | opcode::DELEGATECALL | opcode::STATICCALL => {
       Some(Proof::CallAxiom {
         opcode: op,
-        success: if !outputs.is_empty() { outputs[0] } else { [0u8; 32] },
       })
     }
     opcode::CREATE | opcode::CREATE2 => Some(Proof::CreateAxiom {
       opcode: op,
-      deployed: if !outputs.is_empty() { outputs[0] } else { [0u8; 32] },
     }),
-    opcode::SELFDESTRUCT => Some(Proof::SelfdestructAxiom { target: inputs[0] }),
+    opcode::SELFDESTRUCT => Some(Proof::SelfdestructAxiom),
 
     // Log
     opcode::LOG0 | opcode::LOG1 | opcode::LOG2 | opcode::LOG3 | opcode::LOG4 => {
       Some(Proof::LogAxiom {
         opcode: op,
-        offset: inputs[0],
-        size:   inputs[1],
       })
     }
 
@@ -838,16 +795,15 @@ pub fn prove_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> O
       || op == opcode::JUMPI
       || op == opcode::JUMPDEST
       || (opcode::PUSH0..=opcode::PUSH32).contains(&op) => {
-      let value = if !outputs.is_empty() { outputs[0] } else { [0u8; 32] };
-      Some(Proof::PushAxiom { value })
+      Some(Proof::PushAxiom)
     }
     op if (opcode::DUP1..=opcode::DUP16).contains(&op) => {
       let depth = op - opcode::DUP1 + 1;
-      Some(Proof::DupAxiom { depth, value: outputs[0] })
+      Some(Proof::DupAxiom { depth })
     }
     op if (opcode::SWAP1..=opcode::SWAP16).contains(&op) => {
       let depth = op - opcode::SWAP1 + 1;
-      Some(Proof::SwapAxiom { depth, new_top: outputs[0], new_deep: outputs[depth as usize] })
+      Some(Proof::SwapAxiom { depth })
     }
 
     _ => Some(Proof::StructuralAxiom { opcode: op }),
@@ -892,40 +848,24 @@ pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Opt
 
     // ── Per-opcode dedicated axiom WFFs (mirrors prove_instruction exactly) ──
 
-    opcode::MLOAD => Some(WFF::MloadAxiom {
-      addr: inputs[0], value: outputs[0],
-    }),
+    opcode::MLOAD => Some(WFF::MloadAxiom),
     opcode::MSTORE => Some(WFF::MstoreAxiom {
-      opcode: op, addr: inputs[0], value: inputs[1],
+      opcode: op,
     }),
     opcode::MSTORE8 => Some(WFF::MstoreAxiom {
-      opcode: op, addr: inputs[0], value: inputs[1],
+      opcode: op,
     }),
     opcode::RETURNDATACOPY | opcode::EXTCODECOPY | opcode::MCOPY => {
-      let zero = [0u8; 32];
-      Some(WFF::MemCopyAxiom {
-        opcode: op,
-        dest_or_ret: if inputs.len() >= 1 { inputs[0] } else { zero },
-        offset:      if inputs.len() >= 2 { inputs[1] } else { zero },
-        size:        if inputs.len() >= 3 { inputs[2] } else { zero },
-      })
+      Some(WFF::MemCopyAxiom { opcode: op })
     }
     opcode::CALLDATACOPY | opcode::CODECOPY => {
-      let zero = [0u8; 32];
-      Some(WFF::MemCopyAxiom {
-        opcode: op,
-        dest_or_ret: if inputs.len() >= 1 { inputs[0] } else { zero },
-        offset:      if inputs.len() >= 2 { inputs[1] } else { zero },
-        size:        if inputs.len() >= 3 { inputs[2] } else { zero },
-      })
+      Some(WFF::MemCopyAxiom { opcode: op })
     }
-    opcode::SLOAD => Some(WFF::SloadAxiom { slot: inputs[0], value: outputs[0] }),
-    opcode::SSTORE => Some(WFF::SstoreAxiom { slot: inputs[0], value: inputs[1] }),
-    opcode::TLOAD => Some(WFF::TransientAxiom { opcode: op, slot: inputs[0], value: outputs[0] }),
-    opcode::TSTORE => Some(WFF::TransientAxiom { opcode: op, slot: inputs[0], value: inputs[1] }),
-    opcode::KECCAK256 => Some(WFF::KeccakAxiom {
-      offset: inputs[0], size: inputs[1], output_hash: outputs[0],
-    }),
+    opcode::SLOAD => Some(WFF::SloadAxiom),
+    opcode::SSTORE => Some(WFF::SstoreAxiom),
+    opcode::TLOAD => Some(WFF::TransientAxiom { opcode: op }),
+    opcode::TSTORE => Some(WFF::TransientAxiom { opcode: op }),
+    opcode::KECCAK256 => Some(WFF::KeccakAxiom),
     opcode::CALLER
     | opcode::CALLVALUE
     | opcode::CALLDATALOAD
@@ -948,30 +888,27 @@ pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Opt
     | opcode::BASEFEE
     | opcode::BLOBBASEFEE => Some(WFF::EnvAxiom {
       opcode: op,
-      value: if !outputs.is_empty() { outputs[0] } else { [0u8; 32] },
     }),
     opcode::BLOCKHASH | opcode::EXTCODESIZE | opcode::EXTCODEHASH | opcode::BALANCE => {
-      Some(WFF::ExternalStateAxiom { opcode: op, key: inputs[0], value: outputs[0] })
+      Some(WFF::ExternalStateAxiom { opcode: op })
     }
     opcode::BLOBHASH => Some(WFF::ExternalStateAxiom {
-      opcode: op, key: inputs[0], value: outputs[0],
+      opcode: op,
     }),
     opcode::RETURN | opcode::REVERT => Some(WFF::TerminateAxiom {
-      opcode: op, offset: inputs[0], size: inputs[1],
+      opcode: op,
     }),
     opcode::CALL | opcode::CALLCODE | opcode::DELEGATECALL | opcode::STATICCALL => {
       Some(WFF::CallAxiom {
         opcode: op,
-        success: if !outputs.is_empty() { outputs[0] } else { [0u8; 32] },
       })
     }
     opcode::CREATE | opcode::CREATE2 => Some(WFF::CreateAxiom {
       opcode: op,
-      deployed: if !outputs.is_empty() { outputs[0] } else { [0u8; 32] },
     }),
-    opcode::SELFDESTRUCT => Some(WFF::SelfdestructAxiom { target: inputs[0] }),
+    opcode::SELFDESTRUCT => Some(WFF::SelfdestructAxiom),
     opcode::LOG0 | opcode::LOG1 | opcode::LOG2 | opcode::LOG3 | opcode::LOG4 => {
-      Some(WFF::LogAxiom { opcode: op, offset: inputs[0], size: inputs[1] })
+      Some(WFF::LogAxiom { opcode: op })
     }
     opcode::INVALID => Some(WFF::StructuralAxiom { opcode: op }),
     op if op == opcode::STOP
@@ -980,16 +917,15 @@ pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Opt
       || op == opcode::JUMPI
       || op == opcode::JUMPDEST
       || (opcode::PUSH0..=opcode::PUSH32).contains(&op) => {
-      let value = if !outputs.is_empty() { outputs[0] } else { [0u8; 32] };
-      Some(WFF::PushAxiom { value })
+      Some(WFF::PushAxiom)
     }
     op if (opcode::DUP1..=opcode::DUP16).contains(&op) => {
       let depth = op - opcode::DUP1 + 1;
-      Some(WFF::DupAxiom { depth, value: outputs[0] })
+      Some(WFF::DupAxiom { depth })
     }
     op if (opcode::SWAP1..=opcode::SWAP16).contains(&op) => {
       let depth = op - opcode::SWAP1 + 1;
-      Some(WFF::SwapAxiom { depth, new_top: outputs[0], new_deep: outputs[depth as usize] })
+      Some(WFF::SwapAxiom { depth })
     }
     _ => Some(WFF::StructuralAxiom { opcode: op }),
   }
@@ -1014,8 +950,8 @@ pub fn verify_proof(proof: &InstructionTransitionProof) -> bool {
     }
     (None, None) => false, // All opcodes now have a WFF; proof must be present or auto-generated.
     (None, Some(expected_wff)) => {
-      // Auto-generate the canonical per-opcode axiom proof and check that its
-      // inferred WFF matches what wff_instruction produced.
+      // Auto-generation of the proof is only allowed for axiom opcodes.
+      // Arithmetic / logic opcodes (ADD, SUB, …) require an explicit semantic_proof.
       let Some(auto_proof) = prove_instruction(
         proof.opcode,
         &proof.stack_inputs,
@@ -1023,6 +959,11 @@ pub fn verify_proof(proof: &InstructionTransitionProof) -> bool {
       ) else {
         return false;
       };
+      // Check that every compiled row belongs to the axiom op-code range.
+      let auto_rows = compile_proof(&auto_proof);
+      if !auto_rows.iter().all(|r| r.op >= OP_PUSH_AXIOM) {
+        return false; // Arithmetic/logic proofs must be supplied explicitly.
+      }
       let Ok(wff_result) = infer_proof(&auto_proof) else {
         return false;
       };
