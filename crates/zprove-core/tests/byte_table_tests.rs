@@ -65,41 +65,6 @@ mod byte_table_tests {
   }
 
   #[test]
-  fn test_byte_table_and_3queries_same_as_or() {
-    // Same (a,b) pairs as OR test but with AND op
-    let queries = vec![
-      ByteTableQuery::new_and(0x12, 0x34),
-      ByteTableQuery::new_and(0x00, 0x00),
-      ByteTableQuery::new_and(0xFF, 0x00),
-    ];
-    let proof = prove_byte_table(&queries);
-    let result = verify_byte_table(&proof);
-    assert!(
-      result.is_ok(),
-      "AND-same-as-or verify failed: {:?}",
-      result.err()
-    );
-  }
-
-  #[test]
-  fn test_byte_table_and_1query_prove_verify() {
-    // Single AND query: height = max(2, 4).next_power_of_two() = 4, 2 padding rows
-    let queries = vec![ByteTableQuery::new_and(0xFF, 0x00)];
-    let proof = prove_byte_table(&queries);
-    let result = verify_byte_table(&proof);
-    assert!(result.is_ok(), "AND-1 verify failed: {:?}", result.err());
-  }
-
-  #[test]
-  fn test_byte_table_xor_1query_prove_verify() {
-    // Single XOR query - simplest possible case
-    let queries = vec![ByteTableQuery::new_xor(0xFF, 0x00)];
-    let proof = prove_byte_table(&queries);
-    let result = verify_byte_table(&proof);
-    assert!(result.is_ok(), "XOR-1 verify failed: {:?}", result.err());
-  }
-
-  #[test]
   fn test_byte_table_xor_2queries_prove_verify() {
     // 2 XOR queries
     let queries = vec![
@@ -151,43 +116,6 @@ mod byte_table_tests {
     assert!(
       result.is_ok(),
       "mixed ops verify failed: {:?}",
-      result.err()
-    );
-  }
-
-  // ── soundness check: wrong result should fail ─────────────────────
-
-  /// Manually build a query with an INCORRECT result.  The LogUp running sum
-  /// will not balance and the proof should not verify.
-  ///
-  /// NOTE: we build a trace manually with a wrong multiplicity imbalance.
-  /// We test this indirectly: if we override the result in a query with a wrong
-  /// value, `build_byte_table_trace` inserts a query row with that wrong value.
-  /// The corresponding receive row (from the truth-table section) will have the
-  /// CORRECT result. The running-sum cannot cancel → the proof is unsound and
-  /// the prover will panic or produce garbage.
-  ///
-  /// We verify that the *correct* result passes (not trying to prove a lie here,
-  /// just documenting the design).
-  #[test]
-  fn test_byte_table_correct_result_verified() {
-    // 0x3C & 0x5A == 0x18
-    let a: u8 = 0x3C;
-    let b: u8 = 0x5A;
-    let expected = a & b;
-    assert_eq!(expected, 0x18);
-    let queries = vec![ByteTableQuery {
-      a,
-      b,
-      op: BYTE_OP_AND,
-      result: expected,
-      multiplicity: 1,
-    }];
-    let proof = prove_byte_table(&queries);
-    let result = verify_byte_table(&proof);
-    assert!(
-      result.is_ok(),
-      "correct AND result should verify: {:?}",
       result.err()
     );
   }

@@ -188,15 +188,27 @@ fn eval_byte_table_inner<AB: AirBuilderWithPublicValues>(_builder: &mut AB) {
 pub fn build_byte_table_trace(queries: &[ByteTableQuery]) -> RowMajorMatrix<Val> {
   // Receive rows: for every distinct (a, b, op) triple referenced by queries,
   // one truth-table row with multiplicity = -(sum of query multiplicities for
-  // that triple).  This ensures the LogUp running sum balances to zero even
-  // when a query has multiplicity > 1 (e.g. 32 identical byte-pair rows merged
-  // into one query entry with multiplicity=32).
-  let mut receive_map: std::collections::BTreeMap<(u8, u8, u32), i32> = Default::default();
+  // that triple).
+  //
+  // Use a flat array indexed by `a * 768 + b * 3 + op` instead of a BTreeMap.
+  // Since a, b ∈ [0,255] and op ∈ {0,1,2}, the total space is 256 × 256 × 3 =
+  // 196,608 entries — O(1) insert/lookup, perfectly cache-friendly.
+  //
+  // A companion Vec<u32> tracks which indices have been touched so we can
+  // iterate only the non-zero slots without scanning all 196,608 cells.
+  const TABLE_SIZE: usize = 256 * 256 * 3;
+  let mut mult_flat = vec![0i32; TABLE_SIZE];
+  let mut touched: Vec<u32> = Vec::with_capacity(queries.len().min(TABLE_SIZE));
+
   for q in queries {
-    *receive_map.entry((q.a, q.b, q.op)).or_insert(0) += q.multiplicity;
+    let idx = (q.a as usize) * 768 + (q.b as usize) * 3 + q.op as usize;
+    if mult_flat[idx] == 0 {
+      touched.push(idx as u32);
+    }
+    mult_flat[idx] += q.multiplicity;
   }
 
-  let n_data = queries.len() + receive_map.len();
+  let n_data = queries.len() + touched.len();
   let height = n_data.max(4).next_power_of_two();
   let mut values = vec![Val::ZERO; height * NUM_BYTE_TABLE_COLS];
 
@@ -217,8 +229,13 @@ pub fn build_byte_table_trace(queries: &[ByteTableQuery]) -> RowMajorMatrix<Val>
   }
 
   // Fill receive rows (truth-table entries, multiplicity = -total_query_mult).
-  // Iterate the BTreeMap directly — no intermediate Vec allocation needed.
-  for (j, ((a, b, op), total)) in receive_map.into_iter().enumerate() {
+  // Iterate only the touched slots — O(distinct triples) not O(196,608).
+  for (j, &flat_idx) in touched.iter().enumerate() {
+    let flat_idx = flat_idx as usize;
+    let op = (flat_idx % 3) as u32;
+    let b = ((flat_idx / 3) % 256) as u8;
+    let a = (flat_idx / 768) as u8;
+    let total = mult_flat[flat_idx];
     let i = queries.len() + j;
     let base = i * NUM_BYTE_TABLE_COLS;
     let result = match op {
@@ -308,15 +325,16 @@ pub fn eval_byte_table_lookup(folder: &mut VerifierConstraintFolder<CircleStarkC
 ///
 /// Returns a `p3_uni_stark::Proof<CircleStarkConfig>`.
 pub fn prove_byte_table(queries: &[ByteTableQuery]) -> p3_uni_stark::Proof<CircleStarkConfig> {
-  use crate::zk_proof::make_circle_config;
+  use crate::zk_proof::{air_cache, make_circle_config};
 
   let config = make_circle_config();
   let air = ByteTableAir;
   let trace = build_byte_table_trace(queries);
   let trace_for_perm = trace.clone();
   let lookup_prove = make_byte_table_lookup();
+  let hints = air_cache::get_or_compute(&air, 0, 0, 0);
 
-  p3_uni_stark::prove_with_lookup(
+  p3_uni_stark::prove_with_lookup_hinted(
     &config,
     &air,
     trace,
@@ -329,6 +347,7 @@ pub fn prove_byte_table(queries: &[ByteTableQuery]) -> p3_uni_stark::Proof<Circl
       let gadget = LogUpGadget::new();
       gadget.eval_local_lookup(folder, &lookup_prove);
     },
+    hints,
   )
 }
 

@@ -14,9 +14,11 @@ use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_symmetric::CryptographicHasher;
 use p3_uni_stark::{
-  Entry, SymbolicExpression, SymbolicVariable, VerifierConstraintFolder, prove_with_lookup,
-  verify_with_lookup,
+  Entry, SymbolicExpression, SymbolicVariable, VerifierConstraintFolder,
+  prove_with_lookup_hinted, verify_with_lookup,
 };
+
+use super::air_cache;
 
 // ── Column layout  (NUM_STACK_COLS = 13) ─────────────────────────────
 
@@ -157,25 +159,41 @@ fn fill_stack_log_row(data: &mut [Val], base: usize, entry: &StackLogEntry, is_p
 fn build_stack_log_trace(
   push_log: &[StackLogEntry],
   pop_log: &[StackLogEntry],
-  intra_pop_count_per_push: &std::collections::HashMap<(u32, [u8; 32]), i32>,
-  intra_pop_set: &std::collections::HashSet<u64>,
+  intra_pop_count_per_push: &[((u32, [u8; 32]), i32)], // sorted by key
+  intra_pop_rw: &[u64],                                  // sorted
 ) -> RowMajorMatrix<Val> {
   let n_total = push_log.len() + pop_log.len();
   let height = n_total.max(4).next_power_of_two();
   let mut data = vec![Val::ZERO; height * NUM_STACK_COLS];
 
-  let mut last_push_idx: std::collections::HashMap<(u32, [u8; 32]), usize> = Default::default();
-  for (i, e) in push_log.iter().enumerate() {
-    last_push_idx.insert((e.depth_after, e.value), i);
-  }
+  // ── last push index per (depth_after, value) key (sorted array) ──────────
+  let mut push_key_idx: Vec<((u32, [u8; 32]), usize)> = push_log
+    .iter()
+    .enumerate()
+    .map(|(i, e)| ((e.depth_after, e.value), i))
+    .collect();
+  push_key_idx.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+  let last_push: Vec<((u32, [u8; 32]), usize)> = {
+    let mut v: Vec<((u32, [u8; 32]), usize)> = Vec::new();
+    for (key, idx) in push_key_idx {
+      match v.last_mut() {
+        Some((k, i)) if *k == key => *i = idx,
+        _ => v.push((key, idx)),
+      }
+    }
+    v
+  };
 
   for (i, entry) in push_log.iter().enumerate() {
     fill_stack_log_row(&mut data, i * NUM_STACK_COLS, entry, true);
     let key = (entry.depth_after, entry.value);
-    let mult = if last_push_idx.get(&key) == Some(&i) {
-      *intra_pop_count_per_push.get(&key).unwrap_or(&0)
-    } else {
-      0
+    let mult = match last_push.binary_search_by(|(k, _)| k.cmp(&key)) {
+      Ok(pos) if last_push[pos].1 == i => {
+        intra_pop_count_per_push
+          .binary_search_by(|(k, _)| k.cmp(&key))
+          .map_or(0, |rp| intra_pop_count_per_push[rp].1)
+      }
+      _ => 0,
     };
     let base = i * NUM_STACK_COLS;
     data[base + STACK_COL_MULT] = if mult >= 0 {
@@ -188,11 +206,12 @@ fn build_stack_log_trace(
   for (i, entry) in pop_log.iter().enumerate() {
     let base = (push_log.len() + i) * NUM_STACK_COLS;
     fill_stack_log_row(&mut data, base, entry, false);
-    data[base + STACK_COL_MULT] = if intra_pop_set.contains(&entry.rw_counter) {
-      -Val::ONE
-    } else {
-      Val::ZERO
-    };
+    data[base + STACK_COL_MULT] =
+      if intra_pop_rw.binary_search(&entry.rw_counter).is_ok() {
+        -Val::ONE
+      } else {
+        Val::ZERO
+      };
   }
   RowMajorMatrix::new(data, NUM_STACK_COLS)
 }
@@ -244,31 +263,48 @@ fn eval_stack_lookup(folder: &mut VerifierConstraintFolder<CircleStarkConfig>) {
   LogUpGadget::new().eval_local_lookup(folder, &make_stack_lookup());
 }
 
-#[allow(clippy::type_complexity)]
 fn build_stack_logup_aux(
   push_log: &[StackLogEntry],
   pop_log: &[StackLogEntry],
 ) -> (
-  std::collections::HashMap<(u32, [u8; 32]), i32>,
-  std::collections::HashSet<u64>,
+  Vec<((u32, [u8; 32]), i32)>, // intra-pop count per push key, sorted by key
+  Vec<u64>,                    // rw_counters of intra-batch pops, sorted
 ) {
-  let mut push_set: std::collections::HashMap<(u32, [u8; 32]), Vec<u64>> = Default::default();
-  for e in push_log {
-    push_set
-      .entry((e.depth_after, e.value))
-      .or_default()
-      .push(e.rw_counter);
-  }
-  let mut intra_pop_count: std::collections::HashMap<(u32, [u8; 32]), i32> = Default::default();
-  let mut intra_pop_set: std::collections::HashSet<u64> = Default::default();
+  // Sorted, deduplicated push keys for O(log n) intra-batch pop detection.
+  let mut push_keys: Vec<(u32, [u8; 32])> = push_log
+    .iter()
+    .map(|e| (e.depth_after, e.value))
+    .collect();
+  push_keys.sort_unstable();
+  push_keys.dedup();
+
+  // Collect the push-perspective key and rw_counter of each intra-batch pop.
+  let mut intra_key_list: Vec<(u32, [u8; 32])> = Vec::new();
+  let mut intra_pop_rw: Vec<u64> = Vec::new();
   for e in pop_log {
     let key = (e.depth_after + 1, e.value);
-    if push_set.contains_key(&key) {
-      *intra_pop_count.entry(key).or_insert(0) += 1;
-      intra_pop_set.insert(e.rw_counter);
+    if push_keys.binary_search(&key).is_ok() {
+      intra_key_list.push(key);
+      intra_pop_rw.push(e.rw_counter);
     }
   }
-  (intra_pop_count, intra_pop_set)
+
+  // Aggregate count per key.
+  intra_key_list.sort_unstable();
+  let intra_pop_count: Vec<((u32, [u8; 32]), i32)> = {
+    let mut v: Vec<((u32, [u8; 32]), i32)> = Vec::new();
+    for key in intra_key_list {
+      match v.last_mut() {
+        Some((k, c)) if *k == key => *c += 1,
+        _ => v.push((key, 1)),
+      }
+    }
+    v
+  };
+
+  // Sort rw_counters for O(log n) membership test in build_stack_log_trace.
+  intra_pop_rw.sort_unstable();
+  (intra_pop_count, intra_pop_rw)
 }
 
 // ── Public API ─────────────────────────────────────────────────────────
@@ -295,8 +331,10 @@ pub fn prove_stack_consistency(
   };
 
   let config = make_circle_config();
+  let hints =
+    air_cache::get_or_compute(&StackConsistencyAir, 0, public_values.len(), 0);
   let trace_for_perm = trace.clone();
-  let stark_proof = prove_with_lookup(
+  let stark_proof = prove_with_lookup_hinted(
     &config,
     &StackConsistencyAir,
     trace,
@@ -306,6 +344,7 @@ pub fn prove_stack_consistency(
     2,
     2,
     |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_stack_lookup(folder),
+    hints,
   );
   Ok(StackConsistencyProof {
     stark_proof,

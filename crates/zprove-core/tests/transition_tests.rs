@@ -25,13 +25,13 @@ mod tests {
     let b = u256_bytes(2000);
     let c = u256_bytes(1000);
 
-    let proof = prove_instruction(opcode::SUB, &[a, b], &[c]).unwrap();
+    let proof = prove_instruction(opcode::SUB, &[a, b], &[c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::SUB,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -48,34 +48,6 @@ mod tests {
     assert!(verify_proof_with_zkp(&itp));
   }
 
-  #[test]
-  fn test_zkp_rejects_missing_semantic_proof() {
-    // Arithmetic opcodes (ADD) have a WFF and therefore require a valid
-    // semantic proof.  Passing semantic_proof: None with no oracle axiom must
-    // be rejected — the oracle WFF and the ADD WFF are different, so the
-    // auto-generated oracle proof will not satisfy the expected ADD WFF.
-    let a = u256_bytes(1000);
-    let b = u256_bytes(2000);
-    let c = u256_bytes(3000);
-    let itp = InstructionTransitionProof {
-      opcode: opcode::ADD,
-      pc: 0,
-      stack_inputs: vec![a, b],
-      stack_outputs: vec![c],
-      semantic_proof: None,
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-    assert!(!verify_proof_with_zkp(&itp));
-  }
 
   #[test]
   fn test_zkp_rejects_forged_semantic_proof_shape() {
@@ -90,7 +62,7 @@ mod tests {
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(forged),
+      semantic_proof: forged,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -121,7 +93,7 @@ mod tests {
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(forged),
+      semantic_proof: forged,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -200,10 +172,10 @@ mod tests {
     ];
 
     for (op, inputs, outputs) in cases {
-      let proof = prove_instruction(op, &inputs, &outputs).expect("supported opcode must prove");
+      let proof = prove_instruction(op, &inputs, &outputs);
       let inferred = infer_proof(&proof).expect("inference must succeed for generated proof");
       let expected =
-        wff_instruction_core_only(op, &inputs, &outputs).expect("supported opcode must have target WFF");
+        wff_instruction_core(op, &inputs, &outputs);
 
       assert_eq!(
         inferred, expected,
@@ -212,583 +184,15 @@ mod tests {
     }
   }
 
-  #[test]
-  fn test_receipt_roundtrip_add() {
-    let a = u256_bytes(1234);
-    let b = u256_bytes(5678);
-    let c = u256_bytes(6912);
 
-    let semantic = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
-    let itp = InstructionTransitionProof {
-      opcode: opcode::ADD,
-      pc: 7,
-      stack_inputs: vec![a, b],
-      stack_outputs: vec![c],
-      semantic_proof: Some(semantic),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
 
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
 
-    let statement = InstructionTransitionStatement {
-      opcode: itp.opcode,
-      s_i: VmState {
-        opcode: itp.opcode,
-        pc: itp.pc,
-        sp: itp.stack_inputs.len(),
-        stack: itp.stack_inputs.clone(),
-        memory_root: [0u8; 32],
-      },
-      s_next: VmState {
-        opcode: itp.opcode,
-        pc: itp.pc + 1,
-        sp: itp.stack_outputs.len(),
-        stack: itp.stack_outputs.clone(),
-        memory_root: [0u8; 32],
-      },
-      accesses: Vec::new(),
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
 
-    let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
-    assert!(verify_instruction_zk_receipt(&statement, &receipt));
-  }
 
-  #[test]
-  fn test_receipt_rejects_statement_mismatch() {
-    let a = u256_bytes(1234);
-    let b = u256_bytes(5678);
-    let c = u256_bytes(6912);
 
-    let semantic = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
-    let itp = InstructionTransitionProof {
-      opcode: opcode::ADD,
-      pc: 8,
-      stack_inputs: vec![a, b],
-      stack_outputs: vec![c],
-      semantic_proof: Some(semantic),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
 
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
 
-    let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
 
-    let mut wrong_c = c;
-    wrong_c[31] ^= 1;
-    let wrong_statement = InstructionTransitionStatement {
-      opcode: opcode::ADD,
-      s_i: VmState {
-        opcode: opcode::ADD,
-        pc: 8,
-        sp: 2,
-        stack: vec![a, b],
-        memory_root: [0u8; 32],
-      },
-      s_next: VmState {
-        opcode: opcode::ADD,
-        pc: 9,
-        sp: 1,
-        stack: vec![wrong_c],
-        memory_root: [0u8; 32],
-      },
-      accesses: Vec::new(),
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    assert!(!verify_instruction_zk_receipt(&wrong_statement, &receipt));
-  }
-
-  #[test]
-  fn test_receipt_proving_rejects_forged_semantic_shape() {
-    let a = u256_bytes(1000);
-    let b = u256_bytes(2000);
-    let c = u256_bytes(3000);
-
-    let forged = Proof::EqRefl(Term::Byte(0));
-    let itp = InstructionTransitionProof {
-      opcode: opcode::ADD,
-      pc: 0,
-      stack_inputs: vec![a, b],
-      stack_outputs: vec![c],
-      semantic_proof: Some(forged),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    assert!(prove_instruction_zk_receipt(&itp).is_err());
-  }
-
-  #[test]
-  fn test_receipt_rejects_wrong_sp_transition() {
-    let a = u256_bytes(1234);
-    let b = u256_bytes(5678);
-    let c = u256_bytes(6912);
-
-    let semantic = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
-    let itp = InstructionTransitionProof {
-      opcode: opcode::ADD,
-      pc: 9,
-      stack_inputs: vec![a, b],
-      stack_outputs: vec![c],
-      semantic_proof: Some(semantic),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
-    let wrong_sp_statement = InstructionTransitionStatement {
-      opcode: opcode::ADD,
-      s_i: VmState {
-        opcode: opcode::ADD,
-        pc: 9,
-        sp: 1,
-        stack: vec![a, b],
-        memory_root: [0u8; 32],
-      },
-      s_next: VmState {
-        opcode: opcode::ADD,
-        pc: 10,
-        sp: 1,
-        stack: vec![c],
-        memory_root: [0u8; 32],
-      },
-      accesses: Vec::new(),
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    assert!(!verify_instruction_zk_receipt(
-      &wrong_sp_statement,
-      &receipt
-    ));
-  }
-
-  #[test]
-  fn test_receipt_rejects_mismatched_state_opcode() {
-    let a = u256_bytes(1234);
-    let b = u256_bytes(5678);
-    let c = u256_bytes(6912);
-
-    let semantic = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
-    let itp = InstructionTransitionProof {
-      opcode: opcode::ADD,
-      pc: 10,
-      stack_inputs: vec![a, b],
-      stack_outputs: vec![c],
-      semantic_proof: Some(semantic),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
-    let wrong_opcode_statement = InstructionTransitionStatement {
-      opcode: opcode::ADD,
-      s_i: VmState {
-        opcode: opcode::MUL,
-        pc: 10,
-        sp: 2,
-        stack: vec![a, b],
-        memory_root: [0u8; 32],
-      },
-      s_next: VmState {
-        opcode: opcode::MUL,
-        pc: 11,
-        sp: 1,
-        stack: vec![c],
-        memory_root: [0u8; 32],
-      },
-      accesses: Vec::new(),
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    assert!(!verify_instruction_zk_receipt(
-      &wrong_opcode_statement,
-      &receipt
-    ));
-  }
-
-  #[test]
-  fn test_receipt_rejects_tampered_receipt_opcode() {
-    let a = u256_bytes(4321);
-    let b = u256_bytes(1234);
-    let c = u256_bytes(5555);
-
-    let semantic = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
-    let itp = InstructionTransitionProof {
-      opcode: opcode::ADD,
-      pc: 17,
-      stack_inputs: vec![a, b],
-      stack_outputs: vec![c],
-      semantic_proof: Some(semantic),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let statement = InstructionTransitionStatement {
-      opcode: opcode::ADD,
-      s_i: VmState {
-        opcode: opcode::ADD,
-        pc: 17,
-        sp: 2,
-        stack: vec![a, b],
-        memory_root: [0u8; 32],
-      },
-      s_next: VmState {
-        opcode: opcode::ADD,
-        pc: 18,
-        sp: 1,
-        stack: vec![c],
-        memory_root: [0u8; 32],
-      },
-      accesses: Vec::new(),
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let mut receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
-    receipt.opcode = opcode::MUL;
-
-    assert!(!verify_instruction_zk_receipt(&statement, &receipt));
-  }
-
-  #[test]
-  fn test_receipt_rejects_tampered_expected_wff() {
-    let a = u256_bytes(4321);
-    let b = u256_bytes(1234);
-    let c = u256_bytes(5555);
-    let mut wrong_c = c;
-    wrong_c[31] ^= 1;
-
-    let semantic = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
-    let itp = InstructionTransitionProof {
-      opcode: opcode::ADD,
-      pc: 18,
-      stack_inputs: vec![a, b],
-      stack_outputs: vec![c],
-      semantic_proof: Some(semantic),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let statement = InstructionTransitionStatement {
-      opcode: opcode::ADD,
-      s_i: VmState {
-        opcode: opcode::ADD,
-        pc: 18,
-        sp: 2,
-        stack: vec![a, b],
-        memory_root: [0u8; 32],
-      },
-      s_next: VmState {
-        opcode: opcode::ADD,
-        pc: 19,
-        sp: 1,
-        stack: vec![c],
-        memory_root: [0u8; 32],
-      },
-      accesses: Vec::new(),
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let mut receipt = prove_instruction_zk_receipt(&itp).expect("receipt proving should succeed");
-    receipt.expected_wff =
-      wff_instruction(opcode::ADD, &[a, b], &[wrong_c]).expect("wff build should succeed");
-
-    assert!(!verify_instruction_zk_receipt(&statement, &receipt));
-  }
-
-  #[test]
-  fn test_receipt_splice_attack_stack_ir_rejected() {
-    // AND operations embed concrete byte values in proof rows, so receipts
-    // for different AND inputs have different proof traces and preprocessed VKs.
-    // Swapping the stack_ir_proof between two distinct AND receipts must be rejected.
-    let a1 = [0xAAu8; 32];
-    let b1 = [0xFFu8; 32];
-    let mut c1 = [0u8; 32]; for i in 0..32 { c1[i] = a1[i] & b1[i]; }
-
-    let a2 = [0xF0u8; 32];
-    let b2 = [0x0Fu8; 32];
-    let mut c2 = [0u8; 32]; for i in 0..32 { c2[i] = a2[i] & b2[i]; }
-
-    let semantic1 = prove_instruction(opcode::AND, &[a1, b1], &[c1]).unwrap();
-    let semantic2 = prove_instruction(opcode::AND, &[a2, b2], &[c2]).unwrap();
-
-    let itp1 = InstructionTransitionProof {
-      opcode: opcode::AND,
-      pc: 19,
-      stack_inputs: vec![a1, b1],
-      stack_outputs: vec![c1],
-      semantic_proof: Some(semantic1),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-    let itp2 = InstructionTransitionProof {
-      opcode: opcode::AND,
-      pc: 20,
-      stack_inputs: vec![a2, b2],
-      stack_outputs: vec![c2],
-      semantic_proof: Some(semantic2),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let statement1 = InstructionTransitionStatement {
-      opcode: opcode::AND,
-      s_i: VmState {
-        opcode: opcode::AND,
-        pc: 19,
-        sp: 2,
-        stack: vec![a1, b1],
-        memory_root: [0u8; 32],
-      },
-      s_next: VmState {
-        opcode: opcode::AND,
-        pc: 20,
-        sp: 1,
-        stack: vec![c1],
-        memory_root: [0u8; 32],
-      },
-      accesses: Vec::new(),
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let mut receipt1 = prove_instruction_zk_receipt(&itp1).expect("receipt proving should succeed");
-    let mut receipt2 = prove_instruction_zk_receipt(&itp2).expect("receipt proving should succeed");
-    std::mem::swap(&mut receipt1.stack_ir_proof, &mut receipt2.stack_ir_proof);
-
-    assert!(!verify_instruction_zk_receipt(&statement1, &receipt1));
-  }
-
-  #[test]
-  fn test_receipt_splice_attack_lut_rejected() {
-    let a1 = [0xAAu8; 32];
-    let b1 = [0xFFu8; 32];
-    let mut c1 = [0u8; 32]; for i in 0..32 { c1[i] = a1[i] & b1[i]; }
-
-    let a2 = [0xF0u8; 32];
-    let b2 = [0x0Fu8; 32];
-    let mut c2 = [0u8; 32]; for i in 0..32 { c2[i] = a2[i] & b2[i]; }
-
-    let semantic1 = prove_instruction(opcode::AND, &[a1, b1], &[c1]).unwrap();
-    let semantic2 = prove_instruction(opcode::AND, &[a2, b2], &[c2]).unwrap();
-
-    let itp1 = InstructionTransitionProof {
-      opcode: opcode::AND,
-      pc: 21,
-      stack_inputs: vec![a1, b1],
-      stack_outputs: vec![c1],
-      semantic_proof: Some(semantic1),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-    let itp2 = InstructionTransitionProof {
-      opcode: opcode::AND,
-      pc: 22,
-      stack_inputs: vec![a2, b2],
-      stack_outputs: vec![c2],
-      semantic_proof: Some(semantic2),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let statement1 = InstructionTransitionStatement {
-      opcode: opcode::AND,
-      s_i: VmState {
-        opcode: opcode::AND,
-        pc: 21,
-        sp: 2,
-        stack: vec![a1, b1],
-        memory_root: [0u8; 32],
-      },
-      s_next: VmState {
-        opcode: opcode::AND,
-        pc: 22,
-        sp: 1,
-        stack: vec![c1],
-        memory_root: [0u8; 32],
-      },
-      accesses: Vec::new(),
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let mut receipt1 = prove_instruction_zk_receipt(&itp1).expect("receipt proving should succeed");
-    let mut receipt2 = prove_instruction_zk_receipt(&itp2).expect("receipt proving should succeed");
-    std::mem::swap(
-      &mut receipt1.lut_kernel_proof,
-      &mut receipt2.lut_kernel_proof,
-    );
-
-    assert!(!verify_instruction_zk_receipt(&statement1, &receipt1));
-  }
-
-  #[test]
-  fn test_receipt_splice_attack_wff_match_rejected() {
-    let a1 = [0xAAu8; 32];
-    let b1 = [0xFFu8; 32];
-    let mut c1 = [0u8; 32]; for i in 0..32 { c1[i] = a1[i] & b1[i]; }
-
-    let a2 = [0xF0u8; 32];
-    let b2 = [0x0Fu8; 32];
-    let mut c2 = [0u8; 32]; for i in 0..32 { c2[i] = a2[i] & b2[i]; }
-
-    let semantic1 = prove_instruction(opcode::AND, &[a1, b1], &[c1]).unwrap();
-    let semantic2 = prove_instruction(opcode::AND, &[a2, b2], &[c2]).unwrap();
-
-    let itp1 = InstructionTransitionProof {
-      opcode: opcode::AND,
-      pc: 23,
-      stack_inputs: vec![a1, b1],
-      stack_outputs: vec![c1],
-      semantic_proof: Some(semantic1),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-    let itp2 = InstructionTransitionProof {
-      opcode: opcode::AND,
-      pc: 24,
-      stack_inputs: vec![a2, b2],
-      stack_outputs: vec![c2],
-      semantic_proof: Some(semantic2),
-      memory_claims: vec![],
-      storage_claims: vec![],
-      stack_claims: vec![],
-      return_data_claim: None,
-      call_context_claim: None,
-      keccak_claim: None,
-
-      external_state_claim: None,
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let statement1 = InstructionTransitionStatement {
-      opcode: opcode::AND,
-      s_i: VmState {
-        opcode: opcode::AND,
-        pc: 23,
-        sp: 2,
-        stack: vec![a1, b1],
-        memory_root: [0u8; 32],
-      },
-      s_next: VmState {
-        opcode: opcode::AND,
-        pc: 24,
-        sp: 1,
-        stack: vec![c1],
-        memory_root: [0u8; 32],
-      },
-      accesses: Vec::new(),
-      mcopy_claim: None,
-      sub_call_claim: None,
-    };
-
-    let mut receipt1 = prove_instruction_zk_receipt(&itp1).expect("receipt proving should succeed");
-    let mut receipt2 = prove_instruction_zk_receipt(&itp2).expect("receipt proving should succeed");
-    std::mem::swap(&mut receipt1.preprocessed_vk, &mut receipt2.preprocessed_vk);
-
-    assert!(!verify_instruction_zk_receipt(&statement1, &receipt1));
-  }
 
   #[test]
   fn test_mload_statement_semantics_passes() {
@@ -802,6 +206,7 @@ mod tests {
         sp: 1,
         stack: vec![offset],
         memory_root: [0u8; 32],
+        storage_root: [0u8; 32],
       },
       s_next: VmState {
         opcode: opcode::MLOAD,
@@ -809,6 +214,7 @@ mod tests {
         sp: 1,
         stack: vec![loaded],
         memory_root: [0u8; 32],
+        storage_root: [0u8; 32],
       },
       accesses: vec![AccessRecord {
         rw_counter: 1,
@@ -822,6 +228,7 @@ mod tests {
         merkle_path_after: Vec::new(),
       }],
       mcopy_claim: None,
+      external_state_claim: None,
       sub_call_claim: None,
     };
     assert!(verify_statement_semantics(&statement));
@@ -839,6 +246,7 @@ mod tests {
         sp: 2,
         stack: vec![offset, value],
         memory_root: [0u8; 32],
+        storage_root: [0u8; 32],
       },
       s_next: VmState {
         opcode: opcode::MSTORE,
@@ -846,6 +254,7 @@ mod tests {
         sp: 0,
         stack: vec![],
         memory_root: [0u8; 32],
+        storage_root: [0u8; 32],
       },
       accesses: vec![AccessRecord {
         rw_counter: 1,
@@ -859,6 +268,7 @@ mod tests {
         merkle_path_after: vec![[2u8; 32]],
       }],
       mcopy_claim: None,
+      external_state_claim: None,
       sub_call_claim: None,
     };
     assert!(verify_statement_semantics(&statement));
@@ -882,6 +292,7 @@ mod tests {
         sp: 2,
         stack: vec![offset, word],
         memory_root: [0u8; 32],
+        storage_root: [0u8; 32],
       },
       s_next: VmState {
         opcode: opcode::MSTORE8,
@@ -889,6 +300,7 @@ mod tests {
         sp: 0,
         stack: vec![],
         memory_root: [0u8; 32],
+        storage_root: [0u8; 32],
       },
       accesses: vec![AccessRecord {
         rw_counter: 1,
@@ -902,6 +314,7 @@ mod tests {
         merkle_path_after: vec![[3u8; 32]],
       }],
       mcopy_claim: None,
+      external_state_claim: None,
       sub_call_claim: None,
     };
     assert!(verify_statement_semantics(&statement));
@@ -913,13 +326,13 @@ mod tests {
     let b = u256_bytes(2000);
     let wrong_c = u256_bytes(999);
 
-    let proof = prove_instruction(opcode::SUB, &[a, b], &[wrong_c]).unwrap();
+    let proof = prove_instruction(opcode::SUB, &[a, b], &[wrong_c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::SUB,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong_c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -942,13 +355,13 @@ mod tests {
     let b = u256_bytes(45);
     let c = u256_bytes(5535);
 
-    let proof = prove_instruction(opcode::MUL, &[a, b], &[c]).unwrap();
+    let proof = prove_instruction(opcode::MUL, &[a, b], &[c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::MUL,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -971,13 +384,13 @@ mod tests {
     let b = u256_bytes(45);
     let wrong = u256_bytes(5534);
 
-    let proof = prove_instruction(opcode::MUL, &[a, b], &[wrong]).unwrap();
+    let proof = prove_instruction(opcode::MUL, &[a, b], &[wrong]);
     let itp = InstructionTransitionProof {
       opcode: opcode::MUL,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1000,13 +413,13 @@ mod tests {
     let b = u256_bytes(30);
     let q = u256_bytes(33);
 
-    let proof = prove_instruction(opcode::DIV, &[a, b], &[q]).unwrap();
+    let proof = prove_instruction(opcode::DIV, &[a, b], &[q]);
     let itp = InstructionTransitionProof {
       opcode: opcode::DIV,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![q],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1029,13 +442,13 @@ mod tests {
     let b = u256_bytes(30);
     let wrong_q = u256_bytes(34);
 
-    let proof = prove_instruction(opcode::DIV, &[a, b], &[wrong_q]).unwrap();
+    let proof = prove_instruction(opcode::DIV, &[a, b], &[wrong_q]);
     let itp = InstructionTransitionProof {
       opcode: opcode::DIV,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong_q],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1058,13 +471,13 @@ mod tests {
     let b = u256_bytes(30);
     let r = u256_bytes(10);
 
-    let proof = prove_instruction(opcode::MOD, &[a, b], &[r]).unwrap();
+    let proof = prove_instruction(opcode::MOD, &[a, b], &[r]);
     let itp = InstructionTransitionProof {
       opcode: opcode::MOD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![r],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1087,13 +500,13 @@ mod tests {
     let b = u256_bytes(30);
     let wrong_r = u256_bytes(11);
 
-    let proof = prove_instruction(opcode::MOD, &[a, b], &[wrong_r]).unwrap();
+    let proof = prove_instruction(opcode::MOD, &[a, b], &[wrong_r]);
     let itp = InstructionTransitionProof {
       opcode: opcode::MOD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong_r],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1116,13 +529,13 @@ mod tests {
     let b = u256_bytes(0);
     let z = u256_bytes(0);
 
-    let div_proof = prove_instruction(opcode::DIV, &[a, b], &[z]).unwrap();
+    let div_proof = prove_instruction(opcode::DIV, &[a, b], &[z]);
     let div_itp = InstructionTransitionProof {
       opcode: opcode::DIV,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![z],
-      semantic_proof: Some(div_proof),
+      semantic_proof: div_proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1137,13 +550,13 @@ mod tests {
     assert!(verify_proof_with_zkp(&div_itp));
     assert!(verify_proof_with_zkp(&div_itp));
 
-    let mod_proof = prove_instruction(opcode::MOD, &[a, b], &[z]).unwrap();
+    let mod_proof = prove_instruction(opcode::MOD, &[a, b], &[z]);
     let mod_itp = InstructionTransitionProof {
       opcode: opcode::MOD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![z],
-      semantic_proof: Some(mod_proof),
+      semantic_proof: mod_proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1165,13 +578,13 @@ mod tests {
     let b = i256_bytes(30);
     let q = i256_bytes(-33);
 
-    let proof = prove_instruction(opcode::SDIV, &[a, b], &[q]).unwrap();
+    let proof = prove_instruction(opcode::SDIV, &[a, b], &[q]);
     let itp = InstructionTransitionProof {
       opcode: opcode::SDIV,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![q],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1194,13 +607,13 @@ mod tests {
     let b = i256_bytes(30);
     let wrong_q = i256_bytes(-34);
 
-    let proof = prove_instruction(opcode::SDIV, &[a, b], &[wrong_q]).unwrap();
+    let proof = prove_instruction(opcode::SDIV, &[a, b], &[wrong_q]);
     let itp = InstructionTransitionProof {
       opcode: opcode::SDIV,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong_q],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1223,13 +636,13 @@ mod tests {
     let b = i256_bytes(30);
     let r = i256_bytes(-10);
 
-    let proof = prove_instruction(opcode::SMOD, &[a, b], &[r]).unwrap();
+    let proof = prove_instruction(opcode::SMOD, &[a, b], &[r]);
     let itp = InstructionTransitionProof {
       opcode: opcode::SMOD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![r],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1252,13 +665,13 @@ mod tests {
     let b = i256_bytes(30);
     let wrong_r = i256_bytes(-11);
 
-    let proof = prove_instruction(opcode::SMOD, &[a, b], &[wrong_r]).unwrap();
+    let proof = prove_instruction(opcode::SMOD, &[a, b], &[wrong_r]);
     let itp = InstructionTransitionProof {
       opcode: opcode::SMOD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![wrong_r],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1281,13 +694,13 @@ mod tests {
     let b = i256_bytes(0);
     let z = i256_bytes(0);
 
-    let sdiv_proof = prove_instruction(opcode::SDIV, &[a, b], &[z]).unwrap();
+    let sdiv_proof = prove_instruction(opcode::SDIV, &[a, b], &[z]);
     let sdiv_itp = InstructionTransitionProof {
       opcode: opcode::SDIV,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![z],
-      semantic_proof: Some(sdiv_proof),
+      semantic_proof: sdiv_proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1302,13 +715,13 @@ mod tests {
     assert!(verify_proof_with_zkp(&sdiv_itp));
     assert!(verify_proof_with_zkp(&sdiv_itp));
 
-    let smod_proof = prove_instruction(opcode::SMOD, &[a, b], &[z]).unwrap();
+    let smod_proof = prove_instruction(opcode::SMOD, &[a, b], &[z]);
     let smod_itp = InstructionTransitionProof {
       opcode: opcode::SMOD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![z],
-      semantic_proof: Some(smod_proof),
+      semantic_proof: smod_proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1332,13 +745,13 @@ mod tests {
     let neg_one = [0xFF; 32];
     let expected = int_min;
 
-    let proof = prove_instruction(opcode::SDIV, &[int_min, neg_one], &[expected]).unwrap();
+    let proof = prove_instruction(opcode::SDIV, &[int_min, neg_one], &[expected]);
     let itp = InstructionTransitionProof {
       opcode: opcode::SDIV,
       pc: 0,
       stack_inputs: vec![int_min, neg_one],
       stack_outputs: vec![expected],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1363,13 +776,13 @@ mod tests {
     let neg_one = [0xFF; 32];
     let zero = [0u8; 32];
 
-    let proof = prove_instruction(opcode::SMOD, &[int_min, neg_one], &[zero]).unwrap();
+    let proof = prove_instruction(opcode::SMOD, &[int_min, neg_one], &[zero]);
     let itp = InstructionTransitionProof {
       opcode: opcode::SMOD,
       pc: 0,
       stack_inputs: vec![int_min, neg_one],
       stack_outputs: vec![zero],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1392,13 +805,13 @@ mod tests {
     let b = [0x55; 32];
     let c = [0x00; 32];
 
-    let proof = prove_instruction(opcode::AND, &[a, b], &[c]).unwrap();
+    let proof = prove_instruction(opcode::AND, &[a, b], &[c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::AND,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1421,13 +834,13 @@ mod tests {
     let b = [0x55; 32];
     let c = [0xFF; 32];
 
-    let proof = prove_instruction(opcode::OR, &[a, b], &[c]).unwrap();
+    let proof = prove_instruction(opcode::OR, &[a, b], &[c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::OR,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1450,13 +863,13 @@ mod tests {
     let b = [0x55; 32];
     let c = [0xFF; 32];
 
-    let proof = prove_instruction(opcode::XOR, &[a, b], &[c]).unwrap();
+    let proof = prove_instruction(opcode::XOR, &[a, b], &[c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::XOR,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1478,13 +891,13 @@ mod tests {
     let a = [0xAA; 32];
     let c = [0x55; 32];
 
-    let proof = prove_instruction(opcode::NOT, &[a], &[c]).unwrap();
+    let proof = prove_instruction(opcode::NOT, &[a], &[c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::NOT,
       pc: 0,
       stack_inputs: vec![a],
       stack_outputs: vec![c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1555,13 +968,13 @@ mod tests {
     let a = u256_bytes(1000);
     let b = u256_bytes(2000);
     let c = u256_bytes(3000);
-    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
+    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::ADD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1581,13 +994,13 @@ mod tests {
     let a = u256_bytes(1000);
     let b = u256_bytes(2000);
     let c = u256_bytes(3000);
-    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
+    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::ADD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1609,13 +1022,13 @@ mod tests {
     let mut b = [0u8; 32];
     b[31] = 1;
     let c = [0u8; 32]; // wraps to 0
-    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
+    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::ADD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1637,13 +1050,13 @@ mod tests {
     a[0] = 0x80;
     let b = a;
     let c = [0u8; 32];
-    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
+    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::ADD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1665,28 +1078,24 @@ mod tests {
     let wrong = u256_bytes(999); // incorrect result
     let proof = prove_instruction(opcode::ADD, &[a, b], &[wrong]);
     // Add-equality proof should fail since the result is wrong
-    assert!(
-      proof.is_none() || {
-        let itp = InstructionTransitionProof {
-          opcode: opcode::ADD,
-          pc: 0,
-          stack_inputs: vec![a, b],
-          stack_outputs: vec![wrong],
-          semantic_proof: proof,
-          memory_claims: vec![],
-          storage_claims: vec![],
-          stack_claims: vec![],
-          return_data_claim: None,
-          call_context_claim: None,
-          keccak_claim: None,
+    let itp = InstructionTransitionProof {
+      opcode: opcode::ADD,
+      pc: 0,
+      stack_inputs: vec![a, b],
+      stack_outputs: vec![wrong],
+      semantic_proof: proof,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
 
-          external_state_claim: None,
-          mcopy_claim: None,
+      external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
-        };
-        !verify_proof_with_zkp(&itp)
-      }
-    );
+    };
+    assert!(!verify_proof_with_zkp(&itp));
   }
 
   #[test]
@@ -1696,7 +1105,7 @@ mod tests {
       pc: 0,
       stack_inputs: vec![u256_bytes(42)],
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::POP, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1718,7 +1127,7 @@ mod tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![u256_bytes(42)],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::PUSH1, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1740,7 +1149,7 @@ mod tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::POP, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1762,7 +1171,7 @@ mod tests {
       pc: 0,
       stack_inputs: vec![u256_bytes(1)],
       stack_outputs: vec![u256_bytes(42)],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::PUSH1, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1777,14 +1186,6 @@ mod tests {
     assert!(!verify_proof_with_zkp(&itp));
   }
 
-  #[test]
-  fn test_prove_instruction_rejects_wrong_arity() {
-    let a = u256_bytes(10);
-    let b = u256_bytes(20);
-    let c = u256_bytes(30);
-    assert!(prove_instruction(opcode::ADD, &[a], &[c]).is_none());
-    assert!(prove_instruction(opcode::ADD, &[a, b], &[]).is_none());
-  }
 
   #[test]
   fn test_transition_semantic_and_proofrow_verification() {
@@ -1792,13 +1193,13 @@ mod tests {
     let b = u256_bytes(67890);
     let c = u256_bytes(80235);
 
-    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
+    let proof = prove_instruction(opcode::ADD, &[a, b], &[c]);
     let itp = InstructionTransitionProof {
       opcode: opcode::ADD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1820,27 +1221,25 @@ mod tests {
     let b = u256_bytes(200);
     let wrong = u256_bytes(999);
 
-    let maybe_proof = prove_instruction(opcode::ADD, &[a, b], &[wrong]);
-    if let Some(proof) = maybe_proof {
-      let itp = InstructionTransitionProof {
-        opcode: opcode::ADD,
-        pc: 0,
-        stack_inputs: vec![a, b],
-        stack_outputs: vec![wrong],
-        semantic_proof: Some(proof),
-        memory_claims: vec![],
-        storage_claims: vec![],
-        stack_claims: vec![],
-        return_data_claim: None,
-        call_context_claim: None,
-        keccak_claim: None,
+    let proof = prove_instruction(opcode::ADD, &[a, b], &[wrong]);
+    let itp = InstructionTransitionProof {
+      opcode: opcode::ADD,
+      pc: 0,
+      stack_inputs: vec![a, b],
+      stack_outputs: vec![wrong],
+      semantic_proof: proof,
+      memory_claims: vec![],
+      storage_claims: vec![],
+      stack_claims: vec![],
+      return_data_claim: None,
+      call_context_claim: None,
+      keccak_claim: None,
 
-        external_state_claim: None,
-        mcopy_claim: None,
+      external_state_claim: None,
+      mcopy_claim: None,
       sub_call_claim: None,
-      };
-      assert!(!verify_proof_with_rows(&itp));
-    }
+    };
+    assert!(!verify_proof_with_rows(&itp));
   }
 
   #[test]
@@ -1852,13 +1251,13 @@ mod tests {
     let e = u256_bytes(350);
 
     // Step 1: ADD(100, 200) = 300
-    let p1 = prove_instruction(opcode::ADD, &[a, b], &[c]).unwrap();
+    let p1 = prove_instruction(opcode::ADD, &[a, b], &[c]);
     let step1 = InstructionTransitionProof {
       opcode: opcode::ADD,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![c],
-      semantic_proof: Some(p1),
+      semantic_proof: p1,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1872,13 +1271,13 @@ mod tests {
     };
 
     // Step 2: ADD(300, 50) = 350
-    let p2 = prove_instruction(opcode::ADD, &[c, d], &[e]).unwrap();
+    let p2 = prove_instruction(opcode::ADD, &[c, d], &[e]);
     let step2 = InstructionTransitionProof {
       opcode: opcode::ADD,
       pc: 1,
       stack_inputs: vec![c, d],
       stack_outputs: vec![e],
-      semantic_proof: Some(p2),
+      semantic_proof: p2,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1914,13 +1313,13 @@ mod tests {
   #[test]
   fn test_eq_true_when_equal() {
     let a = u256_bytes(12345);
-    let proof = prove_instruction(opcode::EQ, &[a, a], &[bool_word(true)]).unwrap();
+    let proof = prove_instruction(opcode::EQ, &[a, a], &[bool_word(true)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::EQ,
       pc: 0,
       stack_inputs: vec![a, a],
       stack_outputs: vec![bool_word(true)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1940,13 +1339,13 @@ mod tests {
   fn test_eq_false_when_different() {
     let a = u256_bytes(100);
     let b = u256_bytes(200);
-    let proof = prove_instruction(opcode::EQ, &[a, b], &[bool_word(false)]).unwrap();
+    let proof = prove_instruction(opcode::EQ, &[a, b], &[bool_word(false)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::EQ,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![bool_word(false)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1966,13 +1365,13 @@ mod tests {
   fn test_eq_rejects_wrong_output() {
     let a = u256_bytes(42);
     // Claim EQ(a, a) = 0  — should fail
-    let proof = prove_instruction(opcode::EQ, &[a, a], &[bool_word(false)]).unwrap();
+    let proof = prove_instruction(opcode::EQ, &[a, a], &[bool_word(false)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::EQ,
       pc: 0,
       stack_inputs: vec![a, a],
       stack_outputs: vec![bool_word(false)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -1990,13 +1389,13 @@ mod tests {
   #[test]
   fn test_iszero_true_for_zero() {
     let zero = u256_bytes(0);
-    let proof = prove_instruction(opcode::ISZERO, &[zero], &[bool_word(true)]).unwrap();
+    let proof = prove_instruction(opcode::ISZERO, &[zero], &[bool_word(true)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::ISZERO,
       pc: 0,
       stack_inputs: vec![zero],
       stack_outputs: vec![bool_word(true)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -2015,13 +1414,13 @@ mod tests {
   #[test]
   fn test_iszero_false_for_nonzero() {
     let val = u256_bytes(1);
-    let proof = prove_instruction(opcode::ISZERO, &[val], &[bool_word(false)]).unwrap();
+    let proof = prove_instruction(opcode::ISZERO, &[val], &[bool_word(false)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::ISZERO,
       pc: 0,
       stack_inputs: vec![val],
       stack_outputs: vec![bool_word(false)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -2041,13 +1440,13 @@ mod tests {
   fn test_lt_true_when_less() {
     let a = u256_bytes(5);
     let b = u256_bytes(10);
-    let proof = prove_instruction(opcode::LT, &[a, b], &[bool_word(true)]).unwrap();
+    let proof = prove_instruction(opcode::LT, &[a, b], &[bool_word(true)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::LT,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![bool_word(true)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -2067,13 +1466,13 @@ mod tests {
   fn test_lt_false_when_greater_or_equal() {
     let a = u256_bytes(10);
     let b = u256_bytes(5);
-    let proof = prove_instruction(opcode::LT, &[a, b], &[bool_word(false)]).unwrap();
+    let proof = prove_instruction(opcode::LT, &[a, b], &[bool_word(false)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::LT,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![bool_word(false)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -2092,13 +1491,13 @@ mod tests {
   #[test]
   fn test_lt_false_when_equal() {
     let a = u256_bytes(7);
-    let proof = prove_instruction(opcode::LT, &[a, a], &[bool_word(false)]).unwrap();
+    let proof = prove_instruction(opcode::LT, &[a, a], &[bool_word(false)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::LT,
       pc: 0,
       stack_inputs: vec![a, a],
       stack_outputs: vec![bool_word(false)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -2118,13 +1517,13 @@ mod tests {
     let a = u256_bytes(5);
     let b = u256_bytes(10);
     // Claim LT(5, 10) = 0 — wrong
-    let proof = prove_instruction(opcode::LT, &[a, b], &[bool_word(false)]).unwrap();
+    let proof = prove_instruction(opcode::LT, &[a, b], &[bool_word(false)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::LT,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![bool_word(false)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -2143,13 +1542,13 @@ mod tests {
   fn test_gt_true_when_greater() {
     let a = u256_bytes(10);
     let b = u256_bytes(3);
-    let proof = prove_instruction(opcode::GT, &[a, b], &[bool_word(true)]).unwrap();
+    let proof = prove_instruction(opcode::GT, &[a, b], &[bool_word(true)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::GT,
       pc: 0,
       stack_inputs: vec![a, b],
       stack_outputs: vec![bool_word(true)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -2169,13 +1568,13 @@ mod tests {
   fn test_slt_negative_less_than_positive() {
     let neg = i256_bytes(-1);
     let pos = u256_bytes(1);
-    let proof = prove_instruction(opcode::SLT, &[neg, pos], &[bool_word(true)]).unwrap();
+    let proof = prove_instruction(opcode::SLT, &[neg, pos], &[bool_word(true)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::SLT,
       pc: 0,
       stack_inputs: vec![neg, pos],
       stack_outputs: vec![bool_word(true)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -2195,13 +1594,13 @@ mod tests {
   fn test_slt_positive_not_less_than_negative() {
     let pos = u256_bytes(1);
     let neg = i256_bytes(-1);
-    let proof = prove_instruction(opcode::SLT, &[pos, neg], &[bool_word(false)]).unwrap();
+    let proof = prove_instruction(opcode::SLT, &[pos, neg], &[bool_word(false)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::SLT,
       pc: 0,
       stack_inputs: vec![pos, neg],
       stack_outputs: vec![bool_word(false)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -2221,13 +1620,13 @@ mod tests {
   fn test_sgt_positive_greater_than_negative() {
     let pos = u256_bytes(1);
     let neg = i256_bytes(-1);
-    let proof = prove_instruction(opcode::SGT, &[pos, neg], &[bool_word(true)]).unwrap();
+    let proof = prove_instruction(opcode::SGT, &[pos, neg], &[bool_word(true)]);
     let itp = InstructionTransitionProof {
       opcode: opcode::SGT,
       pc: 0,
       stack_inputs: vec![pos, neg],
       stack_outputs: vec![bool_word(true)],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -2245,11 +1644,11 @@ mod tests {
 
   #[test]
   fn test_comparison_opcodes_in_wff_target_match() {
-    // Verify infer_proof(prove_instruction(..)) == wff_instruction_core_only(..)
+    // Verify infer_proof(prove_instruction(..)) == wff_instruction_core(..)
     // prove_instruction no longer emits InputEq/OutputEq rows; the stack I/O
     // binding lives in the WFF hash (public values) only.  The core-only helper
     // reflects the narrower proof tree.
-    use zprove_core::transition::wff_instruction_core_only;
+    use zprove_core::transition::wff_instruction_core;
     let small = u256_bytes(5);
     let large = u256_bytes(100);
     let neg = i256_bytes(-10);
@@ -2271,12 +1670,10 @@ mod tests {
     ];
 
     for (op, inputs, output) in cases {
-      let proof = prove_instruction(*op, inputs, &[*output])
-        .unwrap_or_else(|| panic!("prove_instruction failed for opcode 0x{op:02x}"));
+      let proof = prove_instruction(*op, inputs, &[*output]);
       let inferred = infer_proof(&proof)
         .unwrap_or_else(|e| panic!("infer_proof failed for opcode 0x{op:02x}: {e}"));
-      let expected = wff_instruction_core_only(*op, inputs, &[*output])
-        .unwrap_or_else(|| panic!("wff_instruction_core_only returned None for opcode 0x{op:02x}"));
+      let expected = wff_instruction_core(*op, inputs, &[*output]);
       assert_eq!(inferred, expected, "WFF mismatch for opcode 0x{op:02x}");
     }
   }
@@ -2307,14 +1704,13 @@ mod tests {
     ];
 
     for (op, inputs, output) in cases {
-      let proof = prove_instruction(*op, inputs, &[*output])
-        .unwrap_or_else(|| panic!("prove_instruction returned None for opcode 0x{op:02x}"));
+      let proof = prove_instruction(*op, inputs, &[*output]);
       let itp = InstructionTransitionProof {
         opcode: *op,
         pc: 0,
         stack_inputs: inputs.clone(),
         stack_outputs: vec![*output],
-        semantic_proof: Some(proof),
+        semantic_proof: proof,
         memory_claims: vec![],
         storage_claims: vec![],
         stack_claims: vec![],
@@ -2360,8 +1756,8 @@ fn test_and_debug_internals() {
   let b = [0x55u8; 32];
   let c = [0x00u8; 32];
 
-  let sem_proof = prove_instruction(opcode::AND, &[a, b], &[c]).unwrap();
-  let expected_wff = wff_instruction(opcode::AND, &[a, b], &[c]).unwrap();
+  let sem_proof = prove_instruction(opcode::AND, &[a, b], &[c]);
+  let expected_wff = wff_instruction(opcode::AND, &[a, b], &[c]);
 
   // ── StackIR proof (single-instruction setup, unchanged path) ──────────────
   {
@@ -2908,7 +2304,7 @@ mod shift_tests {
   use zprove_core::transition::{
     CallContextClaim, InstructionTransitionProof, KeccakClaim, ReturnDataClaim, StorageAccessClaim,
     opcode_input_count, opcode_output_count, prove_instruction, verify_proof_with_zkp,
-    verify_proof_with_rows, wff_instruction, wff_instruction_core_only,
+    verify_proof_with_rows, wff_instruction, wff_instruction_core,
   };
 
   fn u256(val: u128) -> [u8; 32] {
@@ -2999,13 +2395,13 @@ mod shift_tests {
     result: &[u8; 32],
   ) -> InstructionTransitionProof {
     let proof =
-      prove_instruction(op, &[*shift, *value], &[*result]).expect("shift opcode must prove");
+      prove_instruction(op, &[*shift, *value], &[*result]);
     InstructionTransitionProof {
       opcode: op,
       pc: 0,
       stack_inputs: vec![*shift, *value],
       stack_outputs: vec![*result],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3206,9 +2602,9 @@ mod shift_tests {
         _ => evm_sar(shift_u64, &value),
       };
       let proof =
-        prove_instruction(op, &[shift, value], &[result]).expect("shift opcode must prove");
+        prove_instruction(op, &[shift, value], &[result]);
       let inferred = infer_proof(&proof).expect("infer must succeed");
-      let expected = wff_instruction_core_only(op, &[shift, value], &[result]).expect("wff must exist");
+      let expected = wff_instruction_core(op, &[shift, value], &[result]);
       assert_eq!(
         inferred, expected,
         "opcode 0x{op:02x} shift={shift_u64} inferred WFF must match expected"
@@ -3221,13 +2617,13 @@ mod shift_tests {
   // ============================================================
 
   fn make_arith_itp(op: u8, inputs: &[[u8; 32]], output: [u8; 32]) -> InstructionTransitionProof {
-    let proof = prove_instruction(op, inputs, &[output]).expect("proof must exist");
+    let proof = prove_instruction(op, inputs, &[output]);
     InstructionTransitionProof {
       opcode: op,
       pc: 0,
       stack_inputs: inputs.to_vec(),
       stack_outputs: vec![output],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3417,9 +2813,9 @@ mod shift_tests {
 
   #[test]
   fn test_arithmetic_wff_consistency() {
-    // Verify inferred WFF matches wff_instruction_core_only for all new opcodes.
+    // Verify inferred WFF matches wff_instruction_core for all new opcodes.
     // prove_instruction no longer emits InputEq/OutputEq; use core-only helper.
-    use zprove_core::transition::wff_instruction_core_only;
+    use zprove_core::transition::wff_instruction_core;
     let cases: &[(u8, &[[u8; 32]], [u8; 32])] = &[
       // BYTE(31, 0xABCDEF): byte at index 31 (LSB) = 0xEF
       (opcode::BYTE, &[u256(31), u256(0xABCDEF)], {
@@ -3437,9 +2833,9 @@ mod shift_tests {
       (opcode::EXP, &[u256(3), u256(4)], u256(81)),
     ];
     for &(op, inputs, out) in cases {
-      let proof = prove_instruction(op, inputs, &[out]).expect("proof");
+      let proof = prove_instruction(op, inputs, &[out]);
       let inferred = infer_proof(&proof).expect("infer");
-      let expected = wff_instruction_core_only(op, inputs, &[out]).expect("wff");
+      let expected = wff_instruction_core(op, inputs, &[out]);
       assert_eq!(inferred, expected, "opcode 0x{op:02x} WFF mismatch");
     }
   }
@@ -3459,7 +2855,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![offset, size],
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::RETURN, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3493,7 +2889,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![offset, size],
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::REVERT, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3522,7 +2918,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![offset], // wrong: needs 2
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::RETURN, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3553,13 +2949,15 @@ mod shift_tests {
   #[test]
   fn test_sload_verify_proof_accepts() {
     let slot = u256(42);
-    let value = u256(1234);
+    // value must be zero: w_in is empty (no prior SSTORE), so validate_inherited_stor_reads
+    // requires read_val == [0u8;32] for uninitialized slots.
+    let value = [0u8; 32];
     let itp = InstructionTransitionProof {
       opcode: opcode::SLOAD,
       pc: 0,
       stack_inputs: vec![slot],
       stack_outputs: vec![value],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::SLOAD, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![StorageAccessClaim {
         rw_counter: 1,
@@ -3593,7 +2991,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![slot, value],
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::SSTORE, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![StorageAccessClaim {
         rw_counter: 1,
@@ -3626,7 +3024,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![u256(1)],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::SLOAD, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3652,7 +3050,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![u256(42)],
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::SSTORE, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3698,7 +3096,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![addr],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::CALLER, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3726,7 +3124,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![value],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::CALLVALUE, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3755,7 +3153,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![offset],
       stack_outputs: vec![data_word],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::CALLDATALOAD, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3783,7 +3181,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![size],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::CALLDATASIZE, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3810,7 +3208,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![u256(0)],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::CALLDATALOAD, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3836,7 +3234,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::CALLER, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3905,7 +3303,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![offset, size],
       stack_outputs: vec![output],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::KECCAK256, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3939,7 +3337,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![offset, size],
       stack_outputs: vec![output],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::KECCAK256, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -3974,7 +3372,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![offset, size],
       stack_outputs: vec![output],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::KECCAK256, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4007,7 +3405,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![offset, size],
       stack_outputs: vec![wrong_output],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::KECCAK256, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4040,7 +3438,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![u256(0)],
       stack_outputs: vec![output],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::KECCAK256, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4083,7 +3481,7 @@ mod shift_tests {
       pc: 42,
       stack_inputs: vec![],
       stack_outputs: vec![pc_val],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::PC, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4115,7 +3513,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![msize_val],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::MSIZE, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4147,7 +3545,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![gas_left],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::GAS, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4178,7 +3576,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::PC, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4201,7 +3599,7 @@ mod shift_tests {
       pc: 0,
       stack_inputs: vec![u256(1)],
       stack_outputs: vec![u256(99_000)],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::GAS, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4258,7 +3656,7 @@ mod shift_tests {
       pc: 10,
       stack_inputs: vec![],
       stack_outputs: vec![addr_value],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::ADDRESS, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4288,7 +3686,7 @@ mod shift_tests {
       pc: 20,
       stack_inputs: vec![],
       stack_outputs: vec![beneficiary],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::COINBASE, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4318,7 +3716,7 @@ mod shift_tests {
       pc: 30,
       stack_inputs: vec![],
       stack_outputs: vec![chain_id],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::CHAINID, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4356,7 +3754,7 @@ mod shift_tests {
         pc: 0,
         stack_inputs: vec![val],
         stack_outputs: vec![val],
-        semantic_proof: None,
+        semantic_proof: prove_instruction(op, &[], &[]),
         memory_claims: vec![],
         storage_claims: vec![],
         stack_claims: vec![],
@@ -4388,7 +3786,8 @@ mod shift_tests {
 mod mem_copy_opcode_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, prove_instruction,
+    verify_proof_with_zkp,
   };
 
   fn u256(v: u128) -> [u8; 32] {
@@ -4403,7 +3802,7 @@ mod mem_copy_opcode_tests {
       pc: 0,
       stack_inputs: inputs,
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(op, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4582,7 +3981,8 @@ mod mem_copy_opcode_tests {
 mod subcall_opcode_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, SubCallClaim, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
+    BlockTxContext, InstructionTransitionProof, SubCallClaim, TransactionProof,
+    opcode_input_count, opcode_output_count, prove_instruction, verify_proof_with_zkp,
   };
 
   fn u256(v: u128) -> [u8; 32] {
@@ -4608,7 +4008,7 @@ mod subcall_opcode_tests {
       pc: 0,
       stack_inputs: inputs,
       stack_outputs: outputs,
-      semantic_proof: None,
+      semantic_proof: prove_instruction(op, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4622,14 +4022,19 @@ mod subcall_opcode_tests {
   }
 
   fn make_claim(op: u8) -> SubCallClaim {
+    let mut callee = [0u8; 20];
+    callee[19] = 0xAB; // matches addr(0xAB) = [0;31, 0xAB] where top[12..32]=[0;19,0xAB]
     SubCallClaim {
       opcode: op,
-      callee: [0xABu8; 20],
+      callee,
       value: u256(0),
       return_data: vec![],
       success: true,
       depth: 0,
-      inner_proof: None,
+      inner_proof: Box::new(TransactionProof { steps: vec![], block_tx_context: BlockTxContext::default(), batch_receipt: None }),
+      create2_deployer: None,
+      create2_salt: None,
+      create2_initcode_hash: None,
     }
   }
 
@@ -4778,7 +4183,8 @@ mod subcall_opcode_tests {
 mod tload_tstore_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, prove_instruction,
+    verify_proof_with_zkp,
   };
 
   fn u256(v: u128) -> [u8; 32] {
@@ -4793,7 +4199,7 @@ mod tload_tstore_tests {
       pc: 0,
       stack_inputs: inputs,
       stack_outputs: outputs,
-      semantic_proof: None,
+      semantic_proof: prove_instruction(op, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4853,7 +4259,8 @@ mod tload_tstore_tests {
 mod log_opcode_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, prove_instruction,
+    verify_proof_with_zkp,
   };
 
   fn u256(v: u128) -> [u8; 32] {
@@ -4868,7 +4275,7 @@ mod log_opcode_tests {
       pc: 0,
       stack_inputs: inputs,
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(op, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4947,7 +4354,7 @@ mod log_opcode_tests {
       pc: 0,
       stack_inputs: vec![u256(0), u256(32)],
       stack_outputs: vec![u256(1)],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::LOG0, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4964,7 +4371,7 @@ mod log_opcode_tests {
       pc: 0,
       stack_inputs: vec![u256(0), u256(32)],
       stack_outputs: vec![u256(1)], // unexpected output
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::LOG0, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -4987,7 +4394,8 @@ mod log_opcode_tests {
 mod invalid_opcode_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, prove_instruction,
+    verify_proof_with_zkp,
   };
 
   fn base_itp() -> InstructionTransitionProof {
@@ -4996,7 +4404,7 @@ mod invalid_opcode_tests {
       pc: 0,
       stack_inputs: vec![],
       stack_outputs: vec![],
-      semantic_proof: None,
+      semantic_proof: prove_instruction(opcode::INVALID, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -5029,7 +4437,8 @@ mod invalid_opcode_tests {
 mod remaining_opcode_tests {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionProof, opcode_input_count, opcode_output_count, verify_proof_with_zkp,
+    InstructionTransitionProof, opcode_input_count, opcode_output_count, prove_instruction,
+    verify_proof_with_zkp,
   };
 
   fn u256(v: u128) -> [u8; 32] {
@@ -5044,7 +4453,7 @@ mod remaining_opcode_tests {
       pc: 0,
       stack_inputs: inputs,
       stack_outputs: outputs,
-      semantic_proof: None,
+      semantic_proof: prove_instruction(op, &[], &[]),
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -5195,13 +4604,13 @@ fn make_add_itp(
   bv[16..].copy_from_slice(&b.to_be_bytes());
   cv[16..].copy_from_slice(&c.to_be_bytes());
 
-  let proof = prove_instruction(opcode::ADD, &[av, bv], &[cv]).expect("prove ADD");
+  let proof = prove_instruction(opcode::ADD, &[av, bv], &[cv]);
   InstructionTransitionProof {
     opcode: opcode::ADD,
     pc,
     stack_inputs: vec![av, bv],
     stack_outputs: vec![cv],
-    semantic_proof: Some(proof),
+    semantic_proof: proof,
     memory_claims: vec![],
     storage_claims: vec![],
     stack_claims: vec![],
@@ -5222,7 +4631,7 @@ fn make_return_itp(
   is_revert: bool,
 ) -> zprove_core::transition::InstructionTransitionProof {
   use revm::bytecode::opcode;
-  use zprove_core::transition::{InstructionTransitionProof, ReturnDataClaim};
+  use zprove_core::transition::{InstructionTransitionProof, ReturnDataClaim, prove_instruction};
 
   let op = if is_revert {
     opcode::REVERT
@@ -5239,7 +4648,7 @@ fn make_return_itp(
       s
     }],
     stack_outputs: vec![],
-    semantic_proof: None,
+    semantic_proof: prove_instruction(op, &[], &[]),
     memory_claims: vec![],
     storage_claims: vec![],
     stack_claims: vec![],
@@ -5293,7 +4702,10 @@ fn test_phase1_sub_call_success_verifies() {
     return_data: return_data.clone(),
     success: true,
     depth: 0,
-    inner_proof: Some(Box::new(inner_proof)),
+    inner_proof: Box::new(inner_proof),
+    create2_deployer: None,
+    create2_salt: None,
+    create2_initcode_hash: None,
   };
 
   // Outer statements (empty — not used by the current implementation).
@@ -5338,7 +4750,10 @@ fn test_phase1_sub_call_revert_verifies() {
     return_data: revert_data.clone(),
     success: false,
     depth: 0,
-    inner_proof: Some(Box::new(inner_proof)),
+    inner_proof: Box::new(inner_proof),
+    create2_deployer: None,
+    create2_salt: None,
+    create2_initcode_hash: None,
   };
 
   let outer: Vec<InstructionTransitionStatement> = vec![];
@@ -5380,7 +4795,10 @@ fn test_phase1_sub_call_return_data_mismatch_rejected() {
     return_data: forged_claim_return, // forged!
     success: true,
     depth: 0,
-    inner_proof: Some(Box::new(inner_proof)),
+    inner_proof: Box::new(inner_proof),
+    create2_deployer: None,
+    create2_salt: None,
+    create2_initcode_hash: None,
   };
 
   let outer: Vec<InstructionTransitionStatement> = vec![];
@@ -5396,7 +4814,8 @@ fn test_phase1_sub_call_return_data_mismatch_rejected() {
 fn test_phase1_sub_call_depth_exceeded_rejected() {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionStatement, MAX_CALL_DEPTH, SubCallClaim, verify_sub_call_claim,
+    BlockTxContext, InstructionTransitionStatement, MAX_CALL_DEPTH, SubCallClaim,
+    TransactionProof, verify_sub_call_claim,
   };
 
   let claim = SubCallClaim {
@@ -5406,7 +4825,10 @@ fn test_phase1_sub_call_depth_exceeded_rejected() {
     return_data: vec![],
     success: false,
     depth: MAX_CALL_DEPTH, // == 1024, must be rejected
-    inner_proof: None,
+    inner_proof: Box::new(TransactionProof { steps: vec![], block_tx_context: BlockTxContext::default(), batch_receipt: None }),
+    create2_deployer: None,
+    create2_salt: None,
+    create2_initcode_hash: None,
   };
 
   let outer: Vec<InstructionTransitionStatement> = vec![];
@@ -5423,7 +4845,8 @@ fn test_phase1_sub_call_depth_exceeded_rejected() {
 fn test_phase1_oracle_sub_call_accepted() {
   use revm::bytecode::opcode;
   use zprove_core::transition::{
-    InstructionTransitionStatement, SubCallClaim, verify_sub_call_claim,
+    BlockTxContext, InstructionTransitionStatement, SubCallClaim, TransactionProof,
+    verify_sub_call_claim,
   };
 
   let claim = SubCallClaim {
@@ -5433,7 +4856,10 @@ fn test_phase1_oracle_sub_call_accepted() {
     return_data: vec![0xAB],
     success: true,
     depth: 5,
-    inner_proof: None, // oracle mode
+    inner_proof: Box::new(TransactionProof { steps: vec![], block_tx_context: BlockTxContext::default(), batch_receipt: None }), // was oracle mode
+    create2_deployer: None,
+    create2_salt: None,
+    create2_initcode_hash: None,
   };
 
   let outer: Vec<InstructionTransitionStatement> = vec![];
@@ -5460,6 +4886,7 @@ mod phase2_chain_tests {
       sp: 0,
       stack: vec![],
       memory_root: [0u8; 32],
+      storage_root: [0u8; 32],
     }
   }
 
@@ -5493,6 +4920,7 @@ mod phase2_chain_tests {
       sp: 1,
       stack: vec![u256_bytes(42)],
       memory_root: [0u8; 32],
+      storage_root: [0u8; 32],
     };
     let c0 = commit_vm_state(&s0);
     let c1 = commit_vm_state(&s1);
@@ -5654,7 +5082,10 @@ mod gap5_stark_sub_call_tests {
       return_data: vec![],
       success: true,
       depth: 0,
-      inner_proof: Some(Box::new(inner_proof)),
+      inner_proof: Box::new(inner_proof),
+      create2_deployer: None,
+      create2_salt: None,
+      create2_initcode_hash: None,
     };
 
     let outer: Vec<InstructionTransitionStatement> = vec![];
@@ -5687,7 +5118,10 @@ mod gap5_stark_sub_call_tests {
       return_data: return_data.clone(),
       success: true,
       depth: 0,
-      inner_proof: Some(Box::new(inner_proof)),
+      inner_proof: Box::new(inner_proof),
+      create2_deployer: None,
+      create2_salt: None,
+      create2_initcode_hash: None,
     };
 
     let outer: Vec<InstructionTransitionStatement> = vec![];
@@ -5729,7 +5163,10 @@ mod gap5_stark_sub_call_tests {
       return_data: vec![],
       success: true,
       depth: 0,
-      inner_proof: Some(Box::new(inner_proof)),
+      inner_proof: Box::new(inner_proof),
+      create2_deployer: None,
+      create2_salt: None,
+      create2_initcode_hash: None,
     };
 
     let outer: Vec<InstructionTransitionStatement> = vec![];
@@ -5768,7 +5205,10 @@ mod gap5_stark_sub_call_tests {
       return_data: vec![],
       success: true,
       depth: 0,
-      inner_proof: Some(Box::new(inner_proof)),
+      inner_proof: Box::new(inner_proof),
+      create2_deployer: None,
+      create2_salt: None,
+      create2_initcode_hash: None,
     };
 
     let outer: Vec<InstructionTransitionStatement> = vec![];

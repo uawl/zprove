@@ -3,12 +3,20 @@ use crate::transition::{
   InstructionTransitionProof, InstructionTransitionStatement, KeccakClaim, MemAccessClaim,
   MemCopyClaim, ReturnDataClaim, StackAccessClaim, StorageAccessClaim, SubCallClaim,
   TransactionProof, VmState,
-  opcode_input_count, opcode_output_count, prove_batch_transaction_zk_receipt,
-  prove_execution_chain, prove_instruction, prove_instruction_zk_receipts_parallel,
-  verify_batch_transaction_zk_receipt, verify_instruction_zk_receipt, verify_proof,
+  opcode_input_count, opcode_output_count,
+  prove_batch_transaction_zk_receipt_with_env,
+  prove_execution_chain, prove_instruction,
+  verify_batch_transaction_zk_receipt, verify_proof,
   verify_proof_with_rows,
 };
-use crate::zk_proof::{prove_memory_consistency, verify_memory_consistency};
+use crate::zk_proof::{
+  prove_memory_consistency_with_w_in,
+  verify_memory_consistency,
+  write_delta::{
+    MemWriteSet, StorWriteSet,
+    hash_mem_write_set, hash_stor_write_set,
+  },
+};
 use revm::bytecode::opcode;
 use revm::{
   Context, InspectEvm, Inspector, MainBuilder, MainContext,
@@ -30,6 +38,9 @@ use revm::{
 // ============================================================
 
 const DEFAULT_ZKP_BATCH_CAPACITY: usize = 256;
+/// Public re-export of the default batch capacity so benchmarks can use it
+/// without hard-coding the constant.
+pub const ZKP_DEFAULT_BATCH_CAPACITY: usize = DEFAULT_ZKP_BATCH_CAPACITY;
 
 fn u256_to_bytes(val: U256) -> [u8; 32] {
   val.to_be_bytes::<32>()
@@ -65,12 +76,19 @@ struct ProvingInspector {
   pub proofs: Vec<InstructionTransitionProof>,
   /// Stack of sub-call info captured in `call()` / `create()` hooks,
   /// pending consumption in the matching `call_end()` / `create_end()`.
-  pending_sub_call_stack: Vec<(u8, [u8; 20], [u8; 32])>, // (opcode, callee, value)
+  /// Tuple: (opcode, callee, value, inner_start_idx)
+  /// `inner_start_idx` is `self.proofs.len()` at the moment `call()`/`create()` fired,
+  /// so that `call_end()`/`create_end()` can drain the inner steps from `proofs`.
+  pending_sub_call_stack: Vec<(u8, [u8; 20], [u8; 32], usize)>,
   /// Sub-call claim ready to be attached to the next ITP in `step_end()`.
   pending_sub_call: Option<SubCallClaim>,
   /// MCOPY copy-consistency claim ready to be attached to the next ITP.
   /// Set inside `build_memory_and_return_claims` for MCOPY instructions.
   pending_mcopy: Option<MemCopyClaim>,
+  /// CREATE2-specific witness data captured in `create()` and consumed in `create_end()`.
+  /// Tuple: (deployer[20], salt[32], keccak256(initcode)[32]).
+  /// `None` for CREATE (non-Create2) calls.
+  pending_create2_data: Option<([u8; 20], [u8; 32], [u8; 32])>,
 }
 
 /// Read a 32-byte word from a raw memory slice at a given byte offset.
@@ -155,11 +173,7 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
     }
 
     // Generate semantic proof (if applicable)
-    let semantic_proof = if !self.pending_inputs.is_empty() || n_outputs > 0 {
-      prove_instruction(self.pending_opcode, &self.pending_inputs, &outputs)
-    } else {
-      None
-    };
+    let semantic_proof = prove_instruction(self.pending_opcode, &self.pending_inputs, &outputs);
 
     // Build memory access claims for MLOAD / MSTORE / MSTORE8 / RETURN / REVERT.
     let (memory_claims, return_data_claim) = self.build_memory_and_return_claims(interp, &outputs);
@@ -218,16 +232,32 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
       .transfer_value()
       .unwrap_or_else(|| inputs.apparent_value().unwrap_or(U256::ZERO))
       .to_be_bytes::<32>();
-    self.pending_sub_call_stack.push((op, callee, value));
+    let inner_start = self.proofs.len();
+    self.pending_sub_call_stack.push((op, callee, value, inner_start));
     None
   }
 
   /// Called after a CALL / CALLCODE / DELEGATECALL / STATICCALL finishes.
-  /// Builds the `SubCallClaim` from the recorded info + outcome.
+  /// Drains the inner steps from `self.proofs` and builds the `SubCallClaim`.
+  /// When `depth == 0` after the pop the hook was fired for the top-level TX
+  /// frame (not a real sub-call), so we skip draining and leave proofs intact.
   fn call_end(&mut self, _context: &mut CTX, _inputs: &CallInputs, outcome: &mut CallOutcome) {
-    if let Some((op, callee, value)) = self.pending_sub_call_stack.pop() {
+    if let Some((op, callee, value, inner_start)) = self.pending_sub_call_stack.pop() {
       // After popping, len() equals the call nesting depth (0 = top-level TX).
       let depth = self.pending_sub_call_stack.len() as u16;
+      if depth == 0 {
+        // Top-level TX frame returning — all steps belong to the outer
+        // proof; no SubCallClaim to produce.
+        return;
+      }
+      // Drain steps that belong to the callee's execution from the flat proof list.
+      let inner_steps: Vec<InstructionTransitionProof> =
+        self.proofs.drain(inner_start..).collect();
+      let inner_proof = Box::new(TransactionProof {
+        steps: inner_steps,
+        block_tx_context: BlockTxContext::default(),
+        batch_receipt: None,
+      });
       self.pending_sub_call = Some(SubCallClaim {
         opcode: op,
         callee,
@@ -235,7 +265,10 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
         return_data: outcome.result.output.to_vec(),
         success: outcome.result.is_ok(),
         depth,
-        inner_proof: None,
+        inner_proof,
+        create2_deployer: None,
+        create2_salt: None,
+        create2_initcode_hash: None,
       });
     }
   }
@@ -248,10 +281,20 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
       CreateScheme::Create2 { .. } => opcode::CREATE2,
       CreateScheme::Custom { .. } => opcode::CREATE,
     };
+    // For CREATE2: capture deployer, salt, and keccak256(initcode) for Gap-C4 address verification.
+    self.pending_create2_data = if let CreateScheme::Create2 { salt } = inputs.scheme() {
+      let deployer = inputs.caller().into_array();
+      let salt_bytes = salt.to_be_bytes::<32>();
+      let initcode_hash = crate::zk_proof::keccak256_bytes(inputs.init_code());
+      Some((deployer, salt_bytes, initcode_hash))
+    } else {
+      None
+    };
     // Callee address is not known until after deployment; use zero placeholder.
+    let inner_start = self.proofs.len();
     self
       .pending_sub_call_stack
-      .push((op, [0u8; 20], inputs.value().to_be_bytes::<32>()));
+      .push((op, [0u8; 20], inputs.value().to_be_bytes::<32>(), inner_start));
     None
   }
 
@@ -262,10 +305,34 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
     _inputs: &CreateInputs,
     outcome: &mut CreateOutcome,
   ) {
-    if let Some((op, _, value)) = self.pending_sub_call_stack.pop() {
+    if let Some((op, _, value, inner_start)) = self.pending_sub_call_stack.pop() {
       // After popping, len() equals the call nesting depth (0 = top-level TX).
       let depth = self.pending_sub_call_stack.len() as u16;
+      if depth == 0 {
+        // Top-level CREATE TX returning — no SubCallClaim produced.
+        return;
+      }
       let callee = outcome.address.map(|a| a.into_array()).unwrap_or([0u8; 20]);
+      // Drain the initcode execution steps.
+      let inner_steps: Vec<InstructionTransitionProof> =
+        self.proofs.drain(inner_start..).collect();
+      let inner_proof = Box::new(TransactionProof {
+        steps: inner_steps,
+        block_tx_context: BlockTxContext::default(),
+        batch_receipt: None,
+      });
+      // Consume CREATE2-specific witness (deployer, salt, initcode_hash)
+      // captured in `create()`.  For plain CREATE this will be None.
+      let (create2_deployer, create2_salt, create2_initcode_hash) =
+        if op == opcode::CREATE2 {
+          match self.pending_create2_data.take() {
+            Some((d, s, h)) => (Some(d), Some(s), Some(h)),
+            None => (None, None, None),
+          }
+        } else {
+          self.pending_create2_data = None;
+          (None, None, None)
+        };
       self.pending_sub_call = Some(SubCallClaim {
         opcode: op,
         callee,
@@ -273,7 +340,10 @@ impl<CTX, INTR: InterpreterTypes> Inspector<CTX, INTR> for ProvingInspector {
         return_data: outcome.result.output.to_vec(),
         success: outcome.result.is_ok(),
         depth,
-        inner_proof: None,
+        inner_proof,
+        create2_deployer,
+        create2_salt,
+        create2_initcode_hash,
       });
     }
   }
@@ -604,6 +674,42 @@ impl ProvingInspector {
         }
       }
 
+      // KECCAK256: inputs[0] = memory offset, inputs[1] = size in bytes.
+      // Emit one read MemAccessClaim per 32-byte aligned word in [offset, offset+size).
+      // These read claims are included in the memory log so that MemoryConsistencyAir
+      // and KeccakConsistencyAir can be cross-checked via the shared read_set hash.
+      opcode::KECCAK256 => {
+        if self.pending_inputs.len() >= 2 {
+          let offset_u256 = U256::from_be_bytes::<32>(self.pending_inputs[0]);
+          let size_u256 = U256::from_be_bytes::<32>(self.pending_inputs[1]);
+          if let (Some(offset), Some(size)) = (
+            offset_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+            size_u256.try_into().ok().filter(|&v: &usize| v <= 4 * 1024 * 1024),
+          )
+            && size > 0 {
+              let local_off = interp.memory.local_memory_offset();
+              let local_size = interp.memory.size();
+              let mem: Vec<u8> = interp
+                .memory
+                .global_slice(local_off..local_off + local_size)
+                .to_vec();
+              let start_aligned = (offset / 32) * 32;
+              let end_aligned = (offset + size).div_ceil(32) * 32;
+              let mut addr = start_aligned;
+              while addr < end_aligned {
+                self.rw_counter += 1;
+                claims.push(MemAccessClaim {
+                  rw_counter: self.rw_counter,
+                  addr: addr as u64,
+                  is_write: false,
+                  value: read_word_from_mem(&mem, addr),
+                });
+                addr += 32;
+              }
+            }
+        }
+      }
+
       _ => {}
     }
 
@@ -785,13 +891,21 @@ impl ProvingInspector {
     }
   }
 
-  /// Build `StorageAccessClaim`s for the current instruction (SLOAD / SSTORE).
+  /// Build `StorageAccessClaim`s for the current instruction
+  /// (SLOAD / SSTORE / TLOAD / TSTORE).
   ///
-  /// - SLOAD:  `pending_inputs[0]` = slot key, `outputs[0]` = loaded value.
-  /// - SSTORE: `pending_inputs[0]` = slot key, `pending_inputs[1]` = written value.
+  /// - SLOAD / TLOAD:  `pending_inputs[0]` = slot key, `outputs[0]` = loaded value.
+  /// - SSTORE / TSTORE: `pending_inputs[0]` = slot key, `pending_inputs[1]` = written value.
+  ///
+  /// Transient opcodes (TLOAD/TSTORE) are treated identically to their
+  /// persistent counterparts for claim-building purposes.  The storage
+  /// consistency proof already enforces last-write semantics; the
+  /// transient-reset invariant (state is ∅ at transaction start) is upheld
+  /// because `stor_w_in` is initialised to ∅ at the beginning of each
+  /// transaction.
   fn build_storage_claims(&mut self, outputs: &[[u8; 32]]) -> Vec<StorageAccessClaim> {
     match self.pending_opcode {
-      opcode::SLOAD => {
+      opcode::SLOAD | opcode::TLOAD => {
         if !self.pending_inputs.is_empty() && !outputs.is_empty() {
           self.rw_counter += 1;
           vec![StorageAccessClaim {
@@ -805,7 +919,7 @@ impl ProvingInspector {
           vec![]
         }
       }
-      opcode::SSTORE => {
+      opcode::SSTORE | opcode::TSTORE => {
         if self.pending_inputs.len() >= 2 {
           self.rw_counter += 1;
           vec![StorageAccessClaim {
@@ -823,10 +937,12 @@ impl ProvingInspector {
     }
   }
 
-  /// Build an `ExternalStateClaim` for BLOCKHASH, EXTCODESIZE, EXTCODEHASH.
+  /// Build an `ExternalStateClaim` for BLOCKHASH, EXTCODESIZE, EXTCODEHASH,
+  /// BALANCE, and SELFBALANCE.
   ///
-  /// `key` is the stack input: block number for BLOCKHASH, contract address
-  /// (zero-padded to 32 bytes) for EXTCODESIZE / EXTCODEHASH.
+  /// `key` is the stack input (block number / contract address) for opcodes
+  /// that consume a stack value, or the current contract address (zero-padded)
+  /// for SELFBALANCE (which has no stack input).
   fn build_external_state_claim(&self, outputs: &[[u8; 32]]) -> Option<ExternalStateClaim> {
     match self.pending_opcode {
       opcode::BLOCKHASH | opcode::EXTCODESIZE | opcode::EXTCODEHASH => {
@@ -836,6 +952,30 @@ impl ProvingInspector {
         Some(ExternalStateClaim {
           opcode: self.pending_opcode,
           key: self.pending_inputs[0],
+          output_value: outputs[0],
+        })
+      }
+      opcode::BALANCE => {
+        if self.pending_inputs.is_empty() || outputs.is_empty() {
+          return None;
+        }
+        Some(ExternalStateClaim {
+          opcode: self.pending_opcode,
+          key: self.pending_inputs[0], // address zero-left-padded to 32 bytes
+          output_value: outputs[0],
+        })
+      }
+      opcode::SELFBALANCE => {
+        if outputs.is_empty() {
+          return None;
+        }
+        // SELFBALANCE has no stack input; key = currently-executing contract
+        // address zero-left-padded to 32 bytes.
+        let mut key = [0u8; 32];
+        key[12..32].copy_from_slice(&self.pending_contract);
+        Some(ExternalStateClaim {
+          opcode: self.pending_opcode,
+          key,
           output_value: outputs[0],
         })
       }
@@ -931,6 +1071,24 @@ where
   let mut gas_price = [0u8; 32];
   gas_price[16..].copy_from_slice(&tx.gas_price.to_be_bytes());
 
+  // CALLER: for the outermost frame, msg.sender == tx.caller.
+  let mut caller = [0u8; 32];
+  caller[12..].copy_from_slice(tx.caller.as_slice());
+
+  // CALLVALUE: U256 ETH value → big-endian [u8; 32]
+  let callvalue = tx.value.to_be_bytes::<32>();
+
+  // ADDRESS: the contract being called (TxKind::Call), all-zeros for CREATE.
+  let mut self_address = [0u8; 32];
+  if let TxKind::Call(addr) = tx.kind {
+    self_address[12..].copy_from_slice(addr.as_slice());
+  }
+
+  // CALLDATASIZE: calldata byte-length as U256 big-endian.
+  let mut calldata_size = [0u8; 32];
+  let len = tx.data.len() as u64;
+  calldata_size[24..].copy_from_slice(&len.to_be_bytes());
+
   BlockTxContext {
     coinbase,
     timestamp,
@@ -941,6 +1099,10 @@ where
     basefee,
     origin,
     gas_price,
+    caller,
+    callvalue,
+    self_address,
+    calldata_size,
   }
 }
 
@@ -1035,11 +1197,11 @@ pub fn execute_and_prove_with_zkp_parallel_batched(
   transact_to: Address,
   data: Bytes,
   value: U256,
-  worker_count: usize,
+  _worker_count: usize,
   batch_capacity: usize,
 ) -> Result<TransactionProof, String> {
   let proof = execute_and_prove(caller, transact_to, data, value)?;
-  verify_transaction_proof_with_zkp_parallel(&proof, worker_count, batch_capacity)?;
+  verify_transaction_proof_with_batch_zkp(&proof, batch_capacity)?;
   Ok(proof)
 }
 
@@ -1066,7 +1228,10 @@ fn verify_transaction_proof(proof: &TransactionProof) -> Result<(), String> {
     .flat_map(|s| s.memory_claims.iter().cloned())
     .collect();
   if !all_mem_claims.is_empty() {
-    let mem_proof = prove_memory_consistency(&all_mem_claims)
+    // Use empty W_in: this is a standalone execution trace, so any cross-segment
+    // read must see zero (EVM memory is zero-initialised at execution start).
+    let empty_w_in = MemWriteSet::new();
+    let mem_proof = prove_memory_consistency_with_w_in(&all_mem_claims, &empty_w_in)
       .map_err(|e| format!("memory consistency proving failed: {e}"))?;
     if !verify_memory_consistency(&mem_proof) {
       return Err("memory consistency verification failed".to_string());
@@ -1102,6 +1267,7 @@ fn statement_from_step(step: &InstructionTransitionProof) -> InstructionTransiti
       sp: step.stack_inputs.len(),
       stack: step.stack_inputs.clone(),
       memory_root: [0u8; 32],
+      storage_root: [0u8; 32],
     },
     s_next: VmState {
       opcode: step.opcode,
@@ -1109,62 +1275,13 @@ fn statement_from_step(step: &InstructionTransitionProof) -> InstructionTransiti
       sp: step.stack_outputs.len(),
       stack: step.stack_outputs.clone(),
       memory_root: [0u8; 32],
+      storage_root: [0u8; 32],
     },
     accesses: Vec::new(),
     sub_call_claim: step.sub_call_claim.clone(),
     mcopy_claim: step.mcopy_claim.clone(),
+    external_state_claim: step.external_state_claim.clone(),
   }
-}
-
-fn flush_and_verify_zkp_batch(
-  statements: &mut Vec<InstructionTransitionStatement>,
-  steps: &mut Vec<InstructionTransitionProof>,
-  worker_count: usize,
-) -> Result<(), String> {
-  if steps.is_empty() {
-    return Ok(());
-  }
-
-  let proving_steps = std::mem::take(steps);
-  let batch_statements = std::mem::take(statements);
-  let receipts = prove_instruction_zk_receipts_parallel(proving_steps, worker_count)?;
-  for (local_idx, (statement, receipt)) in batch_statements.iter().zip(receipts.iter()).enumerate()
-  {
-    if !verify_instruction_zk_receipt(statement, receipt) {
-      return Err(format!(
-        "zkp receipt verification failed at batched item {local_idx} (opcode 0x{:02x})",
-        statement.opcode
-      ));
-    }
-  }
-
-  Ok(())
-}
-
-fn verify_transaction_proof_with_zkp_parallel(
-  proof: &TransactionProof,
-  worker_count: usize,
-  batch_capacity: usize,
-) -> Result<(), String> {
-  verify_transaction_proof(proof)?;
-
-  let cap = batch_capacity.max(1);
-  let mut statements = Vec::with_capacity(cap);
-  let mut steps = Vec::with_capacity(cap);
-
-  for step in &proof.steps {
-    if step.semantic_proof.is_some() && supports_zkp_receipt(step.opcode) {
-      statements.push(statement_from_step(step));
-      steps.push(step.clone());
-      if steps.len() >= cap {
-        flush_and_verify_zkp_batch(&mut statements, &mut steps, worker_count)?;
-      }
-    }
-  }
-
-  flush_and_verify_zkp_batch(&mut statements, &mut steps, worker_count)?;
-
-  Ok(())
 }
 
 /// Execute provided EVM bytecode in a benchmark DB and return transition traces.
@@ -1234,6 +1351,7 @@ pub fn execute_bytecode_and_prove(
 fn flush_and_verify_batch_zkp_single(
   statements: &mut Vec<InstructionTransitionStatement>,
   steps: &mut Vec<InstructionTransitionProof>,
+  ctx: &BlockTxContext,
 ) -> Result<(), String> {
   if steps.is_empty() {
     return Ok(());
@@ -1242,7 +1360,7 @@ fn flush_and_verify_batch_zkp_single(
   let proving_steps = std::mem::take(steps);
   let batch_statements = std::mem::take(statements);
 
-  let receipt = prove_batch_transaction_zk_receipt(&proving_steps)?;
+  let receipt = prove_batch_transaction_zk_receipt_with_env(&proving_steps, ctx.clone())?;
   if !verify_batch_transaction_zk_receipt(&batch_statements, &receipt) {
     return Err("batch ZKP receipt verification failed".to_string());
   }
@@ -1257,20 +1375,58 @@ fn verify_transaction_proof_with_batch_zkp(
   verify_transaction_proof(proof)?;
 
   let cap = batch_capacity.max(1);
+  let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
   let mut statements: Vec<InstructionTransitionStatement> = Vec::with_capacity(cap);
   let mut steps: Vec<InstructionTransitionProof> = Vec::with_capacity(cap);
 
   for step in &proof.steps {
-    if step.semantic_proof.is_some() && supports_zkp_receipt(step.opcode) {
-      statements.push(statement_from_step(step));
-      steps.push(step.clone());
-      if steps.len() >= cap {
-        flush_and_verify_batch_zkp_single(&mut statements, &mut steps)?;
-      }
+    statements.push(statement_from_step(step));
+    steps.push(step.clone());
+    if steps.len() >= cap {
+      let batch_steps = std::mem::take(&mut steps);
+      let batch_stmts = std::mem::take(&mut statements);
+      let ctx = proof.block_tx_context.clone();
+      let tx = done_tx.clone();
+      std::thread::spawn(move || {
+        let r = prove_batch_transaction_zk_receipt_with_env(&batch_steps, ctx)
+          .and_then(|receipt| {
+            if verify_batch_transaction_zk_receipt(&batch_stmts, &receipt) {
+              Ok(())
+            } else {
+              Err("batch ZKP receipt verification failed".to_string())
+            }
+          });
+        tx.send(r).ok();
+      });
     }
   }
 
-  flush_and_verify_batch_zkp_single(&mut statements, &mut steps)
+  // Final partial batch
+  if !steps.is_empty() {
+    let ctx = proof.block_tx_context.clone();
+    let tx = done_tx.clone();
+    std::thread::spawn(move || {
+      let r = prove_batch_transaction_zk_receipt_with_env(&steps, ctx)
+        .and_then(|receipt| {
+          if verify_batch_transaction_zk_receipt(&statements, &receipt) {
+            Ok(())
+          } else {
+            Err("batch ZKP receipt verification failed".to_string())
+          }
+        });
+      tx.send(r).ok();
+    });
+  }
+
+  // Drop the original sender so the channel closes when all worker threads finish.
+  drop(done_tx);
+
+  // Drain the completion queue — fail fast on first error.
+  for result in done_rx {
+    result?;
+  }
+
+  Ok(())
 }
 
 /// Execute provided EVM bytecode and verify ZKP receipts using the batch path.
@@ -1311,6 +1467,76 @@ pub fn execute_bytecode_and_prove_with_batch_zkp_batched(
   Ok(proof)
 }
 
+/// Run only the batch ZKP proving phase (Commitment + FRI) on an already-generated
+/// execution trace.
+///
+/// This is the counterpart to [`execute_bytecode_trace`]: calling those two
+/// functions separately lets benchmarks time the EVM trace-generation phase and
+/// the cryptographic proving phase independently.
+///
+/// Uses [`ZKP_DEFAULT_BATCH_CAPACITY`] as the batch window size.
+pub fn prove_transaction_proof_with_batch_zkp(
+  proof: &TransactionProof,
+) -> Result<(), String> {
+  verify_transaction_proof_with_batch_zkp(proof, DEFAULT_ZKP_BATCH_CAPACITY)
+}
+
+/// A snapshot of accumulated nanosecond times for each proving phase, collected
+/// across all sub-proofs run since the last call to [`reset_proof_phase_timings`].
+///
+/// Phases:
+/// - `trace_commit_ns`   — Merkle tree commit over the main execution trace.
+/// - `quotient_eval_ns`  — AIR constraint + LogUp sum evaluation (quotient poly eval).
+/// - `quotient_commit_ns`— Merkle tree commit over the quotient polynomial chunks.
+/// - `open_ns`           — FRI opening phase (queries + opening proof).
+/// - `proof_count`       — Number of sub-proofs contributing to the totals above.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ProofPhaseTimings {
+  pub trace_commit_ns: u64,
+  pub quotient_eval_ns: u64,
+  pub quotient_commit_ns: u64,
+  pub open_ns: u64,
+  pub proof_count: u64,
+}
+
+impl ProofPhaseTimings {
+  /// Nanoseconds in the "LogUp / constraint eval" bucket (= quotient eval only).
+  pub fn logup_eval_ns(&self) -> u64 {
+    self.quotient_eval_ns
+  }
+
+  /// Nanoseconds in the "FRI + Commitment" bucket (trace+quotient commits + FRI open).
+  pub fn fri_commit_ns(&self) -> u64 {
+    self.trace_commit_ns + self.quotient_commit_ns + self.open_ns
+  }
+
+  /// Total nanoseconds across all phases.
+  pub fn total_ns(&self) -> u64 {
+    self.trace_commit_ns + self.quotient_eval_ns + self.quotient_commit_ns + self.open_ns
+  }
+}
+
+/// Reset all per-phase timing counters to zero.
+///
+/// Call this immediately before the proving work you want to measure so that
+/// timings from warm-up or prior runs do not contaminate the result.
+pub fn reset_proof_phase_timings() {
+  p3_uni_stark::timing::reset();
+}
+
+/// Read the accumulated per-phase timings since the last [`reset_proof_phase_timings`] call.
+pub fn read_proof_phase_timings() -> ProofPhaseTimings {
+  let snap = p3_uni_stark::timing::snapshot();
+  ProofPhaseTimings {
+    trace_commit_ns: snap.trace_commit_ns,
+    quotient_eval_ns: snap.quotient_eval_ns,
+    quotient_commit_ns: snap.quotient_commit_ns,
+    open_ns: snap.open_ns,
+    proof_count: snap.proof_count,
+  }
+}
+
+
 /// Execute provided EVM bytecode and verify ZKP receipts for supported opcodes.
 ///
 /// ZKP receipt proving is parallelized with a lock-free queue worker pool.
@@ -1335,11 +1561,11 @@ pub fn execute_bytecode_and_prove_with_zkp_parallel_batched(
   bytecode: Bytes,
   data: Bytes,
   value: U256,
-  worker_count: usize,
+  _worker_count: usize,
   batch_capacity: usize,
 ) -> Result<TransactionProof, String> {
   let proof = execute_bytecode_trace(bytecode, data, value)?;
-  verify_transaction_proof_with_zkp_parallel(&proof, worker_count, batch_capacity)?;
+  verify_transaction_proof_with_batch_zkp(&proof, batch_capacity)?;
   Ok(proof)
 }
 
@@ -1374,18 +1600,55 @@ pub fn execute_bytecode_and_prove_chain(
   let windows: Vec<Vec<InstructionTransitionProof>> =
     steps.chunks(wsize).map(|c| c.to_vec()).collect();
 
+  // Compute cumulative write-sets (W_i) at each segment boundary so that the
+  // VmState memory_root / storage_root commitments reflect the actual write
+  // history rather than placeholder zeros.
+  //
+  // W_0 = empty  (execution starts with zero-initialised memory/storage)
+  // W_{i+1} = merge(W_i, D_seg_i)   where D_seg_i = writes in window i
+  let mut mem_ws: MemWriteSet = MemWriteSet::new();
+  let mut stor_ws: StorWriteSet = StorWriteSet::new();
+
+  // Collect (memory_root, storage_root) for each boundary: [W_0, W_1, …, W_N].
+  let mut boundary_mem_roots: Vec<[u8; 32]> = Vec::with_capacity(windows.len() + 1);
+  let mut boundary_stor_roots: Vec<[u8; 32]> = Vec::with_capacity(windows.len() + 1);
+
+  // W_0 boundary (before any window executes)
+  boundary_mem_roots.push(hash_mem_write_set(&mem_ws));
+  boundary_stor_roots.push(hash_stor_write_set(&stor_ws));
+
+  for window in &windows {
+    // Accumulate writes from this window's steps.
+    for step in window {
+      for claim in &step.memory_claims {
+        if claim.is_write {
+          mem_ws.insert(claim.addr, claim.value);
+        }
+      }
+      for claim in &step.storage_claims {
+        if claim.is_write {
+          stor_ws.insert((claim.contract, claim.slot), claim.value);
+        }
+      }
+    }
+    boundary_mem_roots.push(hash_mem_write_set(&mem_ws));
+    boundary_stor_roots.push(hash_stor_write_set(&stor_ws));
+  }
+
   // Build VmState boundary for the start of each window, then append the
   // terminal state after the last step.
   let mut vm_states: Vec<VmState> = windows
     .iter()
-    .map(|w| {
+    .enumerate()
+    .map(|(i, w)| {
       let first = w.first().unwrap();
       VmState {
         opcode: first.opcode,
         pc: first.pc,
         sp: first.stack_inputs.len(),
         stack: first.stack_inputs.clone(),
-        memory_root: [0u8; 32],
+        memory_root: boundary_mem_roots[i],
+        storage_root: boundary_stor_roots[i],
       }
     })
     .collect();
@@ -1397,7 +1660,8 @@ pub fn execute_bytecode_and_prove_chain(
     pc: last.pc.saturating_add(1),
     sp: last.stack_outputs.len(),
     stack: last.stack_outputs.clone(),
-    memory_root: [0u8; 32],
+    memory_root: *boundary_mem_roots.last().unwrap(),
+    storage_root: *boundary_stor_roots.last().unwrap(),
   });
 
   prove_execution_chain(&vm_states, windows)

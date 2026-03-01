@@ -3,6 +3,9 @@
 #![no_std]
 
 extern crate alloc;
+// The `timing` feature requires the standard library for `std::time::Instant`.
+#[cfg(feature = "timing")]
+extern crate std;
 
 mod check_constraints;
 mod config;
@@ -15,6 +18,8 @@ mod symbolic_builder;
 mod symbolic_expression;
 mod symbolic_variable;
 mod verifier;
+#[cfg(feature = "timing")]
+pub mod timing;
 
 pub use check_constraints::*;
 pub use config::*;

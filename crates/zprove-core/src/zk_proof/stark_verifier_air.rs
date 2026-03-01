@@ -56,6 +56,8 @@
 //! 재귀 레이어마다 동일한 FRI 파라미터를 사용해 오류 누적을 `O(depth × ε)`로 유지.
 
 #[allow(unused_imports)]
+use super::challenger_air::{ChallengerProof, prove_challenger_transcript, verify_challenger_transcript};
+#[allow(unused_imports)]
 use super::fri_air::{FriQueryInput, FriVerifyProof, prove_fri_queries};
 #[allow(unused_imports)]
 use super::merkle_air::{MerklePathProof, prove_merkle_paths};
@@ -88,6 +90,11 @@ pub struct RecursiveStarkProof {
     pub merkle_proof: Option<MerklePathProof>,
     /// 내부 FRI 쿼리 증명 (Phase 3 연동).
     pub fri_proof: Option<FriVerifyProof>,
+    /// Fiat-Shamir 챌린저 트랜스크립트 in-circuit 증명 (Phase 3 Fiat-Shamir).
+    ///
+    /// `Some`이면 alpha, zeta, fri_betas, query_indices가 Poseidon2에서
+    /// 유도됐음을 in-circuit으로 보장한다.
+    pub challenger_proof: Option<ChallengerProof>,
 }
 
 // ── StarkVerifierAir ─────────────────────────────────────────────────────────
@@ -288,11 +295,19 @@ pub fn prove_recursively(
         None
     };
 
+    // 5. Fiat-Shamir 챌린저 트랜스크립트 in-circuit 증명 (Phase 3)
+    let challenger_proof = if enable_fri_circuit {
+        Some(prove_challenger_transcript(inner_proof, public_inputs))
+    } else {
+        None
+    };
+
     RecursiveStarkProof {
         inner_pis_hash,
         outer_proof,
         merkle_proof: None, // Phase 3 MerklePathAir 통합 시 활성화
         fri_proof,
+        challenger_proof,
     }
 }
 
@@ -331,6 +346,11 @@ pub fn verify_recursively(
     // Merkle 서브 증명 검증
     if let Some(merkle) = &recursive_proof.merkle_proof {
         super::merkle_air::verify_merkle_paths(merkle)?;
+    }
+
+    // Fiat-Shamir 챌린저 트랜스크립트 in-circuit 검증
+    if let Some(cp) = &recursive_proof.challenger_proof {
+        verify_challenger_transcript(cp, expected_inner_pis, expected_trace_commit)?;
     }
 
     Ok(())

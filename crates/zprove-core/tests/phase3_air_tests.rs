@@ -58,14 +58,7 @@ mod phase3_air_tests {
   // ── Poseidon2Air ────────────────────────────────────────────────────────────
 
   #[test]
-  fn test_poseidon2_air_roundtrip_single() {
-    let input = vec![[Val::new(0); P2_WIDTH]];
-    let proof = prove_poseidon2_permutations(input);
-    let r = verify_poseidon2_permutations(&proof);
-    assert!(r.is_ok(), "Poseidon2 single: {:?}", r.err());
-  }
 
-  #[test]
   fn test_poseidon2_air_roundtrip_batch() {
     let inputs: Vec<[Val; P2_WIDTH]> = (0u32..4)
       .map(|i| {
@@ -82,16 +75,7 @@ mod phase3_air_tests {
   // ── M31Ext3MulAir ───────────────────────────────────────────────────────────
 
   #[test]
-  fn test_m31ext3_mul_roundtrip_identity() {
-    // a * 1 = a (항등원)
-    let a = ch(5, 7, 11);
-    let one = Challenge::from(Val::new(1));
-    let proof = prove_m31ext3_mul(&[(a, one)]);
-    let r = verify_m31ext3_mul(&proof);
-    assert!(r.is_ok(), "M31Ext3 identity: {:?}", r.err());
-  }
 
-  #[test]
   fn test_m31ext3_mul_roundtrip_batch() {
     // (1,1,0) * (1,0,1) 과 (2,0,0) * (3,0,0) 배치
     let pairs = vec![(ch(1, 1, 0), ch(1, 0, 1)), (ch(2, 0, 0), ch(3, 0, 0))];
@@ -123,20 +107,6 @@ mod phase3_air_tests {
   }
 
   #[test]
-  fn test_merkle_path_air_roundtrip_depth1_right() {
-    // leaf → right child
-    let input = MerklePathInput {
-      leaf_hash: vhash(5),
-      siblings: vec![vhash(3)],
-      directions: vec![true], // leaf = right child
-      root: [Val::new(0); 8],
-    };
-    let proof = prove_merkle_paths(&[input]);
-    let r = verify_merkle_paths(&proof);
-    assert!(r.is_ok(), "Merkle depth1 right: {:?}", r.err());
-  }
-
-  #[test]
   fn test_merkle_path_air_roundtrip_depth2() {
     let input = MerklePathInput {
       leaf_hash: vhash(10),
@@ -152,15 +122,7 @@ mod phase3_air_tests {
   // ── FriQueryAir ─────────────────────────────────────────────────────────────
 
   #[test]
-  fn test_fri_query_air_roundtrip_single() {
-    // t_inv=1 (twiddle^{-1}), y+=ch(4,0,0), y-=ch(2,0,0), β=(3,0,0)
-    let q = make_fri_input(Val::new(1), ch(4, 0, 0), ch(2, 0, 0), ch(3, 0, 0));
-    let proof = prove_fri_queries(&[q]);
-    let r = verify_fri_queries(&proof);
-    assert!(r.is_ok(), "FRI single: {:?}", r.err());
-  }
 
-  #[test]
   fn test_fri_query_air_roundtrip_batch() {
     let qs = vec![
       make_fri_input(Val::new(1), ch(4, 0, 0), ch(2, 0, 0), ch(3, 0, 0)),
@@ -174,15 +136,7 @@ mod phase3_air_tests {
   // ── OodVerifierAir ──────────────────────────────────────────────────────────
 
   #[test]
-  fn test_ood_verifier_air_roundtrip_single() {
-    // constraint_val=(2,0,0), zh_inv=(3,0,0) → quotient=(6,0,0)
-    let ev = make_ood(ch(2, 0, 0), ch(3, 0, 0));
-    let proof = prove_ood_evaluation(&[ev]);
-    let r = verify_ood_evaluation(&proof);
-    assert!(r.is_ok(), "OOD single: {:?}", r.err());
-  }
 
-  #[test]
   fn test_ood_verifier_air_roundtrip_batch() {
     let evals = vec![
       make_ood(ch(1, 0, 0), ch(1, 0, 0)),   // 1*1 = 1

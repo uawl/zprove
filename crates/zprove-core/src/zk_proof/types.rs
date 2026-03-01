@@ -21,6 +21,35 @@ use rand::rngs::SmallRng;
 use std::sync::OnceLock;
 
 // ============================================================
+// Global thread pool for batch sub-proof parallelism
+// ============================================================
+
+/// A shared thread pool for batch sub-proof parallelism.
+///
+/// Pool size is set to the number of logical CPUs (minimum of 7) so that:
+/// - A single batch prove can use 7 dedicated threads (one per sub-proof type)
+/// - When multiple batch proves run concurrently (pipeline mode), the extra
+///   threads allow the pool to service them with reduced contention.
+///   On a 10-core machine, for example, concurrent batch proves (each with 7
+///   sub-proof tasks) can run with only mild oversubscription.
+///
+/// Sub-proof types: stack_ir, lut, memory, storage, keccak, stack, stack_rw.
+pub fn batch_proof_pool() -> &'static rayon::ThreadPool {
+  static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+  POOL.get_or_init(|| {
+    let n = std::thread::available_parallelism()
+      .map(|n| n.get())
+      .unwrap_or(7)
+      .max(7);
+    rayon::ThreadPoolBuilder::new()
+      .num_threads(n)
+      .thread_name(|i| format!("zprove-batch-{i}"))
+      .build()
+      .expect("failed to build batch proof thread pool")
+  })
+}
+
+// ============================================================
 // Type aliases for Circle STARK over M31
 // ============================================================
 
@@ -125,13 +154,15 @@ pub fn make_receipt_binding_public_values(tag: u32, opcode: u8, expected_wff: &W
 // ============================================================
 
 /// Build a Circle STARK configuration over M31 with Poseidon2 hashing.
+///
+/// Uses 128 FRI queries (log_blowup = 1) for ~128-bit soundness.
 pub fn make_circle_config() -> CircleStarkConfig {
-  make_circle_config_with_params(40, 8, 0)
+  make_circle_config_with_params(128, 8, 0)
 }
 
 /// Tunable Circle STARK config (Poseidon2 hash backend).
 ///
-/// - `num_queries`: FRI query count. Soundness ≈ num_queries × log_blowup bits. Default 40.
+/// - `num_queries`: FRI query count. Soundness ≈ num_queries × log_blowup bits. Default 128.
 /// - `query_pow_bits`: grinding bits for query phase (2^n hashes). Default 8. Set 0 to disable.
 /// - `log_final_poly_len`: log2 of FRI final polynomial degree limit. Default 0.
 pub fn make_circle_config_with_params(
@@ -336,6 +367,25 @@ pub(super) fn serialize_term(term: &Term, out: &mut Vec<u8>) {
       serialize_term(a, out);
       serialize_term(b, out);
       serialize_term(cin, out);
+    }
+    // U15 terms — not expected in ZK proof serialization paths yet
+    Term::U15(v) => {
+      out.push(0xF0);
+      out.extend_from_slice(&(*v as u32).to_le_bytes());
+    }
+    Term::U15MulLow(a, b) => {
+      out.push(0xF1);
+      serialize_term(a, out);
+      serialize_term(b, out);
+    }
+    Term::U15MulHigh(a, b) => {
+      out.push(0xF2);
+      serialize_term(a, out);
+      serialize_term(b, out);
+    }
+    Term::PartialMul15 { col_idx } => {
+      out.push(0xF3);
+      out.push(*col_idx);
     }
   }
 }

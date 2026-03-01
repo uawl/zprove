@@ -20,6 +20,8 @@ type Memo = HashMap<(u32, u32, u32, u32, u32, u32, u32), u32>;
 pub enum Ty {
   Bool,
   Byte,
+  /// 15-bit unsigned integer (limb of a 256-bit word in 15-bit Comba MUL).
+  U15,
   /// 29-bit unsigned integer (limb of a 256-bit word in the 29+24-radix decomposition).
   U29,
   /// 24-bit unsigned integer (top limb of a 256-bit word).
@@ -108,6 +110,22 @@ pub enum Term {
   Add29Carry(Box<Term>, Box<Term>, Box<Term>),
   /// `(a + b + cin) mod 2^24` — 24-bit modular sum (U24, top-limb).
   Add24(Box<Term>, Box<Term>, Box<Term>),
+
+  // ---- 15-bit MUL intermediate terms ----
+  /// Concrete 15-bit literal value (analogous to `Byte(u8)` at U15 granularity).
+  U15(u16),
+  /// Lower 15 bits of a 15-bit × 15-bit product: `(a * b) & 0x7FFF`.
+  /// Both operands must be U15 terms.
+  U15MulLow(Box<Term>, Box<Term>),
+  /// Upper 15 bits of a 15-bit × 15-bit product: `(a * b) >> 15`.
+  /// Both operands must be U15 terms.
+  U15MulHigh(Box<Term>, Box<Term>),
+  /// Prover-supplied carry witness INTO 15-bit Comba column `col_idx`.
+  ///
+  /// Represents the overflow accumulated from all columns with index < `col_idx`.
+  /// Typed U15 at any given proof step; the STARK verifier checks the committed
+  /// value is consistent with the LUT column-sum constraint.
+  PartialMul15 { col_idx: u8 },
 }
 
 // ============================================================
@@ -174,6 +192,15 @@ pub enum Proof {
   ByteMulLowEq(u8, u8),
   /// `ByteMulHigh(Byte(a), Byte(b)) = Byte((a * b) >> 8)`.
   ByteMulHighEq(u8, u8),
+  /// `U15MulLow(U15(a), U15(b)) = U15((a * b) & 0x7FFF)`.
+  U15MulLowEq(u16, u16),
+  /// `U15MulHigh(U15(a), U15(b)) = U15((a * b) >> 15)`.
+  U15MulHighEq(u16, u16),
+  /// `PartialMul15{col_idx} = U15(value mod 2^15) + 2^15 * U15(value >> 15)`.
+  ///
+  /// Binds the prover-supplied carry witness `PartialMul15{col_idx}` to its
+  /// concrete lo/hi 15-bit decomposition so the carry chain can be verified.
+  PartialMul15Bind { col_idx: u8, lo: u16, hi: u16 },
 
   // ── Per-opcode axiom proof terms ──────────────────────────────────────
   // Leaf nodes: no sub-proofs.  Each encodes exactly the WFF it witnesses.
@@ -396,6 +423,15 @@ pub const OP_U24_ADD_SYM: u32 = 74;
 pub const OP_CARRY_LIMB_ZERO: u32 = 75;
 pub const OP_U29_SUB_SYM: u32 = 76;
 pub const OP_U24_SUB_SYM: u32 = 77;
+// ---- 15-bit MUL intermediate term opcodes ----
+pub const OP_U15_LIT: u32 = 78;
+pub const OP_U15_MUL_LOW: u32 = 79;
+pub const OP_U15_MUL_HIGH: u32 = 80;
+pub const OP_PARTIAL_MUL15: u32 = 81;
+// ---- 15-bit MUL axiom proof opcodes ----
+pub const OP_U15_MUL_LOW_EQ: u32 = 82;
+pub const OP_U15_MUL_HIGH_EQ: u32 = 83;
+pub const OP_PARTIAL_MUL15_BIND: u32 = 84;
 pub const RET_BOOL: u32 = 0;
 pub const RET_BYTE: u32 = 1;
 pub const RET_WFF_EQ: u32 = 2;
@@ -404,6 +440,8 @@ pub const RET_WFF_AND: u32 = 3;
 pub const RET_U29: u32 = 4;
 /// 24-bit limb value return type.
 pub const RET_U24: u32 = 5;
+/// 15-bit limb value return type.
+pub const RET_U15: u32 = 6;
 
 /// Number of columns in the compiled proof row (= STARK trace width).
 pub const NUM_PROOF_COLS: usize = 9;
@@ -492,6 +530,8 @@ fn check_term_io_values(
     | Term::Xor(a, b)
     | Term::ByteMulLow(a, b)
     | Term::ByteMulHigh(a, b)
+    | Term::U15MulLow(a, b)
+    | Term::U15MulHigh(a, b)
     | Term::ByteAnd(a, b)
     | Term::ByteOr(a, b)
     | Term::ByteXor(a, b) => {
@@ -522,7 +562,9 @@ fn check_term_io_values(
     | Term::InputLimb29 { .. }
     | Term::OutputLimb29 { .. }
     | Term::InputLimb24 { .. }
-    | Term::OutputLimb24 { .. } => true,
+    | Term::OutputLimb24 { .. }
+    | Term::PartialMul15 { .. }
+    | Term::U15(_) => true,
   }
 }
 
@@ -626,413 +668,460 @@ pub fn infer_ty(term: &Term) -> Result<Ty, VerifyError> {
         Err(VerifyError::UnexpectedTermVariant { expected: "u24 subterm" })
       }
     }
+    Term::U15MulLow(a, b) | Term::U15MulHigh(a, b) => {
+      if infer_ty(a)? == Ty::U15 && infer_ty(b)? == Ty::U15 {
+        Ok(Ty::U15)
+      } else {
+        Err(VerifyError::UnexpectedTermVariant { expected: "u15 subterm" })
+      }
+    }
+    Term::U15(_) | Term::PartialMul15 { .. } => Ok(Ty::U15),
   }
 }
 
 pub fn infer_proof(proof: &Proof) -> Result<WFF, VerifyError> {
-  match proof {
-    Proof::AndIntro(p1, p2) => {
-      let wff1 = infer_proof(p1)?;
-      let wff2 = infer_proof(p2)?;
-      Ok(WFF::And(Box::new(wff1), Box::new(wff2)))
-    }
-    Proof::EqRefl(t) => Ok(WFF::Equal(Box::new(t.clone()), Box::new(t.clone()))),
-    Proof::EqSym(p) => {
-      if let WFF::Equal(a, b) = infer_proof(p)? {
-        Ok(WFF::Equal(b, a))
-      } else {
-        Err(VerifyError::UnexpectedProofVariant {
-          expected: "equality proof",
-        })
-      }
-    }
-    Proof::EqTrans(p1, p2) => {
-      if let WFF::Equal(a, b) = infer_proof(p1)? {
-        if let WFF::Equal(b2, c) = infer_proof(p2)? {
-          if *b == *b2 {
-            Ok(WFF::Equal(a, c))
-          } else {
-            Err(VerifyError::TransitivityMismatch)
-          }
-        } else {
-          Err(VerifyError::UnexpectedProofVariant {
-            expected: "equality proof",
-          })
-        }
-      } else {
-        Err(VerifyError::UnexpectedProofVariant {
-          expected: "equality proof",
-        })
-      }
-    }
-    Proof::ByteAndEq(a, b) => Ok(WFF::Equal(
-      Box::new(Term::ByteAnd(
-        Box::new(Term::Byte(*a)),
-        Box::new(Term::Byte(*b)),
-      )),
-      Box::new(Term::Byte(*a & *b)),
-    )),
-    Proof::ByteOrEq(a, b) => Ok(WFF::Equal(
-      Box::new(Term::ByteOr(
-        Box::new(Term::Byte(*a)),
-        Box::new(Term::Byte(*b)),
-      )),
-      Box::new(Term::Byte(*a | *b)),
-    )),
-    Proof::ByteXorEq(a, b) => Ok(WFF::Equal(
-      Box::new(Term::ByteXor(
-        Box::new(Term::Byte(*a)),
-        Box::new(Term::Byte(*b)),
-      )),
-      Box::new(Term::Byte(*a ^ *b)),
-    )),
-    Proof::U29AddEq(a, b, _cin, c) => {
-      if *a >= (1u32 << 29) || *b >= (1u32 << 29) || *c >= (1u32 << 29) {
-        return Err(VerifyError::UnexpectedProofVariant {
-          expected: "u29 inputs",
-        });
-      }
-      let total = *a + *b + (*_cin as u32);
-      let sum = total & ((1u32 << 29) - 1);
-      let pairs = vec![
-        ((sum & 0xFF) as u8, (*c & 0xFF) as u8),
-        (((sum >> 8) & 0xFF) as u8, ((*c >> 8) & 0xFF) as u8),
-        (((sum >> 16) & 0xFF) as u8, ((*c >> 16) & 0xFF) as u8),
-        (((sum >> 24) & 0x1F) as u8, ((*c >> 24) & 0x1F) as u8),
-      ];
-      Ok(and_wffs(
-        pairs
-          .into_iter()
-          .map(|(lhs, rhs)| WFF::Equal(Box::new(Term::Byte(lhs)), Box::new(Term::Byte(rhs))))
-          .collect(),
-      ))
-    }
-    Proof::U24AddEq(a, b, _cin, c) => {
-      if *a >= (1u32 << 24) || *b >= (1u32 << 24) || *c >= (1u32 << 24) {
-        return Err(VerifyError::UnexpectedProofVariant {
-          expected: "u24 inputs",
-        });
-      }
-      let total = *a + *b + (*_cin as u32);
-      let sum = total & ((1u32 << 24) - 1);
-      let pairs = vec![
-        ((sum & 0xFF) as u8, (*c & 0xFF) as u8),
-        (((sum >> 8) & 0xFF) as u8, ((*c >> 8) & 0xFF) as u8),
-        (((sum >> 16) & 0xFF) as u8, ((*c >> 16) & 0xFF) as u8),
-      ];
-      Ok(and_wffs(
-        pairs
-          .into_iter()
-          .map(|(lhs, rhs)| WFF::Equal(Box::new(Term::Byte(lhs)), Box::new(Term::Byte(rhs))))
-          .collect(),
-      ))
-    }
-    Proof::U15MulEq(a, b) => {
-      if *a > 0x7FFF || *b > 0x7FFF {
-        return Err(VerifyError::UnexpectedProofVariant {
-          expected: "u15 inputs",
-        });
-      }
-      let a_lo = (*a & 0xFF) as u8;
-      let a_hi = ((*a >> 8) & 0x7F) as u8;
-      let b_lo = (*b & 0xFF) as u8;
-      let b_hi = ((*b >> 8) & 0x7F) as u8;
-
-      let p00 = a_lo as u16 * b_lo as u16;
-      let p01 = a_lo as u16 * b_hi as u16;
-      let p10 = a_hi as u16 * b_lo as u16;
-      let p11 = a_hi as u16 * b_hi as u16;
-
-      let leaves = vec![
-        WFF::Equal(
-          Box::new(Term::ByteMulLow(
-            Box::new(Term::Byte(a_lo)),
-            Box::new(Term::Byte(b_lo)),
-          )),
-          Box::new(Term::Byte((p00 & 0xFF) as u8)),
-        ),
-        WFF::Equal(
-          Box::new(Term::ByteMulHigh(
-            Box::new(Term::Byte(a_lo)),
-            Box::new(Term::Byte(b_lo)),
-          )),
-          Box::new(Term::Byte((p00 >> 8) as u8)),
-        ),
-        WFF::Equal(
-          Box::new(Term::ByteMulLow(
-            Box::new(Term::Byte(a_lo)),
-            Box::new(Term::Byte(b_hi)),
-          )),
-          Box::new(Term::Byte((p01 & 0xFF) as u8)),
-        ),
-        WFF::Equal(
-          Box::new(Term::ByteMulHigh(
-            Box::new(Term::Byte(a_lo)),
-            Box::new(Term::Byte(b_hi)),
-          )),
-          Box::new(Term::Byte((p01 >> 8) as u8)),
-        ),
-        WFF::Equal(
-          Box::new(Term::ByteMulLow(
-            Box::new(Term::Byte(a_hi)),
-            Box::new(Term::Byte(b_lo)),
-          )),
-          Box::new(Term::Byte((p10 & 0xFF) as u8)),
-        ),
-        WFF::Equal(
-          Box::new(Term::ByteMulHigh(
-            Box::new(Term::Byte(a_hi)),
-            Box::new(Term::Byte(b_lo)),
-          )),
-          Box::new(Term::Byte((p10 >> 8) as u8)),
-        ),
-        WFF::Equal(
-          Box::new(Term::ByteMulLow(
-            Box::new(Term::Byte(a_hi)),
-            Box::new(Term::Byte(b_hi)),
-          )),
-          Box::new(Term::Byte((p11 & 0xFF) as u8)),
-        ),
-        WFF::Equal(
-          Box::new(Term::ByteMulHigh(
-            Box::new(Term::Byte(a_hi)),
-            Box::new(Term::Byte(b_hi)),
-          )),
-          Box::new(Term::Byte((p11 >> 8) as u8)),
-        ),
-      ];
-
-      Ok(and_wffs(leaves))
-    }
-    Proof::ByteAddThirdCongruence(p, a, b) => {
-      if let WFF::Equal(c1, c2) = infer_proof(p)? {
-        Ok(WFF::Equal(
-          Box::new(Term::ByteAdd(
-            Box::new(Term::Byte(*a)),
-            Box::new(Term::Byte(*b)),
-            c1,
-          )),
-          Box::new(Term::ByteAdd(
-            Box::new(Term::Byte(*a)),
-            Box::new(Term::Byte(*b)),
-            c2,
-          )),
-        ))
-      } else {
-        Err(VerifyError::UnexpectedProofVariant {
-          expected: "equality proof",
-        })
-      }
-    }
-    Proof::ByteAddCarryThirdCongruence(p, a, b) => {
-      if let WFF::Equal(c1, c2) = infer_proof(p)? {
-        Ok(WFF::Equal(
-          Box::new(Term::ByteAddCarry(
-            Box::new(Term::Byte(*a)),
-            Box::new(Term::Byte(*b)),
-            c1,
-          )),
-          Box::new(Term::ByteAddCarry(
-            Box::new(Term::Byte(*a)),
-            Box::new(Term::Byte(*b)),
-            c2,
-          )),
-        ))
-      } else {
-        Err(VerifyError::UnexpectedProofVariant {
-          expected: "equality proof",
-        })
-      }
-    }
-    Proof::IteTrueEq(a, b) => {
-      let ty_a = infer_ty(a)?;
-      let ty_b = infer_ty(b)?;
-      if ty_a != ty_b {
-        return Err(VerifyError::UnexpectedTermVariant {
-          expected: "matching type subterms",
-        });
-      }
-      Ok(WFF::Equal(
-        Box::new(Term::Ite(
-          Box::new(Term::Bool(true)),
-          Box::new(a.clone()),
-          Box::new(b.clone()),
-        )),
-        Box::new(a.clone()),
-      ))
-    }
-    Proof::IteFalseEq(a, b) => {
-      let ty_a = infer_ty(a)?;
-      let ty_b = infer_ty(b)?;
-      if ty_a != ty_b {
-        return Err(VerifyError::UnexpectedTermVariant {
-          expected: "matching type subterms",
-        });
-      }
-      Ok(WFF::Equal(
-        Box::new(Term::Ite(
-          Box::new(Term::Bool(false)),
-          Box::new(a.clone()),
-          Box::new(b.clone()),
-        )),
-        Box::new(b.clone()),
-      ))
-    }
-    Proof::ByteMulLowEq(a, b) => Ok(WFF::Equal(
-      Box::new(Term::ByteMulLow(
-        Box::new(Term::Byte(*a)),
-        Box::new(Term::Byte(*b)),
-      )),
-      Box::new(Term::Byte(((*a as u16 * *b as u16) & 0xFF) as u8)),
-    )),
-    Proof::ByteMulHighEq(a, b) => Ok(WFF::Equal(
-      Box::new(Term::ByteMulHigh(
-        Box::new(Term::Byte(*a)),
-        Box::new(Term::Byte(*b)),
-      )),
-      Box::new(Term::Byte(((*a as u16 * *b as u16) >> 8) as u8)),
-    )),
-
-    // ── Per-opcode axiom proofs: each infers Equal(OutputTerm{0,0}, OutputTerm{0,0}). ──────
-    Proof::PushAxiom
-    | Proof::DupAxiom { .. }
-    | Proof::SwapAxiom { .. }
-    | Proof::StructuralAxiom { .. }
-    | Proof::MloadAxiom
-    | Proof::MstoreAxiom { .. }
-    | Proof::MemCopyAxiom { .. }
-    | Proof::SloadAxiom
-    | Proof::SstoreAxiom
-    | Proof::TransientAxiom { .. }
-    | Proof::KeccakAxiom
-    | Proof::EnvAxiom { .. }
-    | Proof::ExternalStateAxiom { .. }
-    | Proof::TerminateAxiom { .. }
-    | Proof::CallAxiom { .. }
-    | Proof::CreateAxiom { .. }
-    | Proof::SelfdestructAxiom
-    | Proof::LogAxiom { .. } => Ok(WFF::Equal(
-      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
-      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
-    )),
-    Proof::InputEq { stack_idx, byte_idx, value } => Ok(WFF::Equal(
-      Box::new(Term::InputTerm { stack_idx: *stack_idx, byte_idx: *byte_idx, value: *value }),
-      Box::new(Term::Byte(*value)),
-    )),
-    Proof::OutputEq { stack_idx, byte_idx, value } => Ok(WFF::Equal(
-      Box::new(Term::OutputTerm { stack_idx: *stack_idx, byte_idx: *byte_idx, value: *value }),
-      Box::new(Term::Byte(*value)),
-    )),
-    Proof::PcBeforeEq { byte_idx, value } => Ok(WFF::Equal(
-      Box::new(Term::PcBefore { byte_idx: *byte_idx }),
-      Box::new(Term::Byte(*value)),
-    )),
-    Proof::PcStep { instr_size } => Ok(wff_pc_step(*instr_size)),
-    // ── Symbolic byte-level ops ──────────────────────────────────────────
-    Proof::ByteAndSym { byte_idx, a, b } => Ok(WFF::Equal(
-      Box::new(Term::ByteAnd(
-        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
-        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
-      )),
-      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a & *b }),
-    )),
-    Proof::ByteOrSym { byte_idx, a, b } => Ok(WFF::Equal(
-      Box::new(Term::ByteOr(
-        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
-        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
-      )),
-      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a | *b }),
-    )),
-    Proof::ByteXorSym { byte_idx, a, b } => Ok(WFF::Equal(
-      Box::new(Term::ByteXor(
-        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
-        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
-      )),
-      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a ^ *b }),
-    )),
-    Proof::ByteNotSym { byte_idx, a } => Ok(WFF::Equal(
-      Box::new(Term::ByteXor(
-        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
-        Box::new(Term::Byte(0xFF)),
-      )),
-      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a ^ 0xFF }),
-    )),
-    Proof::AddByteSym { byte_idx, a, b } => Ok(WFF::Equal(
-      Box::new(Term::ByteAdd(
-        Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
-        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
-        Box::new(Term::CarryTerm { byte_idx: *byte_idx }),
-      )),
-      // Output value is (a + b + carry) % 256; carry is unknown at this point
-      // (provided by a separate CarryEq proof), so use 0 as placeholder.
-      Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: 0 }),
-    )),
-    Proof::SubByteSym { byte_idx, b, c } => Ok(WFF::Equal(
-      Box::new(Term::ByteAdd(
-        Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
-        Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *c }),
-        Box::new(Term::CarryTerm { byte_idx: *byte_idx }),
-      )),
-      // a = b + c + carry; carry unknown, use 0 as placeholder.
-      Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: 0 }),
-    )),
-    Proof::CarryEq { byte_idx, value } => Ok(WFF::Equal(
-      Box::new(Term::CarryTerm { byte_idx: *byte_idx }),
-      Box::new(Term::Byte(*value)),
-    )),
-    // ── Syntactic (value-free) limb-level proofs ────────────────────────
-    Proof::CarryLimbZero => Ok(WFF::Equal(
-      Box::new(Term::CarryLimb { limb_idx: 0 }),
-      Box::new(Term::Bool(false)),
-    )),
-    Proof::U29AddSym { limb_idx: j } => {
-      let mk_a = || Box::new(Term::InputLimb29 { stack_idx: 0, limb_idx: *j });
-      let mk_b = || Box::new(Term::InputLimb29 { stack_idx: 1, limb_idx: *j });
-      let mk_cin = || Box::new(Term::CarryLimb { limb_idx: *j });
-      Ok(WFF::And(
-        Box::new(WFF::Equal(
-          Box::new(Term::Add29(mk_a(), mk_b(), mk_cin())),
-          Box::new(Term::OutputLimb29 { stack_idx: 0, limb_idx: *j }),
-        )),
-        Box::new(WFF::Equal(
-          Box::new(Term::Add29Carry(mk_a(), mk_b(), mk_cin())),
-          Box::new(Term::CarryLimb { limb_idx: j + 1 }),
-        )),
-      ))
-    }
-    Proof::U24AddSym => Ok(WFF::Equal(
-      Box::new(Term::Add24(
-        Box::new(Term::InputLimb24 { stack_idx: 0 }),
-        Box::new(Term::InputLimb24 { stack_idx: 1 }),
-        Box::new(Term::CarryLimb { limb_idx: 8 }),
-      )),
-      Box::new(Term::OutputLimb24 { stack_idx: 0 }),
-    )),
-    Proof::U29SubSym { limb_idx: j } => {
-      // Verifies a - b = c as b + c = a at the limb level.
-      let mk_b = || Box::new(Term::InputLimb29 { stack_idx: 1, limb_idx: *j });
-      let mk_c = || Box::new(Term::OutputLimb29 { stack_idx: 0, limb_idx: *j });
-      let mk_cin = || Box::new(Term::CarryLimb { limb_idx: *j });
-      Ok(WFF::And(
-        Box::new(WFF::Equal(
-          Box::new(Term::Add29(mk_b(), mk_c(), mk_cin())),
-          Box::new(Term::InputLimb29 { stack_idx: 0, limb_idx: *j }),
-        )),
-        Box::new(WFF::Equal(
-          Box::new(Term::Add29Carry(mk_b(), mk_c(), mk_cin())),
-          Box::new(Term::CarryLimb { limb_idx: j + 1 }),
-        )),
-      ))
-    }
-    Proof::U24SubSym => Ok(WFF::Equal(
-      Box::new(Term::Add24(
-        Box::new(Term::InputLimb24 { stack_idx: 1 }),
-        Box::new(Term::OutputLimb24 { stack_idx: 0 }),
-        Box::new(Term::CarryLimb { limb_idx: 8 }),
-      )),
-      Box::new(Term::InputLimb24 { stack_idx: 0 }),
-    )),
+  // Iterative (stack-based) implementation avoids call-stack overflow on deeply
+  // nested proofs (e.g. large DIV/MUL witnesses in debug mode).
+  enum Task<'a> {
+    /// Evaluate a proof node and push its WFF result onto `wffs`.
+    Eval(&'a Proof),
+    /// Pop two WFFs and push `And(wff1, wff2)`.
+    AndIntro,
+    /// Pop one WFF (must be `Equal(a,b)`) and push `Equal(b,a)`.
+    EqSym,
+    /// Pop two WFFs (`Equal(a,b)` then `Equal(b2,c)`) and push `Equal(a,c)`.
+    EqTrans,
+    /// Pop one WFF (must be `Equal(c1,c2)`) and push the ByteAdd-congruence.
+    ByteAddThird { a: u8, b: u8 },
+    /// Same shape but for `ByteAddCarry`.
+    ByteAddCarryThird { a: u8, b: u8 },
   }
+
+  let mut tasks: Vec<Task> = vec![Task::Eval(proof)];
+  let mut wffs: Vec<WFF> = Vec::new();
+
+  while let Some(task) = tasks.pop() {
+    match task {
+      // ── Evaluation ────────────────────────────────────────────────────
+      Task::Eval(p) => match p {
+        // Recursive cases: schedule continuation + children.
+        Proof::AndIntro(p1, p2) => {
+          tasks.push(Task::AndIntro);
+          tasks.push(Task::Eval(p2));
+          tasks.push(Task::Eval(p1));
+        }
+        Proof::EqSym(p) => {
+          tasks.push(Task::EqSym);
+          tasks.push(Task::Eval(p));
+        }
+        Proof::EqTrans(p1, p2) => {
+          tasks.push(Task::EqTrans);
+          tasks.push(Task::Eval(p2));
+          tasks.push(Task::Eval(p1));
+        }
+        Proof::ByteAddThirdCongruence(p, a, b) => {
+          tasks.push(Task::ByteAddThird { a: *a, b: *b });
+          tasks.push(Task::Eval(p));
+        }
+        Proof::ByteAddCarryThirdCongruence(p, a, b) => {
+          tasks.push(Task::ByteAddCarryThird { a: *a, b: *b });
+          tasks.push(Task::Eval(p));
+        }
+
+        // Leaf cases: compute WFF and push directly.
+        Proof::EqRefl(t) => {
+          wffs.push(WFF::Equal(Box::new(t.clone()), Box::new(t.clone())));
+        }
+Proof::ByteAndEq(a, b) => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::ByteAnd(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
+            Box::new(Term::Byte(*a & *b)),
+          ));
+        }
+        Proof::ByteOrEq(a, b) => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::ByteOr(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
+            Box::new(Term::Byte(*a | *b)),
+          ));
+        }
+        Proof::ByteXorEq(a, b) => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::ByteXor(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
+            Box::new(Term::Byte(*a ^ *b)),
+          ));
+        }
+        Proof::U29AddEq(a, b, cin, c) => {
+          if *a >= (1u32 << 29) || *b >= (1u32 << 29) || *c >= (1u32 << 29) {
+            return Err(VerifyError::UnexpectedProofVariant { expected: "u29 inputs" });
+          }
+          let total = *a + *b + (*cin as u32);
+          let sum = total & ((1u32 << 29) - 1);
+          let pairs = [
+            ((sum & 0xFF) as u8,          (*c & 0xFF) as u8),
+            (((sum >> 8) & 0xFF) as u8,   ((*c >> 8) & 0xFF) as u8),
+            (((sum >> 16) & 0xFF) as u8,  ((*c >> 16) & 0xFF) as u8),
+            (((sum >> 24) & 0x1F) as u8,  ((*c >> 24) & 0x1F) as u8),
+          ];
+          wffs.push(and_wffs(
+            pairs
+              .into_iter()
+              .map(|(lhs, rhs)| WFF::Equal(Box::new(Term::Byte(lhs)), Box::new(Term::Byte(rhs))))
+              .collect(),
+          ));
+        }
+        Proof::U24AddEq(a, b, cin, c) => {
+          if *a >= (1u32 << 24) || *b >= (1u32 << 24) || *c >= (1u32 << 24) {
+            return Err(VerifyError::UnexpectedProofVariant { expected: "u24 inputs" });
+          }
+          let total = *a + *b + (*cin as u32);
+          let sum = total & ((1u32 << 24) - 1);
+          let pairs = [
+            ((sum & 0xFF) as u8,         (*c & 0xFF) as u8),
+            (((sum >> 8) & 0xFF) as u8,  ((*c >> 8) & 0xFF) as u8),
+            (((sum >> 16) & 0xFF) as u8, ((*c >> 16) & 0xFF) as u8),
+          ];
+          wffs.push(and_wffs(
+            pairs
+              .into_iter()
+              .map(|(lhs, rhs)| WFF::Equal(Box::new(Term::Byte(lhs)), Box::new(Term::Byte(rhs))))
+              .collect(),
+          ));
+        }
+        Proof::U15MulEq(a, b) => {
+          if *a > 0x7FFF || *b > 0x7FFF {
+            return Err(VerifyError::UnexpectedProofVariant { expected: "u15 inputs" });
+          }
+          let a_lo = (*a & 0xFF) as u8;
+          let a_hi = ((*a >> 8) & 0x7F) as u8;
+          let b_lo = (*b & 0xFF) as u8;
+          let b_hi = ((*b >> 8) & 0x7F) as u8;
+          let p00 = a_lo as u16 * b_lo as u16;
+          let p01 = a_lo as u16 * b_hi as u16;
+          let p10 = a_hi as u16 * b_lo as u16;
+          let p11 = a_hi as u16 * b_hi as u16;
+          let leaves = vec![
+            WFF::Equal(
+              Box::new(Term::ByteMulLow(Box::new(Term::Byte(a_lo)), Box::new(Term::Byte(b_lo)))),
+              Box::new(Term::Byte((p00 & 0xFF) as u8)),
+            ),
+            WFF::Equal(
+              Box::new(Term::ByteMulHigh(Box::new(Term::Byte(a_lo)), Box::new(Term::Byte(b_lo)))),
+              Box::new(Term::Byte((p00 >> 8) as u8)),
+            ),
+            WFF::Equal(
+              Box::new(Term::ByteMulLow(Box::new(Term::Byte(a_lo)), Box::new(Term::Byte(b_hi)))),
+              Box::new(Term::Byte((p01 & 0xFF) as u8)),
+            ),
+            WFF::Equal(
+              Box::new(Term::ByteMulHigh(Box::new(Term::Byte(a_lo)), Box::new(Term::Byte(b_hi)))),
+              Box::new(Term::Byte((p01 >> 8) as u8)),
+            ),
+            WFF::Equal(
+              Box::new(Term::ByteMulLow(Box::new(Term::Byte(a_hi)), Box::new(Term::Byte(b_lo)))),
+              Box::new(Term::Byte((p10 & 0xFF) as u8)),
+            ),
+            WFF::Equal(
+              Box::new(Term::ByteMulHigh(Box::new(Term::Byte(a_hi)), Box::new(Term::Byte(b_lo)))),
+              Box::new(Term::Byte((p10 >> 8) as u8)),
+            ),
+            WFF::Equal(
+              Box::new(Term::ByteMulLow(Box::new(Term::Byte(a_hi)), Box::new(Term::Byte(b_hi)))),
+              Box::new(Term::Byte((p11 & 0xFF) as u8)),
+            ),
+            WFF::Equal(
+              Box::new(Term::ByteMulHigh(Box::new(Term::Byte(a_hi)), Box::new(Term::Byte(b_hi)))),
+              Box::new(Term::Byte((p11 >> 8) as u8)),
+            ),
+          ];
+          wffs.push(and_wffs(leaves));
+        }
+        Proof::IteTrueEq(a, b) => {
+          let ty_a = infer_ty(a)?;
+          let ty_b = infer_ty(b)?;
+          if ty_a != ty_b {
+            return Err(VerifyError::UnexpectedTermVariant { expected: "matching type subterms" });
+          }
+          wffs.push(WFF::Equal(
+            Box::new(Term::Ite(Box::new(Term::Bool(true)), Box::new(a.clone()), Box::new(b.clone()))),
+            Box::new(a.clone()),
+          ));
+        }
+        Proof::IteFalseEq(a, b) => {
+          let ty_a = infer_ty(a)?;
+          let ty_b = infer_ty(b)?;
+          if ty_a != ty_b {
+            return Err(VerifyError::UnexpectedTermVariant { expected: "matching type subterms" });
+          }
+          wffs.push(WFF::Equal(
+            Box::new(Term::Ite(Box::new(Term::Bool(false)), Box::new(a.clone()), Box::new(b.clone()))),
+            Box::new(b.clone()),
+          ));
+        }
+        Proof::ByteMulLowEq(a, b) => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::ByteMulLow(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
+            Box::new(Term::Byte(((*a as u16 * *b as u16) & 0xFF) as u8)),
+          ));
+        }
+        Proof::ByteMulHighEq(a, b) => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::ByteMulHigh(Box::new(Term::Byte(*a)), Box::new(Term::Byte(*b)))),
+            Box::new(Term::Byte(((*a as u16 * *b as u16) >> 8) as u8)),
+          ));
+        }
+        Proof::U15MulLowEq(a, b) => {
+          if *a > 0x7FFF || *b > 0x7FFF {
+            return Err(VerifyError::UnexpectedProofVariant { expected: "u15 inputs" });
+          }
+          let lo = ((*a as u32 * *b as u32) & 0x7FFF) as u16;
+          wffs.push(WFF::Equal(
+            Box::new(Term::U15MulLow(Box::new(Term::U15(*a)), Box::new(Term::U15(*b)))),
+            Box::new(Term::U15(lo)),
+          ));
+        }
+        Proof::U15MulHighEq(a, b) => {
+          if *a > 0x7FFF || *b > 0x7FFF {
+            return Err(VerifyError::UnexpectedProofVariant { expected: "u15 inputs" });
+          }
+          let hi = ((*a as u32 * *b as u32) >> 15) as u16;
+          wffs.push(WFF::Equal(
+            Box::new(Term::U15MulHigh(Box::new(Term::U15(*a)), Box::new(Term::U15(*b)))),
+            Box::new(Term::U15(hi)),
+          ));
+        }
+        Proof::PartialMul15Bind { col_idx, lo, hi } => {
+          wffs.push(WFF::And(
+            Box::new(WFF::Equal(
+              Box::new(Term::PartialMul15 { col_idx: *col_idx }),
+              Box::new(Term::U15(*lo)),
+            )),
+            Box::new(WFF::Equal(
+              Box::new(Term::PartialMul15 { col_idx: col_idx.wrapping_add(128) }),
+              Box::new(Term::U15(*hi)),
+            )),
+          ));
+        }
+        // ── Per-opcode axiom proofs: each infers Equal(OutputTerm{0,0}, OutputTerm{0,0}). ──
+        Proof::PushAxiom
+        | Proof::DupAxiom { .. }
+        | Proof::SwapAxiom { .. }
+        | Proof::StructuralAxiom { .. }
+        | Proof::MloadAxiom
+        | Proof::MstoreAxiom { .. }
+        | Proof::MemCopyAxiom { .. }
+        | Proof::SloadAxiom
+        | Proof::SstoreAxiom
+        | Proof::TransientAxiom { .. }
+        | Proof::KeccakAxiom
+        | Proof::EnvAxiom { .. }
+        | Proof::ExternalStateAxiom { .. }
+        | Proof::TerminateAxiom { .. }
+        | Proof::CallAxiom { .. }
+        | Proof::CreateAxiom { .. }
+        | Proof::SelfdestructAxiom
+        | Proof::LogAxiom { .. } => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
+            Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
+          ));
+        }
+        Proof::InputEq { stack_idx, byte_idx, value } => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::InputTerm { stack_idx: *stack_idx, byte_idx: *byte_idx, value: *value }),
+            Box::new(Term::Byte(*value)),
+          ));
+        }
+        Proof::OutputEq { stack_idx, byte_idx, value } => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::OutputTerm { stack_idx: *stack_idx, byte_idx: *byte_idx, value: *value }),
+            Box::new(Term::Byte(*value)),
+          ));
+        }
+        Proof::PcBeforeEq { byte_idx, value } => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::PcBefore { byte_idx: *byte_idx }),
+            Box::new(Term::Byte(*value)),
+          ));
+        }
+        Proof::PcStep { instr_size } => {
+          wffs.push(wff_pc_step(*instr_size));
+        }
+        // ── Symbolic byte-level ops ─────────────────────────────────────
+        Proof::ByteAndSym { byte_idx, a, b } => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::ByteAnd(
+              Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
+              Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
+            )),
+            Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a & *b }),
+          ));
+        }
+        Proof::ByteOrSym { byte_idx, a, b } => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::ByteOr(
+              Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
+              Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
+            )),
+            Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a | *b }),
+          ));
+        }
+        Proof::ByteXorSym { byte_idx, a, b } => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::ByteXor(
+              Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
+              Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
+            )),
+            Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a ^ *b }),
+          ));
+        }
+        Proof::ByteNotSym { byte_idx, a } => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::ByteXor(
+              Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
+              Box::new(Term::Byte(0xFF)),
+            )),
+            Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a ^ 0xFF }),
+          ));
+        }
+        Proof::AddByteSym { byte_idx, a, b } => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::ByteAdd(
+              Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *a }),
+              Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
+              Box::new(Term::CarryTerm { byte_idx: *byte_idx }),
+            )),
+            // Output value is (a + b + carry) % 256; carry is unknown at this point
+            // (provided by a separate CarryEq proof), so use 0 as placeholder.
+            Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: 0 }),
+          ));
+        }
+        Proof::SubByteSym { byte_idx, b, c } => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::ByteAdd(
+              Box::new(Term::InputTerm { stack_idx: 1, byte_idx: *byte_idx, value: *b }),
+              Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: *byte_idx, value: *c }),
+              Box::new(Term::CarryTerm { byte_idx: *byte_idx }),
+            )),
+            // a = b + c + carry; carry unknown, use 0 as placeholder.
+            Box::new(Term::InputTerm { stack_idx: 0, byte_idx: *byte_idx, value: 0 }),
+          ));
+        }
+        Proof::CarryEq { byte_idx, value } => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::CarryTerm { byte_idx: *byte_idx }),
+            Box::new(Term::Byte(*value)),
+          ));
+        }
+        // ── Syntactic (value-free) limb-level proofs ────────────────────
+        Proof::CarryLimbZero => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::CarryLimb { limb_idx: 0 }),
+            Box::new(Term::Bool(false)),
+          ));
+        }
+        Proof::U29AddSym { limb_idx: j } => {
+          let mk_a = || Box::new(Term::InputLimb29 { stack_idx: 0, limb_idx: *j });
+          let mk_b = || Box::new(Term::InputLimb29 { stack_idx: 1, limb_idx: *j });
+          let mk_cin = || Box::new(Term::CarryLimb { limb_idx: *j });
+          wffs.push(WFF::And(
+            Box::new(WFF::Equal(
+              Box::new(Term::Add29(mk_a(), mk_b(), mk_cin())),
+              Box::new(Term::OutputLimb29 { stack_idx: 0, limb_idx: *j }),
+            )),
+            Box::new(WFF::Equal(
+              Box::new(Term::Add29Carry(mk_a(), mk_b(), mk_cin())),
+              Box::new(Term::CarryLimb { limb_idx: j + 1 }),
+            )),
+          ));
+        }
+        Proof::U24AddSym => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::Add24(
+              Box::new(Term::InputLimb24 { stack_idx: 0 }),
+              Box::new(Term::InputLimb24 { stack_idx: 1 }),
+              Box::new(Term::CarryLimb { limb_idx: 8 }),
+            )),
+            Box::new(Term::OutputLimb24 { stack_idx: 0 }),
+          ));
+        }
+        Proof::U29SubSym { limb_idx: j } => {
+          // Verifies a - b = c as b + c = a at the limb level.
+          let mk_b = || Box::new(Term::InputLimb29 { stack_idx: 1, limb_idx: *j });
+          let mk_c = || Box::new(Term::OutputLimb29 { stack_idx: 0, limb_idx: *j });
+          let mk_cin = || Box::new(Term::CarryLimb { limb_idx: *j });
+          wffs.push(WFF::And(
+            Box::new(WFF::Equal(
+              Box::new(Term::Add29(mk_b(), mk_c(), mk_cin())),
+              Box::new(Term::InputLimb29 { stack_idx: 0, limb_idx: *j }),
+            )),
+            Box::new(WFF::Equal(
+              Box::new(Term::Add29Carry(mk_b(), mk_c(), mk_cin())),
+              Box::new(Term::CarryLimb { limb_idx: j + 1 }),
+            )),
+          ));
+        }
+        Proof::U24SubSym => {
+          wffs.push(WFF::Equal(
+            Box::new(Term::Add24(
+              Box::new(Term::InputLimb24 { stack_idx: 1 }),
+              Box::new(Term::OutputLimb24 { stack_idx: 0 }),
+              Box::new(Term::CarryLimb { limb_idx: 8 }),
+            )),
+            Box::new(Term::InputLimb24 { stack_idx: 0 }),
+          ));
+        }
+      },
+
+      // ── Continuations ─────────────────────────────────────────────────
+      Task::AndIntro => {
+        let wff2 = wffs.pop().expect("AndIntro: result stack underflow");
+        let wff1 = wffs.pop().expect("AndIntro: result stack underflow");
+        wffs.push(WFF::And(Box::new(wff1), Box::new(wff2)));
+      }
+      Task::EqSym => {
+        let wff = wffs.pop().expect("EqSym: result stack underflow");
+        match wff {
+          WFF::Equal(a, b) => wffs.push(WFF::Equal(b, a)),
+          _ => return Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" }),
+        }
+      }
+      Task::EqTrans => {
+        let wff2 = wffs.pop().expect("EqTrans: result stack underflow");
+        let wff1 = wffs.pop().expect("EqTrans: result stack underflow");
+        match (wff1, wff2) {
+          (WFF::Equal(a, b), WFF::Equal(b2, c)) if *b == *b2 => {
+            wffs.push(WFF::Equal(a, c));
+          }
+          (WFF::Equal(_, _), WFF::Equal(_, _)) => {
+            return Err(VerifyError::TransitivityMismatch);
+          }
+          _ => return Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" }),
+        }
+      }
+      Task::ByteAddThird { a, b } => {
+        let wff = wffs.pop().expect("ByteAddThird: result stack underflow");
+        match wff {
+          WFF::Equal(c1, c2) => wffs.push(WFF::Equal(
+            Box::new(Term::ByteAdd(Box::new(Term::Byte(a)), Box::new(Term::Byte(b)), c1)),
+            Box::new(Term::ByteAdd(Box::new(Term::Byte(a)), Box::new(Term::Byte(b)), c2)),
+          )),
+          _ => return Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" }),
+        }
+      }
+      Task::ByteAddCarryThird { a, b } => {
+        let wff = wffs.pop().expect("ByteAddCarryThird: result stack underflow");
+        match wff {
+          WFF::Equal(c1, c2) => wffs.push(WFF::Equal(
+            Box::new(Term::ByteAddCarry(Box::new(Term::Byte(a)), Box::new(Term::Byte(b)), c1)),
+            Box::new(Term::ByteAddCarry(Box::new(Term::Byte(a)), Box::new(Term::Byte(b)), c2)),
+          )),
+          _ => return Err(VerifyError::UnexpectedProofVariant { expected: "equality proof" }),
+        }
+      }
+    }
+  }
+
+  wffs.pop().ok_or(VerifyError::UnexpectedProofVariant { expected: "proof result" })
 }
 
 // ============================================================
@@ -1377,7 +1466,7 @@ pub fn word_mul_with_hybrid_witness(
   )
 }
 
-fn mul_u256_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
+pub fn mul_u256_mod(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
   let mut limbs = [0u32; 64];
   for i in 0..32 {
     let ai = a[31 - i] as u32;
@@ -1664,6 +1753,31 @@ pub fn verify_word_mul_hybrid_witness(
 // Core WFFs
 // ============================================================
 
+/// Directly build the WFF for `Proof::U29AddEq(a29, b29, cin, c29)` without
+/// going through `infer_proof`.  Produces the same four `WFF::Equal(Byte(x),
+/// Byte(y))` leaves that `infer_proof(U29AddEq {...})` returns.
+#[inline]
+fn wff_u29_add_eq_direct(a29: u32, b29: u32, cin: bool, c29: u32) -> WFF {
+  let sum = (a29 + b29 + cin as u32) & ((1u32 << 29) - 1);
+  and_wffs(vec![
+    WFF::Equal(Box::new(Term::Byte((sum & 0xFF) as u8)),           Box::new(Term::Byte((c29 & 0xFF) as u8))),
+    WFF::Equal(Box::new(Term::Byte(((sum >> 8) & 0xFF) as u8)),    Box::new(Term::Byte(((c29 >> 8) & 0xFF) as u8))),
+    WFF::Equal(Box::new(Term::Byte(((sum >> 16) & 0xFF) as u8)),   Box::new(Term::Byte(((c29 >> 16) & 0xFF) as u8))),
+    WFF::Equal(Box::new(Term::Byte(((sum >> 24) & 0x1F) as u8)),   Box::new(Term::Byte(((c29 >> 24) & 0x1F) as u8))),
+  ])
+}
+
+/// Directly build the WFF for `Proof::U24AddEq(a24, b24, cin, c24)`.
+#[inline]
+fn wff_u24_add_eq_direct(a24: u32, b24: u32, cin: bool, c24: u32) -> WFF {
+  let sum = (a24 + b24 + cin as u32) & ((1u32 << 24) - 1);
+  and_wffs(vec![
+    WFF::Equal(Box::new(Term::Byte((sum & 0xFF) as u8)),           Box::new(Term::Byte((c24 & 0xFF) as u8))),
+    WFF::Equal(Box::new(Term::Byte(((sum >> 8) & 0xFF) as u8)),    Box::new(Term::Byte(((c24 >> 8) & 0xFF) as u8))),
+    WFF::Equal(Box::new(Term::Byte(((sum >> 16) & 0xFF) as u8)),   Box::new(Term::Byte(((c24 >> 16) & 0xFF) as u8))),
+  ])
+}
+
 pub fn wff_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
   let mut leaves = Vec::with_capacity(9);
   let mut carry = false;
@@ -1673,18 +1787,16 @@ pub fn wff_add(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
     let a29 = extract_limb_le_bits(a, base, 29);
     let b29 = extract_limb_le_bits(b, base, 29);
     let c29 = extract_limb_le_bits(c, base, 29);
-    let leaf = Proof::U29AddEq(a29, b29, carry, c29);
-    leaves.push(infer_proof(&leaf).expect("u29 add leaf must infer"));
-
-    let total = a29 + b29 + carry as u32;
+    let cin = carry;
+    let total = a29 + b29 + cin as u32;
     carry = total >= (1u32 << 29);
+    leaves.push(wff_u29_add_eq_direct(a29, b29, cin, c29));
   }
 
   let a24 = extract_limb_le_bits(a, 232, 24);
   let b24 = extract_limb_le_bits(b, 232, 24);
   let c24 = extract_limb_le_bits(c, 232, 24);
-  let top_leaf = Proof::U24AddEq(a24, b24, carry, c24);
-  leaves.push(infer_proof(&top_leaf).expect("u24 add leaf must infer"));
+  leaves.push(wff_u24_add_eq_direct(a24, b24, carry, c24));
 
   and_wffs(leaves)
 }
@@ -1693,31 +1805,70 @@ pub fn wff_sub(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
   wff_add(b, c, a)
 }
 
-pub fn wff_mul(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
+/// Directly build the WFF for `Proof::U15MulEq(a, b)` without going through
+/// `infer_proof`.  Produces the same eight `WFF::Equal` nodes that
+/// `infer_proof(U15MulEq { a, b })` returns.
+#[inline]
+fn wff_u15_mul_eq_direct(a: u16, b: u16) -> WFF {
+  let a_lo = (a & 0xFF) as u8;
+  let a_hi = ((a >> 8) & 0x7F) as u8;
+  let b_lo = (b & 0xFF) as u8;
+  let b_hi = ((b >> 8) & 0x7F) as u8;
+  let p00 = a_lo as u16 * b_lo as u16;
+  let p01 = a_lo as u16 * b_hi as u16;
+  let p10 = a_hi as u16 * b_lo as u16;
+  let p11 = a_hi as u16 * b_hi as u16;
+  and_wffs(vec![
+    WFF::Equal(Box::new(Term::ByteMulLow(Box::new(Term::Byte(a_lo)), Box::new(Term::Byte(b_lo)))),  Box::new(Term::Byte((p00 & 0xFF) as u8))),
+    WFF::Equal(Box::new(Term::ByteMulHigh(Box::new(Term::Byte(a_lo)), Box::new(Term::Byte(b_lo)))), Box::new(Term::Byte((p00 >> 8)  as u8))),
+    WFF::Equal(Box::new(Term::ByteMulLow(Box::new(Term::Byte(a_lo)), Box::new(Term::Byte(b_hi)))),  Box::new(Term::Byte((p01 & 0xFF) as u8))),
+    WFF::Equal(Box::new(Term::ByteMulHigh(Box::new(Term::Byte(a_lo)), Box::new(Term::Byte(b_hi)))), Box::new(Term::Byte((p01 >> 8)  as u8))),
+    WFF::Equal(Box::new(Term::ByteMulLow(Box::new(Term::Byte(a_hi)), Box::new(Term::Byte(b_lo)))),  Box::new(Term::Byte((p10 & 0xFF) as u8))),
+    WFF::Equal(Box::new(Term::ByteMulHigh(Box::new(Term::Byte(a_hi)), Box::new(Term::Byte(b_lo)))), Box::new(Term::Byte((p10 >> 8)  as u8))),
+    WFF::Equal(Box::new(Term::ByteMulLow(Box::new(Term::Byte(a_hi)), Box::new(Term::Byte(b_hi)))),  Box::new(Term::Byte((p11 & 0xFF) as u8))),
+    WFF::Equal(Box::new(Term::ByteMulHigh(Box::new(Term::Byte(a_hi)), Box::new(Term::Byte(b_hi)))), Box::new(Term::Byte((p11 >> 8)  as u8))),
+  ])
+}
+
+pub fn wff_mul(a: &[u8; 32], b: &[u8; 32], _c: &[u8; 32]) -> WFF {
   let expected = mul_u256_mod(a, b);
   #[cfg(debug_assertions)]
   debug_assert_mul_consistency(a, b, &expected);
 
-  let mut leaves: Vec<WFF> = mul_local_proof_leaves(a, b)
-    .into_iter()
-    .map(|leaf| infer_proof(&leaf).expect("u15 mul leaf must infer"))
-    .collect();
-  leaves.reserve(9);
+  let a_limbs = word_to_u15_limbs(a);
+  let b_limbs = word_to_u15_limbs(b);
+  let b_top = b_limbs
+    .iter()
+    .rposition(|&v| v != 0)
+    .map(|idx| idx + 1)
+    .unwrap_or(0);
 
-  for limb in 0..8 {
-    let base = 29 * limb;
-    let expected29 = extract_limb_le_bits(&expected, base, 29);
-    let c29 = extract_limb_le_bits(c, base, 29);
-    let leaf = Proof::U29AddEq(expected29, 0, false, c29);
-    leaves.push(infer_proof(&leaf).expect("u29 output-check leaf must infer"));
+  if b_top == 0 {
+    // a * b = 0: single trivially-true leaf mirrors prove_mul's fallback.
+    return wff_u29_add_eq_direct(0, 0, false, 0);
   }
 
-  let expected24 = extract_limb_le_bits(&expected, 232, 24);
-  let c24 = extract_limb_le_bits(c, 232, 24);
-  let top_leaf = Proof::U24AddEq(expected24, 0, false, c24);
-  leaves.push(infer_proof(&top_leaf).expect("u24 output-check leaf must infer"));
+  let mut leaves = Vec::new();
+  for (i, &av) in a_limbs.iter().enumerate() {
+    if av == 0 {
+      continue;
+    }
+    let j_max = (17 - i + 1).min(b_top);
+    for j in 0..j_max {
+      let bv = b_limbs[j];
+      if bv == 0 {
+        continue;
+      }
+      leaves.push(wff_u15_mul_eq_direct(av, bv));
+    }
+  }
 
-  and_wffs(leaves)
+  if leaves.is_empty() {
+    // a * b = 0: single trivially-true leaf mirrors prove_mul's fallback.
+    wff_u29_add_eq_direct(0, 0, false, 0)
+  } else {
+    and_wffs(leaves)
+  }
 }
 
 pub fn wff_div(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> WFF {
@@ -2027,19 +2178,13 @@ pub fn prove_mul(a: &[u8; 32], b: &[u8; 32], _c: &[u8; 32]) -> Proof {
   #[cfg(debug_assertions)]
   debug_assert_mul_consistency(a, b, &expected);
 
-  let mut leaves = mul_local_proof_leaves(a, b);
-  leaves.reserve(9);
-
-  for limb in 0..8 {
-    let base = 29 * limb;
-    let expected29 = extract_limb_le_bits(&expected, base, 29);
-    leaves.push(Proof::U29AddEq(expected29, 0, false, expected29));
+  let leaves = mul_local_proof_leaves(a, b);
+  if leaves.is_empty() {
+    // a * b = 0 (one operand is zero): emit a single trivially-true leaf.
+    Proof::U29AddEq(0, 0, false, 0)
+  } else {
+    and_proofs(leaves)
   }
-
-  let expected24 = extract_limb_le_bits(&expected, 232, 24);
-  leaves.push(Proof::U24AddEq(expected24, 0, false, expected24));
-
-  and_proofs(leaves)
 }
 
 fn word_to_u15_limbs(word: &[u8; 32]) -> [u16; 18] {
@@ -2064,16 +2209,31 @@ fn word_to_u15_limbs(word: &[u8; 32]) -> [u16; 18] {
 }
 
 fn mul_local_proof_leaves(a: &[u8; 32], b: &[u8; 32]) -> Vec<Proof> {
-  let mut leaves = Vec::new();
   let a_limbs = word_to_u15_limbs(a);
   let b_limbs = word_to_u15_limbs(b);
 
+  // b의 최고 유효 limb 인덱스를 미리 계산해 내부 루프 상한을 줄인다.
+  let b_top = b_limbs
+    .iter()
+    .rposition(|&v| v != 0)
+    .map(|idx| idx + 1)
+    .unwrap_or(0);
+
+  if b_top == 0 {
+    return Vec::new();
+  }
+
+  let mut leaves = Vec::new();
+
   for (i, &av) in a_limbs.iter().enumerate() {
-    for (j, &bv) in b_limbs.iter().enumerate() {
-      if i + j > 17 {
-        continue;
-      }
-      if av == 0 || bv == 0 {
+    if av == 0 {
+      continue;
+    }
+    // i + j <= 17 이고 j < b_top 이어야 하므로 내부 루프 상한을 좁힌다.
+    let j_max = (17 - i + 1).min(b_top);
+    for j in 0..j_max {
+      let bv = b_limbs[j];
+      if bv == 0 {
         continue;
       }
       leaves.push(Proof::U15MulEq(av, bv));
@@ -3004,6 +3164,78 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
       memo.insert(key, idx);
       idx
     }
+    // ── 15-bit MUL intermediates ──────────────────────────────────────────
+    Term::U15(v) => {
+      let key = (OP_U15_LIT, 0, 0, 0, *v as u32, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U15_LIT,
+        scalar0: *v as u32,
+        value: *v as u32,
+        ret_ty: RET_U15,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::U15MulLow(a, b) => {
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_U15_MUL_LOW, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let val = (rows[ai as usize].value * rows[bi as usize].value) & 0x7FFF;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U15_MUL_LOW,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_U15,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::U15MulHigh(a, b) => {
+      let ai = compile_term_inner(a, rows, memo);
+      let bi = compile_term_inner(b, rows, memo);
+      let key = (OP_U15_MUL_HIGH, ai, bi, 0, 0, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let val = (rows[ai as usize].value * rows[bi as usize].value) >> 15;
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U15_MUL_HIGH,
+        arg0: ai,
+        arg1: bi,
+        value: val,
+        ret_ty: RET_U15,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Term::PartialMul15 { col_idx } => {
+      let key = (OP_PARTIAL_MUL15, 0, 0, 0, *col_idx as u32, 0, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_PARTIAL_MUL15,
+        scalar0: *col_idx as u32,
+        ret_ty: RET_U15,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
     Term::ByteAnd(a, b) => {
       let ai = compile_term_inner(a, rows, memo);
       let bi = compile_term_inner(b, rows, memo);
@@ -3287,22 +3519,13 @@ fn compile_term_inner(term: &Term, rows: &mut Vec<ProofRow>, memo: &mut Memo) ->
 fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>, memo: &mut Memo) -> u32 {
   match proof {
     Proof::AndIntro(p1, p2) => {
-      let p1i = compile_proof_inner(p1, rows, memo);
-      let p2i = compile_proof_inner(p2, rows, memo);
-      let key = (OP_AND_INTRO, p1i, p2i, 0, 0, 0, 0);
-      if let Some(&cached) = memo.get(&key) {
-        return cached;
-      }
-      let idx = rows.len() as u32;
-      rows.push(ProofRow {
-        op: OP_AND_INTRO,
-        arg0: p1i,
-        arg1: p2i,
-        ret_ty: RET_WFF_AND,
-        ..Default::default()
-      });
-      memo.insert(key, idx);
-      idx
+      // AND_INTRO is a pure structural node that adds no LUT or StackIR
+      // constraints. Skipping the row emit halves the trace for leaf-only proofs
+      // (e.g. MUL: 171 U15MulEq rows instead of 341), packing ~2x more
+      // instructions per STARK batch. Both children MUST still be compiled
+      // so their leaf rows are emitted and memoised.
+      compile_proof_inner(p1, rows, memo);
+      compile_proof_inner(p2, rows, memo)
     }
     Proof::EqRefl(t) => {
       let ti = compile_term_inner(t, rows, memo);
@@ -3592,6 +3815,59 @@ fn compile_proof_inner(proof: &Proof, rows: &mut Vec<ProofRow>, memo: &mut Memo)
         scalar1: *b as u32,
         value: (*a as u32 * *b as u32) >> 8,
         ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+
+    Proof::U15MulLowEq(a, b) => {
+      let key = (OP_U15_MUL_LOW_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U15_MUL_LOW_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        value: (*a as u32 * *b as u32) & 0x7FFF,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::U15MulHighEq(a, b) => {
+      let key = (OP_U15_MUL_HIGH_EQ, 0, 0, 0, *a as u32, *b as u32, 0);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_U15_MUL_HIGH_EQ,
+        scalar0: *a as u32,
+        scalar1: *b as u32,
+        value: (*a as u32 * *b as u32) >> 15,
+        ret_ty: RET_WFF_EQ,
+        ..Default::default()
+      });
+      memo.insert(key, idx);
+      idx
+    }
+    Proof::PartialMul15Bind { col_idx, lo, hi } => {
+      let key = (OP_PARTIAL_MUL15_BIND, 0, 0, 0, *col_idx as u32, *lo as u32, *hi as u32);
+      if let Some(&cached) = memo.get(&key) {
+        return cached;
+      }
+      let idx = rows.len() as u32;
+      rows.push(ProofRow {
+        op: OP_PARTIAL_MUL15_BIND,
+        scalar0: *col_idx as u32,
+        scalar1: *lo as u32,
+        scalar2: *hi as u32,
+        value: *lo as u32,
+        ret_ty: RET_WFF_AND,
         ..Default::default()
       });
       memo.insert(key, idx);

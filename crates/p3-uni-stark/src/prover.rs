@@ -14,12 +14,11 @@ use p3_util::log2_strict_usize;
 use tracing::{debug_span, info_span, instrument};
 
 use crate::{
-  Commitments, Domain, OpenedValues, PackedChallenge, PackedVal, PreprocessedProverData, Proof,
-  ProverConstraintFolder, StarkGenericConfig, SymbolicAirBuilder, Val, VerifierConstraintFolder,
-  get_log_num_quotient_chunks, get_symbolic_constraints,
+  AirConstraintHints, Commitments, Domain, OpenedValues, PackedChallenge, PackedVal,
+  PreprocessedProverData, Proof, ProverConstraintFolder, StarkGenericConfig, SymbolicAirBuilder,
+  Val, VerifierConstraintFolder, compute_air_constraint_hints,
 };
 
-#[instrument(skip_all)]
 #[allow(clippy::multiple_bound_locations, clippy::type_repetition_in_bounds)] // cfg not supported in where clauses?
 pub fn prove_with_preprocessed<
   SC,
@@ -36,6 +35,40 @@ where
   SC: StarkGenericConfig,
   A: Air<SymbolicAirBuilder<Val<SC>>> + for<'a> Air<ProverConstraintFolder<'a, SC>>,
 {
+  let pp_width = preprocessed.map_or(0, |pp| pp.width);
+  let hints = compute_air_constraint_hints::<Val<SC>, A>(
+    air,
+    pp_width,
+    public_values.len(),
+    config.is_zk(),
+  );
+  prove_with_preprocessed_hinted(config, air, trace, public_values, preprocessed, hints)
+}
+
+/// Like [`prove_with_preprocessed`] but accepts pre-computed [`AirConstraintHints`],
+/// skipping the symbolic constraint evaluation step.
+///
+/// Use this when the same AIR type is proved repeatedly: compute hints once via
+/// [`compute_air_constraint_hints`], cache them (e.g. in a `std::sync::OnceLock`),
+/// and pass them here on every subsequent call to avoid redundant symbolic eval overhead.
+#[instrument(skip_all)]
+#[allow(clippy::multiple_bound_locations, clippy::type_repetition_in_bounds)]
+pub fn prove_with_preprocessed_hinted<
+  SC,
+  #[cfg(debug_assertions)] A: for<'a> Air<crate::check_constraints::DebugConstraintBuilder<'a, Val<SC>>>,
+  #[cfg(not(debug_assertions))] A,
+>(
+  config: &SC,
+  air: &A,
+  trace: RowMajorMatrix<Val<SC>>,
+  public_values: &[Val<SC>],
+  preprocessed: Option<&PreprocessedProverData<SC>>,
+  hints: AirConstraintHints,
+) -> Proof<SC>
+where
+  SC: StarkGenericConfig,
+  A: Air<SymbolicAirBuilder<Val<SC>>> + for<'a> Air<ProverConstraintFolder<'a, SC>>,
+{
   #[cfg(debug_assertions)]
   crate::check_constraints::check_constraints(air, &trace, public_values);
 
@@ -44,12 +77,7 @@ where
   let log_degree = log2_strict_usize(degree);
   let log_ext_degree = log_degree + config.is_zk();
 
-  // Get preprocessed width for symbolic constraint evaluation.
-  //
-  // - If reusable preprocessed prover data is provided, trust its width and degree_bits
-  //   (and enforce consistency).
-  // - Otherwise, if the AIR defines preprocessed columns, we treat it as an error:
-  //   callers must use `setup_preprocessed` and pass the resulting data in.
+  // Get preprocessed width; validate degree_bits consistency with the provided prover data.
   let preprocessed_width = preprocessed.map_or_else(
     || {
       if let Some(preprocessed_trace) = air.preprocessed_trace() {
@@ -74,51 +102,9 @@ where
     },
   );
 
-  // Compute the constraint polynomials as vectors of symbolic expressions.
-  let symbolic_constraints = get_symbolic_constraints(air, preprocessed_width, public_values.len());
-
-  // Count the number of constraints that we have.
-  let constraint_count = symbolic_constraints.len();
-
-  // Each constraint polynomial looks like `C_j(X_1, ..., X_w, Y_1, ..., Y_w, Z_1, ..., Z_j)`.
-  // When evaluated on a given row, the X_i's will be the `i`'th element of the that row, the
-  // Y_i's will be the `i`'th element of the next row and the Z_i's will be evaluations of
-  // selector polynomials on the given row index.
-  //
-  // When we convert to working with polynomials, the `X_i`'s and `Y_i`'s will be replaced by the
-  // degree `N - 1` polynomials `T_i(x)` and `T_i(hx)` respectively. The selector polynomials are
-  //  a little more complicated however.
-  //
-  // In our our case, the selector polynomials are `S_1(x) = is_first_row`, `S_2(x) = is_last_row`
-  // and `S_3(x) = is_transition`. Both `S_1(x)` and `S_2(x)` are polynomials of degree `N - 1`
-  // as they must be non zero only at a single location in the initial domain. However, `is_transition`
-  // is a polynomial of degree `1` as it simply need to be `0` on the last row.
-  //
-  // The constraint degree (`deg(C)`) is the linear factor of `N` in the constraint polynomial. In other
-  // words, it is roughly the total degree of `C` however, we treat `Z_3` as a constant term which does
-  // not contribute to the degree.
-  //
-  // E.g. `C_j = Z_1 * (X_1^3 - X_2 * X_3 * X_4)` would have degree `4`.
-  //      `C_j = Z_3 * (X_1^3 - X_2 * X_3 * X_4)` would have degree `3`.
-  //
-  // The point of all this is that, defining:
-  //          C(x) = C(T_1(x), ..., T_w(x), T_1(hx), ... T_w(hx), S_1(x), S_2(x), S_3(x))
-  // We get the constraint bound:
-  //          deg(C(x)) <= deg(C) * (N - 1) + 1
-  // The `+1` is due to the `is_transition` selector which is not accounted for in `deg(C)`. Note
-  // that S_i^2 should never appear in a constraint as it should just be replaced by `S_i`.
-  //
-  // For now in comments we assume that `deg(C) = 3` meaning `deg(C(x)) <= 3N - 2`
-
-  // From the degree of the constraint polynomial, compute the number
-  // of quotient polynomials we will split Q(x) into. This is chosen to
-  // always be a power of 2.
-  let log_num_quotient_chunks = get_log_num_quotient_chunks::<Val<SC>, A>(
-    air,
-    preprocessed_width,
-    public_values.len(),
-    config.is_zk(),
-  );
+  // Use pre-computed constraint info from hints — no symbolic evaluation needed.
+  let constraint_count = hints.main_constraint_count;
+  let log_num_quotient_chunks = hints.log_num_quotient_chunks;
 
   let num_quotient_chunks = 1 << (log_num_quotient_chunks + config.is_zk());
 
@@ -144,8 +130,12 @@ where
   //      trace_commit contains the root of the tree
   //      trace_data contains the entire tree.
   //          - trace_data.leaves is the matrix containing `ET`.
-  let (trace_commit, trace_data) =
-    info_span!("commit to trace data").in_scope(|| pcs.commit([(ext_trace_domain, trace)]));
+  let (trace_commit, trace_data) = {
+    #[cfg(feature = "timing")]
+    { crate::timing::record(&crate::timing::TRACE_COMMIT_NS, || info_span!("commit to trace data").in_scope(|| pcs.commit([(ext_trace_domain, trace)]))) }
+    #[cfg(not(feature = "timing"))]
+    { info_span!("commit to trace data").in_scope(|| pcs.commit([(ext_trace_domain, trace)])) }
+  };
 
   // Preprocessed commitment and prover data (if any).
   let (preprocessed_commit, preprocessed_data_ref) = preprocessed
@@ -209,16 +199,12 @@ where
   //          `C(T_1(x), ..., T_w(x), T_1(hx), ..., T_w(hx), selectors(x)) / Z_H(x)`
   // at every point in the quotient domain. The degree of `Q(x)` is `<= deg(C(x)) - N = 2N - 2` in the case
   // where `deg(C) = 3`. (See the discussion above constraint_degree for more details.)
-  let quotient_values = quotient_values(
-    air,
-    public_values,
-    trace_domain,
-    quotient_domain,
-    &trace_on_quotient_domain,
-    preprocessed_on_quotient_domain.as_ref(),
-    alpha,
-    constraint_count,
-  );
+  let quotient_values = {
+    #[cfg(feature = "timing")]
+    { crate::timing::record(&crate::timing::QUOTIENT_EVAL_NS, || quotient_values(air, public_values, trace_domain, quotient_domain, &trace_on_quotient_domain, preprocessed_on_quotient_domain.as_ref(), alpha, constraint_count)) }
+    #[cfg(not(feature = "timing"))]
+    { quotient_values(air, public_values, trace_domain, quotient_domain, &trace_on_quotient_domain, preprocessed_on_quotient_domain.as_ref(), alpha, constraint_count) }
+  };
 
   // Due to `alpha`, evaluations of `Q` all lie in the extension field `E`.
   // We flatten this into a matrix of `F` values by treating `E` as an `F`
@@ -247,8 +233,12 @@ where
   //      quotient_commit contains the root of the tree
   //      quotient_data contains the entire tree.
   //          - quotient_data.leaves is a pair of matrices containing the `q_i0(x)` and `q_i1(x)`.
-  let (quotient_commit, quotient_data) = info_span!("commit to quotient poly chunks")
-    .in_scope(|| pcs.commit_quotient(quotient_domain, quotient_flat, num_quotient_chunks));
+  let (quotient_commit, quotient_data) = {
+    #[cfg(feature = "timing")]
+    { crate::timing::record(&crate::timing::QUOTIENT_COMMIT_NS, || info_span!("commit to quotient poly chunks").in_scope(|| pcs.commit_quotient(quotient_domain, quotient_flat, num_quotient_chunks))) }
+    #[cfg(not(feature = "timing"))]
+    { info_span!("commit to quotient poly chunks").in_scope(|| pcs.commit_quotient(quotient_domain, quotient_flat, num_quotient_chunks)) }
+  };
   challenger.observe(quotient_commit.clone());
 
   // If zk is enabled, we generate random extension field values of the size of the randomized trace. If `n` is the degree of the initial trace,
@@ -298,6 +288,8 @@ where
     .expect("domain should support next_point operation");
 
   let is_random = opt_r_data.is_some();
+  #[cfg(feature = "timing")]
+  let _open_timer_start = std::time::Instant::now();
   let (opened_values, opening_proof) = info_span!("open").in_scope(|| {
     let round0 = opt_r_data.as_ref().map(|r_data| (r_data, vec![vec![zeta]]));
     let round1 = (&trace_data, vec![vec![zeta, zeta_next]]);
@@ -343,6 +335,10 @@ where
     perm_local: None,
     perm_next: None,
   };
+  #[cfg(feature = "timing")] {
+    crate::timing::OPEN_NS.fetch_add(_open_timer_start.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
+    crate::timing::PROOF_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+  }
   Proof {
     commitments,
     opened_values,
@@ -608,13 +604,63 @@ where
 /// `eval_lookup` receives a mutable [`VerifierConstraintFolder`] already populated with main,
 /// preprocessed, and permutation trace rows for a single quotient-domain position.  It should
 /// accumulate the lookup constraints via `assert_zero_ext`.
-#[instrument(skip_all)]
 #[allow(
   clippy::multiple_bound_locations,
   clippy::type_repetition_in_bounds,
   clippy::too_many_arguments
 )]
 pub fn prove_with_lookup<
+  SC,
+  #[cfg(debug_assertions)] A: for<'a> Air<crate::check_constraints::DebugConstraintBuilder<'a, Val<SC>>>,
+  #[cfg(not(debug_assertions))] A,
+>(
+  config: &SC,
+  air: &A,
+  trace: RowMajorMatrix<Val<SC>>,
+  public_values: &[Val<SC>],
+  preprocessed: Option<&PreprocessedProverData<SC>>,
+  perm_trace_fn: impl FnOnce(&[SC::Challenge]) -> Option<RowMajorMatrix<SC::Challenge>>,
+  num_perm_challenges: usize,
+  lookup_constraint_count: usize,
+  eval_lookup: impl for<'a> Fn(&mut VerifierConstraintFolder<'a, SC>) + Sync,
+) -> Proof<SC>
+where
+  SC: StarkGenericConfig,
+  A: Air<SymbolicAirBuilder<Val<SC>>> + for<'a> Air<ProverConstraintFolder<'a, SC>>,
+{
+  let pp_width = preprocessed.map_or(0, |pp| pp.width);
+  let hints = compute_air_constraint_hints::<Val<SC>, A>(
+    air,
+    pp_width,
+    public_values.len(),
+    config.is_zk(),
+  );
+  prove_with_lookup_hinted(
+    config,
+    air,
+    trace,
+    public_values,
+    preprocessed,
+    perm_trace_fn,
+    num_perm_challenges,
+    lookup_constraint_count,
+    eval_lookup,
+    hints,
+  )
+}
+
+/// Like [`prove_with_lookup`] but accepts pre-computed [`AirConstraintHints`],
+/// skipping symbolic constraint evaluation entirely.
+///
+/// Use this when the same AIR type is proved repeatedly: compute hints once via
+/// [`compute_air_constraint_hints`], cache them, and pass them here on every call.
+#[instrument(skip_all)]
+#[allow(
+  clippy::multiple_bound_locations,
+  clippy::type_repetition_in_bounds,
+  clippy::too_many_arguments
+)]
+pub fn prove_with_lookup_hinted<
   SC,
   #[cfg(debug_assertions)] A: for<'a> Air<crate::check_constraints::DebugConstraintBuilder<'a, Val<SC>>>,
   #[cfg(not(debug_assertions))] A,
@@ -632,6 +678,7 @@ pub fn prove_with_lookup<
   lookup_constraint_count: usize,
   // Evaluates lookup constraints into the folder (called once per quotient-domain point).
   eval_lookup: impl for<'a> Fn(&mut VerifierConstraintFolder<'a, SC>) + Sync,
+  hints: AirConstraintHints,
 ) -> Proof<SC>
 where
   SC: StarkGenericConfig,
@@ -668,18 +715,12 @@ where
     },
   );
 
-  // ── constraint counts ────────────────────────────────────────────────────
-  let main_constraint_count =
-    get_symbolic_constraints(air, preprocessed_width, public_values.len()).len();
+  // ── constraint counts (from pre-computed hints) ──────────────────────────
+  let main_constraint_count = hints.main_constraint_count;
   let total_constraint_count = main_constraint_count + lookup_constraint_count;
 
-  // ── quotient shape ───────────────────────────────────────────────────────
-  let log_num_quotient_chunks = get_log_num_quotient_chunks::<Val<SC>, A>(
-    air,
-    preprocessed_width,
-    public_values.len(),
-    config.is_zk(),
-  );
+  // ── quotient shape (from pre-computed hints) ─────────────────────────────
+  let log_num_quotient_chunks = hints.log_num_quotient_chunks;
   let num_quotient_chunks = 1 << (log_num_quotient_chunks + config.is_zk());
 
   // ── PCS + domains ────────────────────────────────────────────────────────
@@ -689,8 +730,12 @@ where
   let ext_trace_domain = pcs.natural_domain_for_degree(degree * (config.is_zk() + 1));
 
   // ── commit main trace ────────────────────────────────────────────────────
-  let (trace_commit, trace_data) =
-    info_span!("commit to trace data").in_scope(|| pcs.commit([(ext_trace_domain, trace)]));
+  let (trace_commit, trace_data) = {
+    #[cfg(feature = "timing")]
+    { crate::timing::record(&crate::timing::TRACE_COMMIT_NS, || info_span!("commit to trace data").in_scope(|| pcs.commit([(ext_trace_domain, trace)]))) }
+    #[cfg(not(feature = "timing"))]
+    { info_span!("commit to trace data").in_scope(|| pcs.commit([(ext_trace_domain, trace)])) }
+  };
 
   let (preprocessed_commit, preprocessed_data_ref) = preprocessed
     .map(|pp| (pp.commitment.clone(), &pp.prover_data))
@@ -746,6 +791,8 @@ where
 
   // ── main quotient (SIMD, no perm trace) ──────────────────────────────────
   // Uses alpha_powers based on total_constraint_count so offsets are correct.
+  #[cfg(feature = "timing")]
+  let _qeval_timer_start = std::time::Instant::now();
   let mut quotient_vals = quotient_values(
     air,
     public_values,
@@ -779,8 +826,16 @@ where
 
   // ── commit quotient polynomial ────────────────────────────────────────────
   let quotient_flat = RowMajorMatrix::new_col(quotient_vals).flatten_to_base();
-  let (quotient_commit, quotient_data) = info_span!("commit to quotient poly chunks")
-    .in_scope(|| pcs.commit_quotient(quotient_domain, quotient_flat, num_quotient_chunks));
+  #[cfg(feature = "timing")]
+  let _qeval_timer_end_ns = _qeval_timer_start.elapsed().as_nanos() as u64;
+  #[cfg(feature = "timing")]
+  crate::timing::QUOTIENT_EVAL_NS.fetch_add(_qeval_timer_end_ns, core::sync::atomic::Ordering::Relaxed);
+  let (quotient_commit, quotient_data) = {
+    #[cfg(feature = "timing")]
+    { crate::timing::record(&crate::timing::QUOTIENT_COMMIT_NS, || info_span!("commit to quotient poly chunks").in_scope(|| pcs.commit_quotient(quotient_domain, quotient_flat, num_quotient_chunks))) }
+    #[cfg(not(feature = "timing"))]
+    { info_span!("commit to quotient poly chunks").in_scope(|| pcs.commit_quotient(quotient_domain, quotient_flat, num_quotient_chunks)) }
+  };
   challenger.observe(quotient_commit.clone());
 
   // ── optional ZK randomization ─────────────────────────────────────────────
@@ -812,7 +867,8 @@ where
   // ── open all commitments ──────────────────────────────────────────────────
   let is_random = opt_r_data.is_some();
   let has_perm = perm_data_opt.is_some();
-
+  #[cfg(feature = "timing")]
+  let _open_timer_start = std::time::Instant::now();
   let (opened_values, opening_proof) = info_span!("open").in_scope(|| {
     let round0 = opt_r_data.as_ref().map(|r| (r, vec![vec![zeta]]));
     let round1 = (&trace_data, vec![vec![zeta, zeta_next]]);
@@ -876,6 +932,10 @@ where
     perm_local,
     perm_next,
   };
+  #[cfg(feature = "timing")] {
+    crate::timing::OPEN_NS.fetch_add(_open_timer_start.elapsed().as_nanos() as u64, core::sync::atomic::Ordering::Relaxed);
+    crate::timing::PROOF_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+  }
   Proof {
     commitments,
     opened_values,

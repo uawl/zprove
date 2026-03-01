@@ -20,5 +20,10 @@ serde = { version = "1", features = ["derive", "alloc"], default-features = fals
 thiserror = "2"
 tracing = { version = "0.1", default-features = false, features = ["attributes"] }
 
+[features]
+# When enabled, instruments the prover with std::time::Instant to accumulate
+# per-phase timing into global AtomicU64 counters (p3_uni_stark::timing).
+timing = []
+
 [dev-dependencies]
 p3-baby-bear = "0.4"

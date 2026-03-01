@@ -20,6 +20,7 @@
 use super::types::{CircleStarkProof, CircleStarkVerifyResult, Val, make_circle_config};
 use p3_mersenne_31::GenericPoseidon2LinearLayersMersenne31;
 use p3_poseidon2_air::{Poseidon2Air, RoundConstants, generate_vectorized_trace_rows};
+use p3_symmetric::Permutation;
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 
@@ -111,4 +112,75 @@ pub fn verify_poseidon2_permutations(proof: &CircleStarkProof) -> CircleStarkVer
   let air = default_p2_air();
   let config = make_circle_config();
   p3_uni_stark::verify(&config, &air, proof, &[])
+}
+
+/// Poseidon2 permutation 배치를 STARK으로 증명하고 **입출력 쌍**을 함께 반환한다.
+///
+/// `ChallengerTranscriptAir`가 "permutation이 올바르게 계산됐다"는 사실을
+/// 공개 입력을 통해 외부 STARK과 결합(cross-proof linking)할 때 사용한다.
+///
+/// ## 반환값
+/// `(proof, outputs)` — `proof`의 public values는 `flatten([in_i || out_i])`,
+/// `outputs[i]`는 `P2Perm(inputs[i])`의 첫 16원소 상태.
+///
+/// ## 공개 입력(public values) 레이아웃
+/// `pv = [in_0[0..16], out_0[0..16], in_1[0..16], out_1[0..16], ...]`
+/// 패딩 행(영-벡터)의 IO도 포함되므로 `pv.len() == 32 * n_padded`.
+pub fn prove_poseidon2_permutations_io(
+  inputs: Vec<[Val; P2_WIDTH]>,
+) -> (CircleStarkProof, Vec<[Val; P2_WIDTH]>) {
+  use p3_mersenne_31::Poseidon2Mersenne31;
+
+  let air = default_p2_air();
+
+  // Native permutation with the same seed
+  let perm = {
+    let mut rng = SmallRng::seed_from_u64(0xC0DE_C0DE_u64);
+    Poseidon2Mersenne31::<16>::new_from_rng_128(&mut rng)
+  };
+
+  let n_padded = inputs.len().max(4).next_power_of_two();
+  let mut padded = inputs.clone();
+  padded.resize(n_padded, [Val::new(0); P2_WIDTH]);
+
+  let n_orig = inputs.len();
+  let outputs_full: Vec<[Val; P2_WIDTH]> = padded
+    .iter()
+    .map(|inp| {
+      let mut state = *inp;
+      state = perm.permute(state);
+      state
+    })
+    .collect();
+  let outputs: Vec<[Val; P2_WIDTH]> = outputs_full[..n_orig].to_vec();
+
+  // public values: [in_0, out_0, in_1, out_1, ...] (padded rows 포함)
+  let mut pv: Vec<Val> = Vec::with_capacity(32 * n_padded);
+  for (inp, out) in padded.iter().zip(outputs_full.iter()) {
+    pv.extend_from_slice(inp);
+    pv.extend_from_slice(out);
+  }
+
+  let trace = build_p2_trace(padded);
+  let config = make_circle_config();
+  let proof = p3_uni_stark::prove(&config, &air, trace, &pv);
+  (proof, outputs)
+}
+
+/// [`prove_poseidon2_permutations_io`] 결과를 검증한다.
+///
+/// `expected_ios`는 `(input, output)` 쌍의 슬라이스.
+/// public values와 일치하는지 검사 후 STARK 증명을 검증한다.
+pub fn verify_poseidon2_permutations_io(
+  proof: &CircleStarkProof,
+  expected_ios: &[([Val; P2_WIDTH], [Val; P2_WIDTH])],
+) -> CircleStarkVerifyResult {
+  let air = default_p2_air();
+  let config = make_circle_config();
+  // public values 재결합
+  let pv: Vec<Val> = expected_ios
+    .iter()
+    .flat_map(|(inp, out)| inp.iter().chain(out.iter()).copied())
+    .collect();
+  p3_uni_stark::verify(&config, &air, proof, &pv)
 }

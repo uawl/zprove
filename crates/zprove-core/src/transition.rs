@@ -11,9 +11,9 @@
 
 use crate::semantic_proof::ProofRow;
 use crate::semantic_proof::{
-  Proof, Term, WFF, compile_proof, infer_proof, prove_addmod, prove_byte,
+  Proof, Term, WFF, compile_proof, infer_proof, mul_u256_mod, prove_addmod, prove_byte,
   prove_div, prove_eq, prove_exp, prove_gt, prove_iszero, prove_lt, prove_mod, prove_mul,
-  prove_mulmod, prove_pc_step, prove_sar, prove_sdiv, prove_sgt, prove_shl,
+  prove_mulmod, prove_sar, prove_sdiv, prove_sgt, prove_shl,
   prove_shr, prove_signextend, prove_slt, prove_smod,
   prove_and_sym, prove_or_sym, prove_xor_sym, prove_not_sym, prove_add_limb_sym, prove_sub_limb_sym,
   verify_compiled, check_wff_io_values,
@@ -27,20 +27,23 @@ use crate::zk_proof::{
   BatchInstructionMeta, BatchProofRowsManifest, CircleStarkConfig, CircleStarkProof,
   KeccakConsistencyProof, MemLogEntry, MemoryConsistencyProof, RECEIPT_BIND_TAG_LUT,
   RECEIPT_BIND_TAG_STACK, StackConsistencyProof, StateCommitment, StorageConsistencyProof,
-  collect_byte_table_queries_from_rows, commit_vm_state, compute_wff_opcode_digest,
-  make_batch_receipt_binding_public_values, make_receipt_binding_public_values,
-  prove_batch_lut_with_prep, prove_keccak_consistency, prove_link_stark, prove_memory_consistency,
-  prove_batch_stack_ir_with_prep, prove_stack_consistency, prove_stack_ir_with_prep, prove_stack_rw,
+  commit_vm_state, compute_wff_opcode_digest,
+  make_batch_receipt_binding_public_values,
+  prove_batch_lut_with_prep, prove_keccak_consistency, prove_link_stark,
+  prove_memory_consistency,
+  prove_batch_stack_ir_with_prep, prove_stack_consistency, prove_stack_rw,
   prove_storage_consistency,
-  setup_batch_proof_rows_preprocessed, setup_proof_rows_preprocessed,
+  setup_batch_proof_rows_preprocessed,
   validate_keccak_memory_cross_check, validate_manifest_rows, verify_batch_lut_with_prep,
   verify_keccak_consistency, verify_link_stark, verify_memory_consistency,
-  verify_batch_stack_ir_with_prep, verify_stack_consistency, verify_stack_ir_with_prep, verify_stack_rw,
+  verify_batch_stack_ir_with_prep, verify_stack_consistency, verify_stack_rw,
   verify_storage_consistency,
   StackRwProof,
+  write_delta::{MemWriteSet, StorWriteSet},
 };
-use p3_uni_stark::PreprocessedVerifierKey;
+use p3_uni_stark::{PreprocessedProverData, PreprocessedVerifierKey};
 use revm::bytecode::opcode;
+use crate::zk_proof::types::Val;
 
 // ============================================================
 // Types
@@ -143,11 +146,11 @@ pub struct KeccakClaim {
 /// EVM maximum CALL nesting depth (EIP-150 gas limit enforces ≤ 1024).
 pub const MAX_CALL_DEPTH: u16 = 1024;
 
-/// `inner_proof` is `None` (oracle mode): the claim is accepted with structural
-/// checks only — verifying return_data binding and call depth.
-/// When `Some`, `verify_sub_call_claim` also performs STARK receipt
-/// re-verification via `verify_batch_transaction_zk_receipt` if `batch_receipt`
-/// is present on the inner proof.
+/// `inner_proof` contains the callee's captured execution trace (always present).
+/// If `inner_proof.steps` is non-empty, `verify_sub_call_claim` performs full
+/// structural and STARK re-verification.  Empty `steps` means the callee was a
+/// precompile or empty account — values are accepted as given (no EVM bytecode
+/// to verify).
 #[derive(Debug, Clone)]
 pub struct SubCallClaim {
   /// Opcode: CALL, CALLCODE, DELEGATECALL, STATICCALL, CREATE, or CREATE2.
@@ -162,10 +165,21 @@ pub struct SubCallClaim {
   pub success: bool,
   /// EVM call nesting depth at which this sub-call was made (0 = top-level TX).
   pub depth: u16,
-  /// Optional recursive proof of the callee execution trace.
-  /// When `Some`, full structural and STARK verification is performed by
-  /// `verify_sub_call_claim`.
-  pub inner_proof: Option<Box<TransactionProof>>,
+  /// Recursive proof of the callee execution trace.
+  /// Non-empty `steps` → full structural + STARK verification by `verify_sub_call_claim`.
+  /// Empty `steps`     → precompile / empty account oracle (no bytecode to verify).
+  pub inner_proof: Box<TransactionProof>,
+  // ── Gap-C4: CREATE2 address derivation witness ───────────────────────────
+  /// Address of the account that issued the CREATE2 (= deployer, 20 bytes).
+  /// `Some` only when `opcode == CREATE2`; `None` for all other call types.
+  pub create2_deployer: Option<[u8; 20]>,
+  /// Salt passed to CREATE2 (big-endian U256, 32 bytes).
+  /// `Some` only when `opcode == CREATE2`.
+  pub create2_salt: Option<[u8; 32]>,
+  /// `keccak256(initcode)` — the hash of the deployed bytecode (32 bytes).
+  /// Computed by the prover from the actual initcode bytes at prove time.
+  /// `Some` only when `opcode == CREATE2`.
+  pub create2_initcode_hash: Option<[u8; 32]>,
 }
 
 /// Copy-consistency witness for the MCOPY opcode (EIP-5656).
@@ -202,22 +216,56 @@ pub struct MemCopyClaim {
   pub dst_word_count: usize,
 }
 
-/// A witness for external-state-reading opcodes: BLOCKHASH, EXTCODESIZE, EXTCODEHASH.
+/// A witness for external-state-reading opcodes:
+/// BLOCKHASH, EXTCODESIZE, EXTCODEHASH, BALANCE, SELFBALANCE.
 ///
 /// Records the query key (block number or account address) and the returned
-/// value so the verifier can re-check consistency with the external state at
-/// batch level.
+/// value so the verifier can re-check consistency with the committed
+/// [`WorldStateContext`] at batch level.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalStateClaim {
   /// The opcode that produced this claim.
-  /// Supported: BLOCKHASH, EXTCODESIZE, EXTCODEHASH.
+  /// Supported: BLOCKHASH, EXTCODESIZE, EXTCODEHASH, BALANCE, SELFBALANCE.
   pub opcode: u8,
   /// For BLOCKHASH: queried block number (32-byte big-endian U256).
-  /// For EXTCODESIZE / EXTCODEHASH: queried contract address (20 bytes,
-  /// zero-padded to 32 in big-endian).
+  /// For EXTCODESIZE / EXTCODEHASH / BALANCE: queried contract address
+  /// (20 bytes, zero-left-padded to 32).
+  /// For SELFBALANCE: address of the currently-executing contract
+  /// (zero-left-padded to 32).
   pub key: [u8; 32],
   /// The 32-byte value pushed to the stack.
   pub output_value: [u8; 32],
+}
+
+/// One committed entry in the world-state oracle table.
+///
+/// The prover supplies a [`WorldStateContext`] as a public input; the
+/// verifier checks that every [`ExternalStateClaim`] output matches the
+/// corresponding entry here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorldStateEntry {
+  /// Same opcodes as [`ExternalStateClaim::opcode`].
+  pub opcode: u8,
+  /// Same semantics as [`ExternalStateClaim::key`].
+  pub key: [u8; 32],
+  /// The committed 32-byte value for this (opcode, key) pair.
+  pub value: [u8; 32],
+}
+
+/// Pre-committed world-state oracle table, provided as a public input.
+///
+/// # Security model
+/// Full Merkle-Patricia-Trie proof is out-of-scope for this phase.
+/// This struct acts as an *external commitment*: the prover cannot manufacture
+/// an [`ExternalStateClaim`] whose `output_value` disagrees with the matching
+/// entry here, because step 14 of [`verify_batch_transaction_zk_receipt`]
+/// rejects the receipt if any mismatch is detected.
+/// An outer layer (e.g., a light client) is responsible for binding the
+/// `WorldStateContext` to an on-chain state root.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorldStateContext {
+  /// Committed (opcode, key) → value entries.
+  pub entries: Vec<WorldStateEntry>,
 }
 
 /// A witness for environment-reading opcodes: CALLER, CALLVALUE, CALLDATALOAD, CALLDATASIZE.
@@ -265,6 +313,15 @@ pub struct BlockTxContext {
   pub origin: [u8; 32],
   /// GASPRICE (0x3a): effective gas price as U256 big-endian.
   pub gas_price: [u8; 32],
+  /// CALLER (0x33): address of the direct caller of this frame.
+  /// For the outermost transaction this equals `tx.caller` (== ORIGIN).
+  pub caller: [u8; 32],
+  /// CALLVALUE (0x34): ETH value attached to this call as U256 big-endian.
+  pub callvalue: [u8; 32],
+  /// ADDRESS (0x30): address of the contract being executed, zero-padded to 32 bytes.
+  pub self_address: [u8; 32],
+  /// CALLDATASIZE (0x36): byte-length of calldata as U256 big-endian.
+  pub calldata_size: [u8; 32],
 }
 
 /// Proof that one EVM instruction correctly transforms the stack.
@@ -279,8 +336,7 @@ pub struct InstructionTransitionProof {
   /// Values produced to the stack.
   pub stack_outputs: Vec<[u8; 32]>,
   /// Hilbert-style proof of semantic correctness.
-  /// `None` for structural operations (PUSH/POP/DUP/SWAP/STOP/JUMPDEST).
-  pub semantic_proof: Option<Proof>,
+  pub semantic_proof: Proof,
   /// Memory access claims from this instruction.
   /// Non-empty for MLOAD, MSTORE, MSTORE8, MCOPY, and copy-family opcodes.
   pub memory_claims: Vec<MemAccessClaim>,
@@ -300,7 +356,8 @@ pub struct InstructionTransitionProof {
   pub call_context_claim: Option<CallContextClaim>,
   /// KECCAK256 preimage witness.  `Some` only for KECCAK256.
   pub keccak_claim: Option<KeccakClaim>,
-  /// External-state witness.  `Some` for BLOCKHASH, EXTCODESIZE, EXTCODEHASH.
+  /// External-state witness.  `Some` for BLOCKHASH, EXTCODESIZE, EXTCODEHASH,
+  /// BALANCE, and SELFBALANCE.
   pub external_state_claim: Option<ExternalStateClaim>,
   /// Sub-call / create witness.  `Some` for CALL, CALLCODE, DELEGATECALL,
   /// STATICCALL, CREATE, CREATE2.
@@ -349,7 +406,12 @@ pub struct VmState {
   pub pc: usize,
   pub sp: usize,
   pub stack: Vec<[u8; 32]>,
+  /// Commitment to cumulative memory write-set `W_i` at this state boundary.
+  /// `hash_mem_write_set(W_i)`.  `[0u8;32]` encodes an empty write-set (start).
   pub memory_root: [u8; 32],
+  /// Commitment to cumulative storage write-set `W_i` at this state boundary.
+  /// `hash_stor_write_set(W_i)`.  `[0u8;32]` encodes an empty write-set (start).
+  pub storage_root: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,22 +457,10 @@ pub struct InstructionTransitionStatement {
   /// MCOPY copy-consistency witness — `Some` only for MCOPY instructions.
   /// Copied from [`InstructionTransitionProof::mcopy_claim`] during batch proving.
   pub mcopy_claim: Option<MemCopyClaim>,
-}
-
-#[derive(Clone)]
-pub struct InstructionTransitionZkReceipt {
-  pub opcode: u8,
-  pub stack_ir_proof: CircleStarkProof,
-  pub lut_kernel_proof: CircleStarkProof,
-  /// Companion LogUp byte-table proof for AND/OR/XOR operations.
-  /// `None` for opcodes without byte-level bitwise operations.
-  pub byte_table_proof: Option<p3_uni_stark::Proof<CircleStarkConfig>>,
-  /// Preprocessed verifier key for the StackIR STARK (single-instruction setup).
-  pub preprocessed_vk: PreprocessedVerifierKey<CircleStarkConfig>,
-  /// Preprocessed verifier key for the LUT STARK (batch N=1 setup via
-  /// [`BatchLutKernelAirWithPrep`]).
-  pub lut_preprocessed_vk: PreprocessedVerifierKey<CircleStarkConfig>,
-  pub expected_wff: WFF,
+  /// External-state witness — `Some` for BLOCKHASH, EXTCODESIZE, EXTCODEHASH,
+  /// BALANCE, SELFBALANCE.
+  /// Copied from [`InstructionTransitionProof::external_state_claim`] during batch proving.
+  pub external_state_claim: Option<ExternalStateClaim>,
 }
 
 /// ZK receipt for a batch of N instructions proved in a single LUT STARK call.
@@ -463,7 +513,243 @@ pub struct BatchTransactionZkReceipt {
   /// Return/revert data from the terminating instruction.
   /// `Some` when the transaction ended with RETURN or REVERT.
   pub return_data: Option<ReturnDataClaim>,
+  /// Block/tx public-input context for env-oracle validation.
+  ///
+  /// `None` = produced without env-context binding (backward-compatible mode).
+  /// `Some` enables step 13 of [`verify_batch_transaction_zk_receipt`], which
+  /// asserts that every env-opcode output matches the committed context.
+  pub env_context: Option<BlockTxContext>,
+  /// World-state oracle table for external-state-opcode validation (Gap-B).
+  ///
+  /// `None` = produced without world-state binding (backward-compatible mode).
+  /// `Some` enables step 14 of [`verify_batch_transaction_zk_receipt`], which
+  /// asserts that every BLOCKHASH / EXTCODESIZE / EXTCODEHASH / BALANCE /
+  /// SELFBALANCE output matches the corresponding committed entry.
+  pub world_state_context: Option<WorldStateContext>,
   // (logs are stored inside the individual proofs themselves)
+}
+
+impl BatchTransactionZkReceipt {
+  /// Returns the total number of AIR columns across all active sub-proofs in
+  /// this batch receipt.
+  ///
+  /// The shared preprocessed matrix (`NUM_BATCH_PREP_COLS`) is counted once,
+  /// even though it is reused by both the StackIR and LUT proofs.
+  /// Optional sub-proofs (memory, storage, stack, keccak) contribute their
+  /// column counts only when present.
+  pub fn total_column_count(&self) -> usize {
+    use crate::zk_proof::{
+      NUM_BATCH_PREP_COLS, NUM_KECCAK_COLS, NUM_LUT_COLS, NUM_MEM_COLS, NUM_STACK_COLS,
+      NUM_STACK_IR_COLS, NUM_STACK_RW_COLS, NUM_STOR_COLS,
+    };
+    let mut total = NUM_BATCH_PREP_COLS  // shared preprocessed matrix (counted once)
+      + NUM_STACK_IR_COLS               // StackIR batch proof (always present)
+      + NUM_LUT_COLS;                   // LUT batch proof    (always present)
+    if self.memory_proof.is_some()  { total += NUM_MEM_COLS; }
+    if self.storage_proof.is_some() { total += NUM_STOR_COLS; }
+    if self.stack_proof.is_some()   { total += NUM_STACK_COLS; }
+    if self.stack_rw_proof.is_some(){ total += NUM_STACK_RW_COLS; }
+    if self.keccak_proof.is_some()  { total += NUM_KECCAK_COLS; }
+    total
+  }
+}
+
+// ── Pre-computed heavy step for the batch proving pipeline ───────────────────
+
+/// Pre-computed, instruction-independent artifacts used by the STARK proving
+/// pipeline.  Build once (outside any timing loop) and reuse across multiple
+/// [`prove_batch_transaction_zk_receipt`] calls.
+///
+/// This separates the expensive WFF-building + preprocessed-matrix setup step
+/// from the STARK proving proper, letting benchmarks measure only the latter.
+///
+/// # Usage
+/// ```ignore
+/// // One-time setup (outside the timing loop):
+/// let prep = build_batch_zk_receipt_prep(&batch_itps)?;
+///
+/// // Timed inner loop:
+/// for _ in 0..iters {
+///     let receipt = prove_batch_transaction_zk_receipt_with_prep(&batch_itps, &prep)?;
+/// }
+/// ```
+pub struct BatchTransactionZkReceiptPrep {
+  pub manifest: BatchProofRowsManifest,
+  pub prep_data: PreprocessedProverData<CircleStarkConfig>,
+  pub preprocessed_vk: PreprocessedVerifierKey<CircleStarkConfig>,
+  pub lut_bind_pv: Vec<Val>,
+  pub stack_bind_pv: Vec<Val>,
+}
+
+/// Build the [`BatchTransactionZkReceiptPrep`] for `itps`.
+///
+/// Performs the WFF inference, manifest compilation, and preprocessed-matrix
+/// setup — the slow O(batch_count) work that does not change between proving
+/// rounds.  Returns `Err` if any proof is invalid or no provable instructions
+/// are found.
+pub fn build_batch_zk_receipt_prep(
+  itps: &[InstructionTransitionProof],
+) -> Result<BatchTransactionZkReceiptPrep, String> {
+  // Validate all proofs first (same pre-check as prove_batch_transaction_zk_receipt).
+  for (i, itp) in itps.iter().enumerate() {
+    if !verify_proof(itp) {
+      return Err(format!(
+        "build_batch_zk_receipt_prep: semantic/row verification failed at step {i} (opcode 0x{:02x})",
+        itp.opcode
+      ));
+    }
+  }
+
+  let items: Vec<(u8, WFF, &Proof)> = itps
+    .iter()
+    .filter_map(|itp| {
+      let wff = wff_instruction(itp.opcode, &itp.stack_inputs, &itp.stack_outputs);
+      Some((itp.opcode, wff, &itp.semantic_proof))
+    })
+    .collect();
+
+  if items.is_empty() {
+    return Err("build_batch_zk_receipt_prep: no provable instructions in batch".to_string());
+  }
+
+  let manifest = build_batch_manifest_from_wffs(&items)?;
+  let lut_bind_pv =
+    make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &manifest.entries);
+  let stack_bind_pv =
+    make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, &manifest.entries);
+  let (prep_data, preprocessed_vk) = setup_batch_proof_rows_preprocessed(&manifest, &lut_bind_pv)?;
+
+  Ok(BatchTransactionZkReceiptPrep {
+    manifest,
+    prep_data,
+    preprocessed_vk,
+    lut_bind_pv,
+    stack_bind_pv,
+  })
+}
+
+/// Prove a batch ZK receipt using pre-built artifacts from [`build_batch_zk_receipt_prep`].
+///
+/// This is the fast inner loop body: it runs only the STARK provers and the
+/// consistency proofs (memory / storage / KECCAK / stack).  WFF inference and
+/// preprocessed-matrix setup are **not** repeated.
+pub fn prove_batch_transaction_zk_receipt_with_prep(
+  itps: &[InstructionTransitionProof],
+  prep: &BatchTransactionZkReceiptPrep,
+) -> Result<BatchTransactionZkReceipt, String> {
+  let manifest = &prep.manifest;
+  let prep_data = &prep.prep_data;
+  let lut_bind_pv = &prep.lut_bind_pv;
+  let stack_bind_pv = &prep.stack_bind_pv;
+  let preprocessed_vk = prep.preprocessed_vk.clone();
+
+  // ── Collect all claims (sequential, O(n) in instruction count) ──────────
+  let mut all_mem_claims: Vec<MemAccessClaim> = Vec::new();
+  let mut all_keccak_claims: Vec<KeccakClaim> = Vec::new();
+  let mut all_mcopy_claims: Vec<MemCopyClaim> = Vec::new();
+  let mut rw_counter: u64 = 0;
+  for itp in itps {
+    let rw_before = rw_counter;
+    for claim in &itp.memory_claims {
+      rw_counter += 1;
+      all_mem_claims.push(MemAccessClaim {
+        rw_counter,
+        addr: claim.addr,
+        is_write: claim.is_write,
+        value: claim.value,
+      });
+    }
+    if let Some(ref mc) = itp.mcopy_claim {
+      let src_count = itp.memory_claims.iter().filter(|c| !c.is_write).count();
+      let dst_count = itp.memory_claims.iter().filter(|c| c.is_write).count();
+      all_mcopy_claims.push(MemCopyClaim {
+        src_offset: mc.src_offset,
+        dst_offset: mc.dst_offset,
+        size: mc.size,
+        data: mc.data.clone(),
+        src_rw_start: rw_before + 1,
+        src_word_count: src_count,
+        dst_rw_start: rw_before + src_count as u64 + 1,
+        dst_word_count: dst_count,
+      });
+    }
+    if let Some(ref kc) = itp.keccak_claim {
+      all_keccak_claims.push(kc.clone());
+    }
+  }
+  let mut stor_rw_counter: u64 = 0;
+  let all_stor_claims = collect_storage_claims_recursive(itps, &mut stor_rw_counter);
+  let all_stack_claims: Vec<StackAccessClaim> = itps
+    .iter()
+    .flat_map(|itp| itp.stack_claims.iter().cloned())
+    .collect();
+  let return_data = itps
+    .iter()
+    .rev()
+    .find_map(|itp| itp.return_data_claim.clone());
+
+  // Each sub-proof is fully independent — run all 7 in parallel OS threads.
+  // rayon is NOT active here, so each thread is purely single-threaded; no
+  // oversubscription.  Wall-clock time = slowest single sub-proof.
+  use std::sync::Mutex;
+  use crate::zk_proof::batch_proof_pool;
+
+  let stack_ir_res:  Mutex<Option<Result<CircleStarkProof, String>>>  = Mutex::new(None);
+  let lut_res:       Mutex<Option<Result<CircleStarkProof, String>>>  = Mutex::new(None);
+  let memory_res:    Mutex<Option<Result<Option<MemoryConsistencyProof>, String>>>   = Mutex::new(None);
+  let storage_res:   Mutex<Option<Result<Option<StorageConsistencyProof>, String>>>  = Mutex::new(None);
+  let keccak_res:    Mutex<Option<Result<Option<KeccakConsistencyProof>, String>>>   = Mutex::new(None);
+  let stack_res:     Mutex<Option<Result<Option<StackConsistencyProof>, String>>>    = Mutex::new(None);
+  let stack_rw_res:  Mutex<Option<Result<Option<StackRwProof>, String>>>             = Mutex::new(None);
+
+  batch_proof_pool().scope(|s| {
+    s.spawn(|_| *stack_ir_res.lock().unwrap() = Some(prove_batch_stack_ir_with_prep(manifest, prep_data, stack_bind_pv)));
+    s.spawn(|_| *lut_res.lock().unwrap()      = Some(prove_batch_lut_with_prep(manifest, prep_data, lut_bind_pv)));
+    s.spawn(|_| *memory_res.lock().unwrap()   = Some(
+      if all_mem_claims.is_empty() { Ok(None) }
+      else { prove_memory_consistency(&all_mem_claims).map(Some) }
+    ));
+    s.spawn(|_| *storage_res.lock().unwrap()  = Some(
+      if all_stor_claims.is_empty() { Ok(None) }
+      else { prove_storage_consistency(&all_stor_claims).map(Some) }
+    ));
+    s.spawn(|_| *keccak_res.lock().unwrap()   = Some(
+      if all_keccak_claims.is_empty() { Ok(None) }
+      else { prove_keccak_consistency(&all_keccak_claims).map(Some) }
+    ));
+    s.spawn(|_| *stack_res.lock().unwrap()    = Some(
+      if all_stack_claims.is_empty() { Ok(None) }
+      else { prove_stack_consistency(&all_stack_claims).map(Some) }
+    ));
+    s.spawn(|_| *stack_rw_res.lock().unwrap() = Some(
+      if all_stack_claims.is_empty() { Ok(None) }
+      else { prove_stack_rw(&all_stack_claims).map(Some) }
+    ));
+  });
+
+  let stack_ir_proof = stack_ir_res.into_inner().unwrap().unwrap()?;
+  let lut_proof      = lut_res.into_inner().unwrap().unwrap()?;
+  let memory_proof   = memory_res.into_inner().unwrap().unwrap()?;
+  let storage_proof  = storage_res.into_inner().unwrap().unwrap()?;
+  let keccak_proof   = keccak_res.into_inner().unwrap().unwrap()?;
+  let stack_proof    = stack_res.into_inner().unwrap().unwrap()?;
+  let stack_rw_proof = stack_rw_res.into_inner().unwrap().unwrap()?;
+
+  Ok(BatchTransactionZkReceipt {
+    stack_ir_proof,
+    lut_proof,
+    preprocessed_vk,
+    manifest: manifest.clone(),
+    memory_proof,
+    storage_proof,
+    keccak_proof,
+    stack_proof,
+    stack_rw_proof,
+    mcopy_claims: all_mcopy_claims,
+    return_data,
+    env_context: None,
+    world_state_context: None,
+  })
 }
 
 // ============================================================
@@ -672,6 +958,7 @@ fn check_output_semantics(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> 
   match op {
     opcode::ADD => add_u256_mod(&inputs[0], &inputs[1]) == outputs[0],
     opcode::SUB => add_u256_mod(&inputs[0], &negate_u256(&inputs[1])) == outputs[0],
+    opcode::MUL => mul_u256_mod(&inputs[0], &inputs[1]) == outputs[0],
     opcode::AND => (0..32).all(|i| inputs[0][i] & inputs[1][i] == outputs[0][i]),
     opcode::OR  => (0..32).all(|i| inputs[0][i] | inputs[1][i] == outputs[0][i]),
     opcode::XOR => (0..32).all(|i| inputs[0][i] ^ inputs[1][i] == outputs[0][i]),
@@ -730,89 +1017,76 @@ fn has_linear_pc(op: u8) -> bool {
   )
 }
 
-/// Generate a semantic proof for a single EVM instruction.
-///
-/// Returns `(proof, computed_outputs)`.  The caller should compare
-/// `computed_outputs` against the actual EVM outputs to ensure consistency.
-pub fn prove_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Option<Proof> {
-  if !has_expected_stack_arity(op, inputs, outputs) {
-    return None;
-  }
-  // Stack I/O bindings are committed via the WFF hash in public inputs.
-  // InputEq/OutputEq and PcStep rows are omitted; only the instruction core logic is proven.
-  prove_instruction_core(op, inputs, outputs)
-}
-
 /// Core semantic proof (instruction-specific logic only, no stack/PC bindings).
-fn prove_instruction_core(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Option<Proof> {
+pub fn prove_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Proof {
   match op {
-    opcode::ADD => Some(prove_add_limb_sym()),
-    opcode::SUB => Some(prove_sub_limb_sym()),
-    opcode::MUL => Some(prove_mul(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::DIV => Some(prove_div(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::MOD => Some(prove_mod(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SDIV => Some(prove_sdiv(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SMOD => Some(prove_smod(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::AND => Some(prove_and_sym(&inputs[0], &inputs[1])),
-    opcode::OR  => Some(prove_or_sym(&inputs[0], &inputs[1])),
-    opcode::XOR => Some(prove_xor_sym(&inputs[0], &inputs[1])),
-    opcode::NOT => Some(prove_not_sym(&inputs[0])),
-    opcode::LT => Some(prove_lt(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::GT => Some(prove_gt(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SLT => Some(prove_slt(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SGT => Some(prove_sgt(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::EQ => Some(prove_eq(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::ISZERO => Some(prove_iszero(&inputs[0], &outputs[0])),
-    opcode::SHL => Some(prove_shl(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SHR => Some(prove_shr(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SAR => Some(prove_sar(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::BYTE => Some(prove_byte(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SIGNEXTEND => Some(prove_signextend(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::ADDMOD => Some(prove_addmod(
+    opcode::ADD => prove_add_limb_sym(),
+    opcode::SUB => prove_sub_limb_sym(),
+    opcode::MUL => prove_mul(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::DIV => prove_div(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::MOD => prove_mod(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SDIV => prove_sdiv(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SMOD => prove_smod(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::AND => prove_and_sym(&inputs[0], &inputs[1]),
+    opcode::OR  => prove_or_sym(&inputs[0], &inputs[1]),
+    opcode::XOR => prove_xor_sym(&inputs[0], &inputs[1]),
+    opcode::NOT => prove_not_sym(&inputs[0]),
+    opcode::LT => prove_lt(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::GT => prove_gt(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SLT => prove_slt(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SGT => prove_sgt(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::EQ => prove_eq(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::ISZERO => prove_iszero(&inputs[0], &outputs[0]),
+    opcode::SHL => prove_shl(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SHR => prove_shr(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SAR => prove_sar(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::BYTE => prove_byte(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SIGNEXTEND => prove_signextend(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::ADDMOD => prove_addmod(
       &inputs[0],
       &inputs[1],
       &inputs[2],
       &outputs[0],
-    )),
-    opcode::MULMOD => Some(prove_mulmod(
+    ),
+    opcode::MULMOD => prove_mulmod(
       &inputs[0],
       &inputs[1],
       &inputs[2],
       &outputs[0],
-    )),
-    opcode::EXP => Some(prove_exp(&inputs[0], &inputs[1], &outputs[0])),
+    ),
+    opcode::EXP => prove_exp(&inputs[0], &inputs[1], &outputs[0]),
 
     // ── Per-opcode dedicated axioms ─────────────────────────────────────────
 
     // Memory read/write
-    opcode::MLOAD => Some(Proof::MloadAxiom),
-    opcode::MSTORE => Some(Proof::MstoreAxiom {
+    opcode::MLOAD => Proof::MloadAxiom,
+    opcode::MSTORE => Proof::MstoreAxiom {
       opcode: op,
-    }),
-    opcode::MSTORE8 => Some(Proof::MstoreAxiom {
+    },
+    opcode::MSTORE8 => Proof::MstoreAxiom {
       opcode: op,
-    }),
+    },
 
     // Memory-copy family
     opcode::RETURNDATACOPY | opcode::EXTCODECOPY | opcode::MCOPY => {
-      Some(Proof::MemCopyAxiom { opcode: op })
+      Proof::MemCopyAxiom { opcode: op }
     }
     opcode::CALLDATACOPY | opcode::CODECOPY => {
-      Some(Proof::MemCopyAxiom { opcode: op })
+      Proof::MemCopyAxiom { opcode: op }
     }
 
     // Storage
-    opcode::SLOAD => Some(Proof::SloadAxiom),
-    opcode::SSTORE => Some(Proof::SstoreAxiom),
-    opcode::TLOAD => Some(Proof::TransientAxiom {
+    opcode::SLOAD => Proof::SloadAxiom,
+    opcode::SSTORE => Proof::SstoreAxiom,
+    opcode::TLOAD => Proof::TransientAxiom {
       opcode: op,
-    }),
-    opcode::TSTORE => Some(Proof::TransientAxiom {
+    },
+    opcode::TSTORE => Proof::TransientAxiom {
       opcode: op,
-    }),
+    },
 
     // Keccak
-    opcode::KECCAK256 => Some(Proof::KeccakAxiom),
+    opcode::KECCAK256 => Proof::KeccakAxiom,
 
     // Environment / call-context opcodes
     opcode::CALLER
@@ -835,45 +1109,45 @@ fn prove_instruction_core(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> 
     | opcode::CHAINID
     | opcode::SELFBALANCE
     | opcode::BASEFEE
-    | opcode::BLOBBASEFEE => Some(Proof::EnvAxiom {
+    | opcode::BLOBBASEFEE => Proof::EnvAxiom {
       opcode: op,
-    }),
+    },
 
     // External state
     opcode::BLOCKHASH | opcode::EXTCODESIZE | opcode::EXTCODEHASH | opcode::BALANCE => {
-      Some(Proof::ExternalStateAxiom {
+      Proof::ExternalStateAxiom {
         opcode: op,
-      })
+      }
     }
-    opcode::BLOBHASH => Some(Proof::ExternalStateAxiom {
+    opcode::BLOBHASH => Proof::ExternalStateAxiom {
       opcode: op,
-    }),
+    },
 
     // Terminate
-    opcode::RETURN | opcode::REVERT => Some(Proof::TerminateAxiom {
+    opcode::RETURN | opcode::REVERT => Proof::TerminateAxiom {
       opcode: op,
-    }),
+    },
 
     // Sub-call / create
     opcode::CALL | opcode::CALLCODE | opcode::DELEGATECALL | opcode::STATICCALL => {
-      Some(Proof::CallAxiom {
+      Proof::CallAxiom {
         opcode: op,
-      })
+      }
     }
-    opcode::CREATE | opcode::CREATE2 => Some(Proof::CreateAxiom {
+    opcode::CREATE | opcode::CREATE2 => Proof::CreateAxiom {
       opcode: op,
-    }),
-    opcode::SELFDESTRUCT => Some(Proof::SelfdestructAxiom),
+    },
+    opcode::SELFDESTRUCT => Proof::SelfdestructAxiom,
 
     // Log
     opcode::LOG0 | opcode::LOG1 | opcode::LOG2 | opcode::LOG3 | opcode::LOG4 => {
-      Some(Proof::LogAxiom {
+      Proof::LogAxiom {
         opcode: op,
-      })
+      }
     }
 
     // INVALID
-    opcode::INVALID => Some(Proof::StructuralAxiom { opcode: op }),
+    opcode::INVALID => Proof::StructuralAxiom { opcode: op },
 
     // Structural: STOP, POP, JUMP, JUMPI, JUMPDEST, PUSH*, DUP*, SWAP*
     op if op == opcode::STOP
@@ -882,18 +1156,18 @@ fn prove_instruction_core(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> 
       || op == opcode::JUMPI
       || op == opcode::JUMPDEST
       || (opcode::PUSH0..=opcode::PUSH32).contains(&op) => {
-      Some(Proof::PushAxiom)
+      Proof::PushAxiom
     }
     op if (opcode::DUP1..=opcode::DUP16).contains(&op) => {
       let depth = op - opcode::DUP1 + 1;
-      Some(Proof::DupAxiom { depth })
+      Proof::DupAxiom { depth }
     }
     op if (opcode::SWAP1..=opcode::SWAP16).contains(&op) => {
       let depth = op - opcode::SWAP1 + 1;
-      Some(Proof::SwapAxiom { depth })
+      Proof::SwapAxiom { depth }
     }
 
-    _ => Some(Proof::StructuralAxiom { opcode: op }),
+    _ => Proof::StructuralAxiom { opcode: op },
   }
 }
 
@@ -901,11 +1175,8 @@ fn prove_instruction_core(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> 
 // WFF generation
 // ============================================================
 
-pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Option<WFF> {
-  if !has_expected_stack_arity(op, inputs, outputs) {
-    return None;
-  }
-  let core = wff_instruction_core(op, inputs, outputs)?;
+pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> WFF {
+  let core = wff_instruction_core(op, inputs, outputs);
   let with_outputs = WFF::And(
     Box::new(wff_stack_outputs(outputs)),
     Box::new(core),
@@ -918,40 +1189,40 @@ pub fn wff_instruction(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Opt
   } else {
     with_outputs
   };
-  Some(WFF::And(
+  WFF::And(
     Box::new(wff_stack_inputs(inputs)),
     Box::new(with_pc),
-  ))
+  )
 }
 
 /// Core WFF (instruction-specific logic only, no stack/PC bindings).
-fn wff_instruction_core(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Option<WFF> {
+pub fn wff_instruction_core(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> WFF {
   match op {
-    opcode::ADD => Some(wff_add_limb_sym()),
-    opcode::SUB => Some(wff_sub_limb_sym()),
-    opcode::MUL => Some(wff_mul(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::DIV => Some(wff_div(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::MOD => Some(wff_mod(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SDIV => Some(wff_sdiv(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SMOD => Some(wff_smod(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::AND => Some(wff_and_sym(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::OR  => Some(wff_or_sym(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::XOR => Some(wff_xor_sym(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::NOT => Some(wff_not_sym(&inputs[0], &outputs[0])),
-    opcode::LT => Some(wff_lt(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::GT => Some(wff_gt(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SLT => Some(wff_slt(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SGT => Some(wff_sgt(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::EQ => Some(wff_eq(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::ISZERO => Some(wff_iszero(&inputs[0], &outputs[0])),
-    opcode::SHL => Some(wff_shl(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SHR => Some(wff_shr(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SAR => Some(wff_sar(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::BYTE => Some(wff_byte(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::SIGNEXTEND => Some(wff_signextend(&inputs[0], &inputs[1], &outputs[0])),
-    opcode::ADDMOD => Some(wff_addmod(&inputs[0], &inputs[1], &inputs[2], &outputs[0])),
-    opcode::MULMOD => Some(wff_mulmod(&inputs[0], &inputs[1], &inputs[2], &outputs[0])),
-    opcode::EXP => Some(wff_exp(&inputs[0], &inputs[1], &outputs[0])),
+    opcode::ADD => wff_add_limb_sym(),
+    opcode::SUB => wff_sub_limb_sym(),
+    opcode::MUL => wff_mul(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::DIV => wff_div(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::MOD => wff_mod(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SDIV => wff_sdiv(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SMOD => wff_smod(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::AND => wff_and_sym(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::OR  => wff_or_sym(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::XOR => wff_xor_sym(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::NOT => wff_not_sym(&inputs[0], &outputs[0]),
+    opcode::LT => wff_lt(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::GT => wff_gt(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SLT => wff_slt(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SGT => wff_sgt(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::EQ => wff_eq(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::ISZERO => wff_iszero(&inputs[0], &outputs[0]),
+    opcode::SHL => wff_shl(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SHR => wff_shr(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SAR => wff_sar(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::BYTE => wff_byte(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::SIGNEXTEND => wff_signextend(&inputs[0], &inputs[1], &outputs[0]),
+    opcode::ADDMOD => wff_addmod(&inputs[0], &inputs[1], &inputs[2], &outputs[0]),
+    opcode::MULMOD => wff_mulmod(&inputs[0], &inputs[1], &inputs[2], &outputs[0]),
+    opcode::EXP => wff_exp(&inputs[0], &inputs[1], &outputs[0]),
 
     // ── Per-opcode axiom WFFs: Equal(OutputTerm{0,0}, OutputTerm{0,0}) ──────────────
     opcode::MLOAD
@@ -1007,34 +1278,15 @@ fn wff_instruction_core(op: u8, inputs: &[[u8; 32]], outputs: &[[u8; 32]]) -> Op
     | opcode::LOG2
     | opcode::LOG3
     | opcode::LOG4
-    | opcode::INVALID => Some(WFF::Equal(
+    | opcode::INVALID => WFF::Equal(
       Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
       Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
-    )),
-    _ => Some(WFF::Equal(
+    ),
+    _ => WFF::Equal(
       Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
       Box::new(Term::OutputTerm { stack_idx: 0, byte_idx: 0, value: 0 }),
-    )),
+    ),
   }
-}
-
-/// WFF containing only the PcStep derivation and the instruction-specific core
-/// formula — without stack I/O binding terms (`InputEq`/`OutputEq`).
-///
-/// This exactly matches `infer_proof(prove_instruction(op, inputs, outputs))`,
-/// which is useful for tests that verify the proof tree is internally consistent.
-pub fn wff_instruction_core_only(
-  op: u8,
-  inputs: &[[u8; 32]],
-  outputs: &[[u8; 32]],
-) -> Option<WFF> {
-  if !has_expected_stack_arity(op, inputs, outputs) {
-    return None;
-  }
-  // Returns only the instruction-specific core formula —
-  // no PcStep, no InputEq/OutputEq wrappers.
-  // Matches infer_proof(prove_instruction(op, inputs, outputs)).
-  wff_instruction_core(op, inputs, outputs)
 }
 
 // ============================================================
@@ -1054,60 +1306,18 @@ pub fn verify_proof(proof: &InstructionTransitionProof) -> bool {
 
   // prove_instruction no longer emits InputEq/OutputEq rows; stack I/O binding is
   // enforced via the WFF hash in public inputs during ZK receipt verification.
-  // Therefore we compare infer_proof(..) against wff_instruction_core_only(..).
+  // Therefore we compare infer_proof(..) against wff_instruction_core(..).
   let expected_core_wff =
-    wff_instruction_core_only(proof.opcode, &proof.stack_inputs, &proof.stack_outputs);
-  match (&proof.semantic_proof, expected_core_wff) {
-    (Some(sem_proof), Some(wff)) => {
-      let Ok(wff_result) = infer_proof(sem_proof) else {
-        return false;
-      };
-      // Verify every InputTerm/OutputTerm claim in the inferred WFF against
-      // the declared stack inputs/outputs.
-      if !check_wff_io_values(&wff_result, &proof.stack_inputs, &proof.stack_outputs) {
-        return false;
-      }
-      wff == wff_result
-    }
-    (None, None) => false, // All opcodes now have a WFF; proof must be present or auto-generated.
-    (None, Some(expected_wff)) => {
-      // Auto-generation of the proof is only allowed for axiom opcodes.
-      // Arithmetic / logic opcodes (ADD, SUB, …) require an explicit semantic_proof.
-      let Some(auto_proof) = prove_instruction(
-        proof.opcode,
-        &proof.stack_inputs,
-        &proof.stack_outputs,
-      ) else {
-        return false;
-      };
-      // Check that the auto-generated proof contains no symbolic op rows.
-      // Symbolic rows (OP_BYTE_AND_SYM, OP_ADD_BYTE_SYM, OP_CARRY_EQ, …)
-      // are used only in arithmetic/logic proofs, which must be supplied
-      // explicitly via semantic_proof.  Axiom/structural opcodes (PUSH*, LOG*,
-      // ENV*, …) produce only structural rows.
-      let auto_rows = compile_proof(&auto_proof);
-      if auto_rows.iter().any(|r| r.op >= OP_BYTE_AND_SYM) {
-        return false; // Arithmetic/logic proofs must be supplied explicitly.
-      }
-      let Ok(wff_result) = infer_proof(&auto_proof) else {
-        return false;
-      };
-      if !check_wff_io_values(&wff_result, &proof.stack_inputs, &proof.stack_outputs) {
-        return false;
-      }
-      if expected_wff != wff_result {
-        return false;
-      }
-      // KECCAK256 additionally requires a valid keccak_claim that
-      // binds the stack output to the hash of the preimage bytes.
-      if proof.opcode == opcode::KECCAK256 {
-        verify_keccak_claim_inline(proof)
-      } else {
-        true
-      }
-    }
-    (Some(_), None) => false, // Proof present but no WFF expected — reject
+    wff_instruction_core(proof.opcode, &proof.stack_inputs, &proof.stack_outputs);
+  let Ok(wff_result) = infer_proof(&proof.semantic_proof) else {
+    return false;
+  };
+  // Verify every InputTerm/OutputTerm claim in the inferred WFF against
+  // the declared stack inputs/outputs.
+  if !check_wff_io_values(&wff_result, &proof.stack_inputs, &proof.stack_outputs) {
+    return false;
   }
+  expected_core_wff == wff_result
 }
 
 /// Verify an instruction transition with both:
@@ -1120,13 +1330,8 @@ pub fn verify_proof_with_rows(proof: &InstructionTransitionProof) -> bool {
     return false;
   }
 
-  match &proof.semantic_proof {
-    Some(semantic_proof) => {
-      let rows = compile_proof(semantic_proof);
-      verify_compiled(&rows).is_ok()
-    }
-    _ => true,
-  }
+  let rows = compile_proof(&proof.semantic_proof);
+  verify_compiled(&rows).is_ok()
 }
 
 /// Backward-compatible alias.
@@ -1151,6 +1356,7 @@ pub fn verify_proof_with_zkp(proof: &InstructionTransitionProof) -> bool {
       sp: proof.stack_inputs.len(),
       stack: proof.stack_inputs.clone(),
       memory_root: [0u8; 32],
+      storage_root: [0u8; 32],
     },
     s_next: VmState {
       opcode: proof.opcode,
@@ -1158,318 +1364,18 @@ pub fn verify_proof_with_zkp(proof: &InstructionTransitionProof) -> bool {
       sp: proof.stack_outputs.len(),
       stack: proof.stack_outputs.clone(),
       memory_root: [0u8; 32],
+      storage_root: [0u8; 32],
     },
     accesses: Vec::new(),
     sub_call_claim: proof.sub_call_claim.clone(),
     mcopy_claim: proof.mcopy_claim.clone(),
+    external_state_claim: proof.external_state_claim.clone(),
   };
-  let receipt = match prove_instruction_zk_receipt(proof) {
-    Ok(receipt) => receipt,
+  let receipt = match prove_batch_transaction_zk_receipt(std::slice::from_ref(proof)) {
+    Ok(r) => r,
     Err(_) => return false,
   };
-  verify_instruction_zk_receipt(&statement, &receipt)
-}
-
-pub fn prove_instruction_zk_receipt(
-  proof: &InstructionTransitionProof,
-) -> Result<InstructionTransitionZkReceipt, String> {
-  let mut receipts = prove_instruction_zk_receipts_parallel(vec![proof.clone()], 0)?;
-  receipts
-    .pop()
-    .ok_or_else(|| "missing receipt from single-proof proving path".to_string())
-}
-
-pub(crate) fn prove_instruction_zk_receipt_with_lut_override(
-  proof: &InstructionTransitionProof,
-) -> Result<InstructionTransitionZkReceipt, String> {
-  if !verify_proof_with_rows(proof) {
-    return Err("semantic/row verification failed before ZKP receipt generation".to_string());
-  }
-
-  // Per-opcode axiom: if semantic_proof is None, auto-generate the canonical
-  // per-opcode axiom proof so the LUT STARK sees a concrete proof term.
-  let oracle_proof_holder;
-  let semantic_proof: &Proof = match &proof.semantic_proof {
-    Some(p) => p,
-    None => {
-      if let Some(auto) = prove_instruction(proof.opcode, &proof.stack_inputs, &proof.stack_outputs) {
-        oracle_proof_holder = auto;
-        &oracle_proof_holder
-      } else {
-        return Err(format!(
-          "opcode 0x{:02x} has no semantic proof and no axiom proof",
-          proof.opcode
-        ));
-      }
-    }
-  };
-
-  let expected_wff = wff_instruction_core_only(proof.opcode, &proof.stack_inputs, &proof.stack_outputs)
-    .ok_or_else(|| format!("unsupported opcode for ZKP receipt: 0x{:02x}", proof.opcode))?;
-
-  let rows = compile_proof(semantic_proof);
-  let stack_bind_pv =
-    make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, proof.opcode, &expected_wff);
-
-  // StackIR proof: single-instruction setup (unchanged).
-  let (prep_data, preprocessed_vk) = setup_proof_rows_preprocessed(&rows, &stack_bind_pv)?;
-  let stack_ir_proof = prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv)?;
-
-  // LUT proof: route through batch (BatchLutKernelAirWithPrep) for N=1.
-  // Use the authoritative WFF from wff_instruction (includes stack I/O bindings).
-  let lut_manifest =
-    build_batch_manifest_from_wffs(&[(proof.opcode, expected_wff.clone(), semantic_proof)])?;
-  let lut_bind_pv =
-    make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &lut_manifest.entries);
-  let (lut_prep_data, lut_preprocessed_vk) =
-    setup_batch_proof_rows_preprocessed(&lut_manifest, &lut_bind_pv)?;
-  let lut_kernel_proof = prove_batch_lut_with_prep(&lut_manifest, &lut_prep_data, &lut_bind_pv)?;
-
-  // Byte-table proof for AND/OR/XOR operations.
-  let byte_queries = collect_byte_table_queries_from_rows(&lut_manifest.all_rows);
-  let byte_table_proof = if byte_queries.is_empty() {
-    None
-  } else {
-    Some(crate::byte_table::prove_byte_table(&byte_queries))
-  };
-
-  Ok(InstructionTransitionZkReceipt {
-    opcode: proof.opcode,
-    stack_ir_proof,
-    lut_kernel_proof,
-    byte_table_proof,
-    preprocessed_vk,
-    lut_preprocessed_vk,
-    expected_wff,
-  })
-}
-
-/// Like [`prove_instruction_zk_receipt`], but also returns per-component timings.
-///
-/// Returns `(receipt, (setup_µs, stack_ir_µs, lut_µs, logup_µs))`.
-/// `lut_µs` is the pure LUT STARK prove time; `logup_µs` is the companion
-/// byte-table (LogUp) prove time (non-zero for AND/OR/XOR only).
-/// Useful for profiling which of the steps dominates.
-#[allow(clippy::type_complexity)]
-pub fn prove_instruction_zk_receipt_timed(
-  proof: &InstructionTransitionProof,
-) -> Result<(InstructionTransitionZkReceipt, (f64, f64, f64, f64)), String> {
-  use std::time::Instant;
-
-  if !verify_proof_with_rows(proof) {
-    return Err("semantic/row verification failed before ZKP receipt generation".to_string());
-  }
-
-  let semantic_proof = proof
-    .semantic_proof
-    .as_ref()
-    .ok_or_else(|| "missing semantic proof".to_string())?;
-
-  let expected_wff = wff_instruction_core_only(proof.opcode, &proof.stack_inputs, &proof.stack_outputs)
-    .ok_or_else(|| format!("unsupported opcode for ZKP receipt: 0x{:02x}", proof.opcode))?;
-
-  let rows = compile_proof(semantic_proof);
-  let stack_bind_pv =
-    make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, proof.opcode, &expected_wff);
-
-  let t0 = Instant::now();
-  let (prep_data, preprocessed_vk) = setup_proof_rows_preprocessed(&rows, &stack_bind_pv)?;
-  let setup_us = t0.elapsed().as_secs_f64() * 1e6;
-
-  let t1 = Instant::now();
-  let stack_ir_proof = prove_stack_ir_with_prep(&rows, &prep_data, &stack_bind_pv)?;
-  let stack_ir_us = t1.elapsed().as_secs_f64() * 1e6;
-
-  // LUT proof: batch path (N=1), includes batch setup + prove.
-  let t2 = Instant::now();
-  let lut_manifest =
-    build_batch_manifest_from_wffs(&[(proof.opcode, expected_wff.clone(), semantic_proof)])?;
-  let lut_bind_pv =
-    make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &lut_manifest.entries);
-  let (lut_prep_data, lut_preprocessed_vk) =
-    setup_batch_proof_rows_preprocessed(&lut_manifest, &lut_bind_pv)?;
-  let lut_kernel_proof = prove_batch_lut_with_prep(&lut_manifest, &lut_prep_data, &lut_bind_pv)?;
-  let lut_us = t2.elapsed().as_secs_f64() * 1e6;
-
-  // Time the companion LogUp byte-table proof separately.
-  let byte_queries = collect_byte_table_queries_from_rows(&lut_manifest.all_rows);
-  let t3 = Instant::now();
-  let byte_table_proof = if byte_queries.is_empty() {
-    None
-  } else {
-    Some(crate::byte_table::prove_byte_table(&byte_queries))
-  };
-  let logup_us = t3.elapsed().as_secs_f64() * 1e6;
-
-  let receipt = InstructionTransitionZkReceipt {
-    opcode: proof.opcode,
-    stack_ir_proof,
-    lut_kernel_proof,
-    byte_table_proof,
-    preprocessed_vk,
-    lut_preprocessed_vk,
-    expected_wff,
-  };
-  Ok((receipt, (setup_us, stack_ir_us, lut_us, logup_us)))
-}
-
-/// Prove many instruction ZKP receipts in parallel using a thread pool.
-///
-/// Work items are distributed across worker threads and output order matches
-/// input order.
-pub fn prove_instruction_zk_receipts_parallel(
-  proofs: Vec<InstructionTransitionProof>,
-  worker_count: usize,
-) -> Result<Vec<InstructionTransitionZkReceipt>, String> {
-  use std::collections::VecDeque;
-  use std::sync::{Arc, Mutex, mpsc};
-  use std::thread;
-
-  let task_count = proofs.len();
-  if task_count == 0 {
-    return Ok(Vec::new());
-  }
-
-  let workers = if worker_count == 0 {
-    thread::available_parallelism()
-      .map(|n| n.get())
-      .unwrap_or(1)
-      .min(task_count)
-  } else {
-    worker_count.max(1).min(task_count)
-  };
-
-  let queue: Arc<Mutex<VecDeque<(usize, InstructionTransitionProof)>>> =
-    Arc::new(Mutex::new(proofs.into_iter().enumerate().collect()));
-
-  let (tx, rx) = mpsc::channel::<(usize, Result<InstructionTransitionZkReceipt, String>)>();
-  let mut handles = Vec::with_capacity(workers);
-
-  for _ in 0..workers {
-    let queue = Arc::clone(&queue);
-    let tx = tx.clone();
-    handles.push(thread::spawn(move || {
-      loop {
-        let item = queue.lock().unwrap().pop_front();
-        let Some((idx, proof)) = item else { break };
-        let result = prove_instruction_zk_receipt_with_lut_override(&proof);
-        if tx.send((idx, result)).is_err() {
-          break;
-        }
-      }
-    }));
-  }
-  drop(tx);
-
-  let mut ordered: Vec<Option<InstructionTransitionZkReceipt>> =
-    std::iter::repeat_with(|| None).take(task_count).collect();
-  let mut first_error: Option<String> = None;
-
-  for _ in 0..task_count {
-    let (orig_idx, result) = rx
-      .recv()
-      .map_err(|_| "parallel proving channel closed unexpectedly".to_string())?;
-    match result {
-      Ok(receipt) => ordered[orig_idx] = Some(receipt),
-      Err(err) => {
-        if first_error.is_none() {
-          first_error = Some(err);
-        }
-      }
-    }
-  }
-
-  for handle in handles {
-    let _ = handle.join();
-  }
-
-  if let Some(err) = first_error {
-    return Err(err);
-  }
-
-  let mut out = Vec::with_capacity(task_count);
-  for receipt in ordered {
-    out.push(
-      receipt.ok_or_else(|| "failed to collect all receipts after parallel proving".to_string())?,
-    );
-  }
-  Ok(out)
-}
-
-pub fn verify_instruction_zk_receipt(
-  statement: &InstructionTransitionStatement,
-  receipt: &InstructionTransitionZkReceipt,
-) -> bool {
-  if statement.s_i.opcode != statement.opcode {
-    return false;
-  }
-
-  if statement.s_i.sp != statement.s_i.stack.len()
-    || statement.s_next.sp != statement.s_next.stack.len()
-  {
-    return false;
-  }
-
-  if !verify_statement_semantics(statement) {
-    return false;
-  }
-
-  if statement.opcode != receipt.opcode {
-    return false;
-  }
-
-  let expected_wff = match wff_instruction_core_only(
-    statement.opcode,
-    &statement.s_i.stack,
-    &statement.s_next.stack,
-  ) {
-    Some(wff) => wff,
-    None => return false,
-  };
-
-  if expected_wff != receipt.expected_wff {
-    return false;
-  }
-
-  let stack_bind_pv =
-    make_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, statement.opcode, &expected_wff);
-
-  if verify_stack_ir_with_prep(
-    &receipt.stack_ir_proof,
-    &receipt.preprocessed_vk,
-    &stack_bind_pv,
-  )
-  .is_err()
-  {
-    return false;
-  }
-
-  // LUT verification: batch path (BatchLutKernelAirWithPrep).
-  let batch_entries = [BatchInstructionMeta {
-    opcode: statement.opcode,
-    wff: expected_wff.clone(),
-    wff_digest: compute_wff_opcode_digest(statement.opcode, &expected_wff),
-    row_start: 0,
-    row_count: 0,
-  }];
-  let lut_bind_pv = make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_LUT, &batch_entries);
-  if verify_batch_lut_with_prep(
-    &receipt.lut_kernel_proof,
-    &receipt.lut_preprocessed_vk,
-    &lut_bind_pv,
-  )
-  .is_err()
-  {
-    return false;
-  }
-
-  // Byte-table proof (AND/OR/XOR).
-  if let Some(bp) = &receipt.byte_table_proof
-    && crate::byte_table::verify_byte_table(bp).is_err() {
-      return false;
-    }
-
-  true
+  verify_batch_transaction_zk_receipt(std::slice::from_ref(&statement), &receipt)
 }
 
 // ============================================================
@@ -1567,16 +1473,104 @@ fn build_batch_manifest_from_wffs(
 pub fn prove_batch_transaction_zk_receipt(
   itps: &[InstructionTransitionProof],
 ) -> Result<BatchTransactionZkReceipt, String> {
+  prove_batch_transaction_zk_receipt_with_w_in(itps, &MemWriteSet::new(), &StorWriteSet::new())
+}
+
+/// Like [`prove_batch_transaction_zk_receipt`] but validates cross-segment
+/// inherited reads against `mem_w_in` / `stor_w_in` (the cumulative write-sets
+/// from all preceding segments).  Returns `Err` if any first-read in the batch
+/// observes a value that differs from the previous state.
+///
+/// - Addresses in `w_in` map to their last-written value from prior segments.
+/// - Addresses absent from `w_in` must be read as zero (EVM zero-initialisation).
+pub fn prove_batch_transaction_zk_receipt_with_w_in(
+  itps: &[InstructionTransitionProof],
+  mem_w_in: &MemWriteSet,
+  stor_w_in: &StorWriteSet,
+) -> Result<BatchTransactionZkReceipt, String> {
+  let receipt = prove_batch_transaction_zk_receipt_impl(itps)?;
+  // First-Read Initialization soundness check.
+  if let Some(ref mem_proof) = receipt.memory_proof {
+    if !crate::zk_proof::write_delta::validate_inherited_reads(&mem_proof.read_set, mem_w_in) {
+      return Err("memory: inherited read value does not match W_in".to_string());
+    }
+  }
+  if let Some(ref stor_proof) = receipt.storage_proof {
+    if !crate::zk_proof::write_delta::validate_inherited_stor_reads(
+      &stor_proof.read_set,
+      stor_w_in,
+    ) {
+      return Err("storage: inherited read value does not match W_in".to_string());
+    }
+  }
+  Ok(receipt)
+}
+
+/// Recursively collect all [`StorageAccessClaim`]s from `itps` and every
+/// sub-call's `inner_proof`, assigning monotone `rw_counter` values in
+/// strict EVM execution order.
+///
+/// EVM storage is **transaction-global**: an SSTORE in a sub-call immediately
+/// visible to the caller (and vice-versa).  By flattening the claim list here,
+/// all SLOAD/SSTORE/TLOAD/TSTORE accesses across the entire call tree are
+/// covered by the outer [`StorageConsistencyAir`], closing Gap 2.
+///
+/// Inner-call claims are inserted immediately after the CALL step's own
+/// claims (before the next outer step), which matches the EVM dispatch order:
+/// the callee executes between the CALL opcode firing and its `step_end`.
+fn collect_storage_claims_recursive(
+  itps: &[InstructionTransitionProof],
+  rw_counter: &mut u64,
+) -> Vec<StorageAccessClaim> {
+  let mut out = Vec::new();
+  for itp in itps {
+    // This step's own storage claims (SLOAD/SSTORE/TLOAD/TSTORE).
+    for claim in &itp.storage_claims {
+      *rw_counter += 1;
+      out.push(StorageAccessClaim {
+        rw_counter: *rw_counter,
+        contract: claim.contract,
+        slot: claim.slot,
+        is_write: claim.is_write,
+        value: claim.value,
+      });
+    }
+    // Then the callee's claims — inner execution runs after the CALL fires.
+    if let Some(sc) = &itp.sub_call_claim {
+      let inner = collect_storage_claims_recursive(&sc.inner_proof.steps, rw_counter);
+      out.extend(inner);
+    }
+  }
+  out
+}
+
+// Internal implementation shared by both public entry-points.
+fn prove_batch_transaction_zk_receipt_impl(
+  itps: &[InstructionTransitionProof],
+) -> Result<BatchTransactionZkReceipt, String> {
+  // Pre-check: reject forged/invalid proofs before expensive STARK proving.
+  // Applies verify_proof (semantic + WFF consistency) to every instruction,
+  // whether or not a semantic_proof is supplied.
+  for (i, itp) in itps.iter().enumerate() {
+    if !verify_proof(itp) {
+      return Err(format!(
+        "semantic/row verification failed at step {i} (opcode 0x{:02x})",
+        itp.opcode
+      ));
+    }
+  }
+
   let items: Vec<(u8, WFF, &Proof)> = itps
     .iter()
     .filter_map(|itp| {
-      let wff = wff_instruction(itp.opcode, &itp.stack_inputs, &itp.stack_outputs)?;
-      itp.semantic_proof.as_ref().map(|p| (itp.opcode, wff, p))
+      let wff = wff_instruction(itp.opcode, &itp.stack_inputs, &itp.stack_outputs);
+      let proof_ref: &Proof = &itp.semantic_proof;
+      Some((itp.opcode, wff, proof_ref))
     })
     .collect();
 
   if items.is_empty() {
-    return Err("prove_batch_transaction_zk_receipt: no semantic proofs in batch".to_string());
+    return Err("prove_batch_transaction_zk_receipt: no provable instructions in batch".to_string());
   }
 
   let manifest = build_batch_manifest_from_wffs(&items)?;
@@ -1589,13 +1583,8 @@ pub fn prove_batch_transaction_zk_receipt(
   // preprocessed matrix; only the tag in `pis[0]` differs.
   let stack_bind_pv =
     make_batch_receipt_binding_public_values(RECEIPT_BIND_TAG_STACK, &manifest.entries);
-  let stack_ir_proof = prove_batch_stack_ir_with_prep(&manifest, &prep_data, &stack_bind_pv)?;
 
-  let lut_proof = prove_batch_lut_with_prep(&manifest, &prep_data, &lut_bind_pv)?;
-
-  // Collect memory access claims from all instructions, assigning monotone rw_counters.
-  // MCOPY claims are translated so that their src_rw_start / dst_rw_start reflect the
-  // batch-scoped counter used when building the MemoryConsistencyAir trace.
+  // Collect all claims before spawning threads (sequential, O(n)).
   let mut all_mem_claims: Vec<MemAccessClaim> = Vec::new();
   let mut all_stor_claims: Vec<StorageAccessClaim> = Vec::new();
   let mut all_keccak_claims: Vec<KeccakClaim> = Vec::new();
@@ -1646,46 +1635,58 @@ pub fn prove_batch_transaction_zk_receipt(
       all_keccak_claims.push(kc.clone());
     }
   }
-  let memory_proof = if all_mem_claims.is_empty() {
-    None
-  } else {
-    Some(prove_memory_consistency(&all_mem_claims)?)
-  };
-  let storage_proof = if all_stor_claims.is_empty() {
-    None
-  } else {
-    Some(prove_storage_consistency(&all_stor_claims)?)
-  };
-  let keccak_proof = if all_keccak_claims.is_empty() {
-    None
-  } else {
-    Some(prove_keccak_consistency(&all_keccak_claims)?)
-  };
-
-  // Collect stack claims from all instructions (rw_counter is shared and already monotone
-  // since the claims are emitted in execution order by the inspector).
   let all_stack_claims: Vec<StackAccessClaim> = itps
     .iter()
     .flat_map(|itp| itp.stack_claims.iter().cloned())
     .collect();
-  let stack_proof = if all_stack_claims.is_empty() {
-    None
-  } else {
-    Some(prove_stack_consistency(&all_stack_claims)?)
-  };
-  // Stack RW chronological proof: proves that every pop sees the most-recent
-  // push at the same depth, with the full ordered log committed via Poseidon.
-  let stack_rw_proof = if all_stack_claims.is_empty() {
-    None
-  } else {
-    Some(prove_stack_rw(&all_stack_claims)?)
-  };
-
-  // Collect return/revert data from the last terminating instruction (if any).
   let return_data = itps
     .iter()
     .rev()
     .find_map(|itp| itp.return_data_claim.clone());
+
+  use std::sync::Mutex;
+  use crate::zk_proof::batch_proof_pool;
+
+  let stack_ir_res:  Mutex<Option<Result<CircleStarkProof, String>>>  = Mutex::new(None);
+  let lut_res:       Mutex<Option<Result<CircleStarkProof, String>>>  = Mutex::new(None);
+  let memory_res:    Mutex<Option<Result<Option<MemoryConsistencyProof>, String>>>   = Mutex::new(None);
+  let storage_res:   Mutex<Option<Result<Option<StorageConsistencyProof>, String>>>  = Mutex::new(None);
+  let keccak_res:    Mutex<Option<Result<Option<KeccakConsistencyProof>, String>>>   = Mutex::new(None);
+  let stack_res:     Mutex<Option<Result<Option<StackConsistencyProof>, String>>>    = Mutex::new(None);
+  let stack_rw_res:  Mutex<Option<Result<Option<StackRwProof>, String>>>             = Mutex::new(None);
+
+  batch_proof_pool().scope(|s| {
+    s.spawn(|_| *stack_ir_res.lock().unwrap() = Some(prove_batch_stack_ir_with_prep(&manifest, &prep_data, &stack_bind_pv)));
+    s.spawn(|_| *lut_res.lock().unwrap()      = Some(prove_batch_lut_with_prep(&manifest, &prep_data, &lut_bind_pv)));
+    s.spawn(|_| *memory_res.lock().unwrap()   = Some(
+      if all_mem_claims.is_empty() { Ok(None) }
+      else { prove_memory_consistency(&all_mem_claims).map(Some) }
+    ));
+    s.spawn(|_| *storage_res.lock().unwrap()  = Some(
+      if all_stor_claims.is_empty() { Ok(None) }
+      else { prove_storage_consistency(&all_stor_claims).map(Some) }
+    ));
+    s.spawn(|_| *keccak_res.lock().unwrap()   = Some(
+      if all_keccak_claims.is_empty() { Ok(None) }
+      else { prove_keccak_consistency(&all_keccak_claims).map(Some) }
+    ));
+    s.spawn(|_| *stack_res.lock().unwrap()    = Some(
+      if all_stack_claims.is_empty() { Ok(None) }
+      else { prove_stack_consistency(&all_stack_claims).map(Some) }
+    ));
+    s.spawn(|_| *stack_rw_res.lock().unwrap() = Some(
+      if all_stack_claims.is_empty() { Ok(None) }
+      else { prove_stack_rw(&all_stack_claims).map(Some) }
+    ));
+  });
+
+  let stack_ir_proof = stack_ir_res.into_inner().unwrap().unwrap()?;
+  let lut_proof      = lut_res.into_inner().unwrap().unwrap()?;
+  let memory_proof   = memory_res.into_inner().unwrap().unwrap()?;
+  let storage_proof  = storage_res.into_inner().unwrap().unwrap()?;
+  let keccak_proof   = keccak_res.into_inner().unwrap().unwrap()?;
+  let stack_proof    = stack_res.into_inner().unwrap().unwrap()?;
+  let stack_rw_proof = stack_rw_res.into_inner().unwrap().unwrap()?;
 
   Ok(BatchTransactionZkReceipt {
     stack_ir_proof,
@@ -1699,7 +1700,60 @@ pub fn prove_batch_transaction_zk_receipt(
     stack_rw_proof,
     mcopy_claims: all_mcopy_claims,
     return_data,
+    env_context: None,
+    world_state_context: None,
   })
+}
+
+/// Prove a batch and embed the given [`BlockTxContext`] as public-input binding.
+///
+/// This is the preferred path for production proving: any env-reading opcode
+/// (COINBASE, TIMESTAMP, CALLER, CALLVALUE, ADDRESS, …) in the batch will
+/// have its claimed output validated against `ctx` during
+/// [`verify_batch_transaction_zk_receipt`].
+pub fn prove_batch_transaction_zk_receipt_with_env(
+  itps: &[InstructionTransitionProof],
+  ctx: BlockTxContext,
+) -> Result<BatchTransactionZkReceipt, String> {
+  let mut receipt = prove_batch_transaction_zk_receipt(itps)?;
+  receipt.env_context = Some(ctx);
+  Ok(receipt)
+}
+
+/// Prove a batch and embed the given [`WorldStateContext`] as public-input binding.
+///
+/// Resolves Gap-B1 (BALANCE), Gap-B2 (EXTCODESIZE/EXTCODEHASH),
+/// Gap-B3 (BLOCKHASH), and Gap-B4 (SELFBALANCE): every external-state
+/// opcode's claimed output will be validated against the committed table
+/// during [`verify_batch_transaction_zk_receipt`].
+///
+/// The `WorldStateContext` must contain one entry per distinct
+/// `(opcode, key)` pair in the batch; step 14 rejects the receipt if any
+/// entry is missing or mismatched.
+pub fn prove_batch_transaction_zk_receipt_with_world_state(
+  itps: &[InstructionTransitionProof],
+  ws: WorldStateContext,
+) -> Result<BatchTransactionZkReceipt, String> {
+  let mut receipt = prove_batch_transaction_zk_receipt(itps)?;
+  receipt.world_state_context = Some(ws);
+  Ok(receipt)
+}
+
+/// Prove a batch and embed both env-context and world-state-context bindings.
+///
+/// Combines `prove_batch_transaction_zk_receipt_with_env` and
+/// `prove_batch_transaction_zk_receipt_with_world_state` in a single call,
+/// enabling both step 13 (Gap-A env oracle) and step 14 (Gap-B world-state
+/// oracle) validation.
+pub fn prove_batch_transaction_zk_receipt_with_env_and_world_state(
+  itps: &[InstructionTransitionProof],
+  ctx: BlockTxContext,
+  ws: WorldStateContext,
+) -> Result<BatchTransactionZkReceipt, String> {
+  let mut receipt = prove_batch_transaction_zk_receipt(itps)?;
+  receipt.env_context = Some(ctx);
+  receipt.world_state_context = Some(ws);
+  Ok(receipt)
 }
 
 // ── MCOPY copy-consistency helpers ───────────────────────────────────────────
@@ -1829,7 +1883,8 @@ fn validate_oracle_sload_reads(
   for e in &stor_proof.read_log {
     *counts.entry((e.slot, e.value)).or_default() += 1;
   }
-  for stmt in statements.iter().filter(|s| s.opcode == opcode::SLOAD) {
+  // TLOAD has the same stack layout as SLOAD (one key in, one value out).
+  for stmt in statements.iter().filter(|s| s.opcode == opcode::SLOAD || s.opcode == opcode::TLOAD) {
     if stmt.s_i.stack.is_empty() || stmt.s_next.stack.is_empty() {
       return false;
     }
@@ -1842,7 +1897,7 @@ fn validate_oracle_sload_reads(
   true
 }
 
-/// For every SSTORE statement, verify the committed (slot, value) pair appears
+/// For every SSTORE/TSTORE statement, verify the committed (slot, value) pair appears
 /// in the storage consistency proof's write log.
 fn validate_oracle_sstore_writes(
   statements: &[InstructionTransitionStatement],
@@ -1853,7 +1908,8 @@ fn validate_oracle_sstore_writes(
   for e in &stor_proof.write_log {
     *counts.entry((e.slot, e.value)).or_default() += 1;
   }
-  for stmt in statements.iter().filter(|s| s.opcode == opcode::SSTORE) {
+  // TSTORE has the same stack layout as SSTORE (slot key + value, both inputs).
+  for stmt in statements.iter().filter(|s| s.opcode == opcode::SSTORE || s.opcode == opcode::TSTORE) {
     if stmt.s_i.stack.len() < 2 {
       return false;
     }
@@ -1894,6 +1950,102 @@ fn validate_oracle_keccak_outputs(
   true
 }
 
+/// Validate external-state oracle outputs against the committed world-state table.
+///
+/// For each statement that carries an [`ExternalStateClaim`] (produced by
+/// BLOCKHASH, EXTCODESIZE, EXTCODEHASH, BALANCE, or SELFBALANCE), look up
+/// `(claim.opcode, claim.key)` in `ws.entries` and assert that
+/// `claim.output_value == entry.value`.
+///
+/// If the `WorldStateContext` does not contain an entry for a particular
+/// `(opcode, key)` pair the claim is **rejected** (the prover is required to
+/// provide a complete context).
+///
+/// Recursively walks inner sub-call proofs so that world-state reads inside
+/// callees are also bound to the same committed table.
+fn validate_oracle_external_state_claims(
+  statements: &[InstructionTransitionStatement],
+  ws: &WorldStateContext,
+) -> bool {
+  use std::collections::HashMap;
+  let map: HashMap<(u8, [u8; 32]), [u8; 32]> =
+    ws.entries.iter().map(|e| ((e.opcode, e.key), e.value)).collect();
+
+  fn check_stmts(
+    stmts: &[InstructionTransitionStatement],
+    map: &std::collections::HashMap<(u8, [u8; 32]), [u8; 32]>,
+  ) -> bool {
+    for stmt in stmts {
+      // Check this statement's external-state claim.
+      if let Some(esc) = &stmt.external_state_claim {
+        match map.get(&(esc.opcode, esc.key)) {
+          Some(&committed) if committed == esc.output_value => {}
+          _ => return false,
+        }
+      }
+      // Recurse into inner sub-call proofs.
+      if let Some(sc) = &stmt.sub_call_claim {
+        let inner_stmts: Vec<InstructionTransitionStatement> = sc
+          .inner_proof
+          .steps
+          .iter()
+          .map(statement_from_proof_step)
+          .collect();
+        if !check_stmts(&inner_stmts, map) {
+          return false;
+        }
+      }
+    }
+    true
+  }
+
+  check_stmts(statements, &map)
+}
+
+/// Validate env-opcode oracle outputs against embedded public-input context.
+///
+/// For each statement whose opcode belongs to the static-per-transaction set
+/// (COINBASE, TIMESTAMP, NUMBER, DIFFICULTY/PREVRANDAO, GASLIMIT, CHAINID,
+/// BASEFEE, ORIGIN, GASPRICE, CALLER, CALLVALUE, ADDRESS, CALLDATASIZE),
+/// the single pushed value (`s_next.stack[0]`) must equal the corresponding
+/// field in `ctx`.
+///
+/// Dynamic per-instruction opcodes (PC, MSIZE, GAS, CALLDATALOAD, CODESIZE,
+/// RETURNDATASIZE, SELFBALANCE, BLOBBASEFEE) are skipped — they require
+/// per-step witnesses beyond a single public context.
+fn validate_oracle_env_claims(
+  statements: &[InstructionTransitionStatement],
+  ctx: &BlockTxContext,
+) -> bool {
+  for stmt in statements {
+    let expected: [u8; 32] = match stmt.opcode {
+      opcode::COINBASE    => ctx.coinbase,
+      opcode::TIMESTAMP   => ctx.timestamp,
+      opcode::NUMBER      => ctx.block_number,
+      opcode::DIFFICULTY  => ctx.prevrandao,
+      opcode::GASLIMIT    => ctx.gas_limit,
+      opcode::CHAINID     => ctx.chain_id,
+      opcode::BASEFEE     => ctx.basefee,
+      opcode::ORIGIN      => ctx.origin,
+      opcode::GASPRICE    => ctx.gas_price,
+      opcode::CALLER      => ctx.caller,
+      opcode::CALLVALUE   => ctx.callvalue,
+      opcode::ADDRESS     => ctx.self_address,
+      opcode::CALLDATASIZE => ctx.calldata_size,
+      _ => continue,
+    };
+    // All env opcodes above push exactly one value with no pops; the pushed
+    // word is the first (and only) element of s_next.stack.
+    let Some(&claimed) = stmt.s_next.stack.first() else {
+      return false;
+    };
+    if claimed != expected {
+      return false;
+    }
+  }
+  true
+}
+
 /// Verify that an MCOPY instruction faithfully copied its source bytes to
 /// the destination — i.e., that every src read and dst write in the memory
 /// proof carry the same data as `mc.data`.
@@ -1927,6 +2079,34 @@ fn validate_mcopy_copy_consistency(
 }
 
 
+/// Recursively collect all [`InstructionTransitionStatement`]s that have
+/// SLOAD or SSTORE opcodes from `statements` and their sub-call inner proofs.
+///
+/// Used by `verify_batch_transaction_zk_receipt` to extend the oracle
+/// cross-checks (11c/11d) from outer statements to the full call tree,
+/// ensuring inner SLOAD/SSTORE oracle values are also bound to the
+/// transaction-global `StorageConsistencyProof`.
+fn collect_all_storage_stmts_recursive(
+  statements: &[InstructionTransitionStatement],
+) -> Vec<InstructionTransitionStatement> {
+  let mut out = Vec::new();
+  for stmt in statements {
+    if stmt.opcode == opcode::SLOAD || stmt.opcode == opcode::SSTORE {
+      out.push(stmt.clone());
+    }
+    if let Some(sc) = &stmt.sub_call_claim {
+      let inner_stmts: Vec<InstructionTransitionStatement> = sc
+        .inner_proof
+        .steps
+        .iter()
+        .map(statement_from_proof_step)
+        .collect();
+      out.extend(collect_all_storage_stmts_recursive(&inner_stmts));
+    }
+  }
+  out
+}
+
 /// Verify a batch ZK receipt.
 ///
 /// **Verification steps (all deterministic except step 4):**
@@ -1958,16 +2138,19 @@ pub fn verify_batch_transaction_zk_receipt(
       return false;
     }
 
+    // VmState opcode fields must agree with the statement opcode
+    // (mirrors the check in verify_instruction_zk_receipt).
+    if stmt.s_i.opcode != stmt.opcode || stmt.s_next.opcode != stmt.opcode {
+      return false;
+    }
+
     // Statement-level SP/arity coherence.
     if !verify_statement_semantics(stmt) {
       return false;
     }
 
     // Bind manifest WFF to actual execution output.
-    let expected_wff = match wff_instruction(stmt.opcode, &stmt.s_i.stack, &stmt.s_next.stack) {
-      Some(wff) => wff,
-      None => return false,
-    };
+    let expected_wff = wff_instruction(stmt.opcode, &stmt.s_i.stack, &stmt.s_next.stack);
     if expected_wff != entry.wff {
       return false;
     }
@@ -2119,25 +2302,39 @@ pub fn verify_batch_transaction_zk_receipt(
   }
 
   // 11c. SLOAD oracle ↔ StorageConsistencyProof.read_log
-  let has_sload = statements.iter().any(|s| s.opcode == opcode::SLOAD);
-  if has_sload {
+  //
+  // Collect SLOAD/TLOAD statements from outer AND inner (sub-call) steps recursively.
+  // TLOAD uses the same stack layout as SLOAD and is included in the same
+  // StorageConsistencyAir (Gap-D1 verifier extension).
+  let all_sload_stmts = collect_all_storage_stmts_recursive(statements);
+  let all_sload_stmts: Vec<InstructionTransitionStatement> = all_sload_stmts
+    .into_iter()
+    .filter(|s| s.opcode == opcode::SLOAD || s.opcode == opcode::TLOAD)
+    .collect();
+  if !all_sload_stmts.is_empty() {
     let stor_proof = match &receipt.storage_proof {
       Some(p) => p,
       None => return false,
     };
-    if !validate_oracle_sload_reads(statements, stor_proof) {
+    if !validate_oracle_sload_reads(&all_sload_stmts, stor_proof) {
       return false;
     }
   }
 
-  // 11d. SSTORE oracle ↔ StorageConsistencyProof.write_log
-  let has_sstore = statements.iter().any(|s| s.opcode == opcode::SSTORE);
-  if has_sstore {
+  // 11d. SSTORE/TSTORE oracle ↔ StorageConsistencyProof.write_log
+  //
+  // Same recursive collection for SSTORE and TSTORE (Gap-D1 verifier extension).
+  let all_sstore_stmts = collect_all_storage_stmts_recursive(statements);
+  let all_sstore_stmts: Vec<InstructionTransitionStatement> = all_sstore_stmts
+    .into_iter()
+    .filter(|s| s.opcode == opcode::SSTORE || s.opcode == opcode::TSTORE)
+    .collect();
+  if !all_sstore_stmts.is_empty() {
     let stor_proof = match &receipt.storage_proof {
       Some(p) => p,
       None => return false,
     };
-    if !validate_oracle_sstore_writes(statements, stor_proof) {
+    if !validate_oracle_sstore_writes(&all_sstore_stmts, stor_proof) {
       return false;
     }
   }
@@ -2160,17 +2357,78 @@ pub fn verify_batch_transaction_zk_receipt(
     }
   }
 
-  // 12. SubCall inner_proof recursive verification.
+  // 12. SubCall success-flag binding + recursive inner_proof verification.
   //
-  // For every CALL/CALLCODE/DELEGATECALL/STATICCALL/CREATE/CREATE2 instruction
-  // that carries an `inner_proof`, recursively verify the callee's execution
-  // trace.  This provides callee soundness and enforces the return_data
-  // binding between the caller claim and the callee receipt.
+  // (a) For every CALL/CREATE family instruction: the top-of-stack value
+  //     after the instruction must agree with SubCallClaim.success, and for
+  //     CREATE/CREATE2 the address portion must match SubCallClaim.callee.
+  // (b) Recursively verify the callee's execution trace via verify_sub_call_claim.
   for stmt in statements {
-    if let Some(sc) = &stmt.sub_call_claim
-      && verify_sub_call_claim(sc, statements).is_err() {
+    if let Some(sc) = &stmt.sub_call_claim {
+      // (a) Success/address binding.
+      match sc.opcode {
+        opcode::CALL | opcode::CALLCODE | opcode::DELEGATECALL | opcode::STATICCALL => {
+          let stack_ok = stmt
+            .s_next
+            .stack
+            .first()
+            .map(|v| *v != [0u8; 32])
+            .unwrap_or(false);
+          if stack_ok != sc.success {
+            return false;
+          }
+        }
+        opcode::CREATE | opcode::CREATE2 => {
+          let top = stmt.s_next.stack.first().unwrap_or(&[0u8; 32]);
+          let stack_ok = *top != [0u8; 32];
+          if stack_ok != sc.success {
+            return false;
+          }
+          // On success the pushed word is the deployed address (zero-padded to 32 bytes).
+          if sc.success {
+            let top_addr: [u8; 20] = match top[12..32].try_into() {
+              Ok(a) => a,
+              Err(_) => return false,
+            };
+            if top_addr != sc.callee {
+              return false;
+            }
+          }
+        }
+        _ => {}
+      }
+      // (b) Recursive inner proof verification.
+      if verify_sub_call_claim(sc, statements).is_err() {
         return false;
       }
+    }
+  }
+
+  // 13. Env-oracle public-input validation.
+  //
+  // When the receipt was produced with an embedded BlockTxContext
+  // (via prove_batch_transaction_zk_receipt_with_env), verify that every
+  // env-opcode's claimed output matches the corresponding context field.
+  // This closes the oracle gap for COINBASE, TIMESTAMP, NUMBER, PREVRANDAO,
+  // GASLIMIT, CHAINID, BASEFEE, ORIGIN, GASPRICE, CALLER, CALLVALUE,
+  // ADDRESS, and CALLDATASIZE.
+  if let Some(ctx) = &receipt.env_context {
+    if !validate_oracle_env_claims(statements, ctx) {
+      return false;
+    }
+  }
+
+  // 14. World-state oracle binding (Gap-B1/B2/B3/B4).
+  //
+  // When the receipt was produced with an embedded WorldStateContext
+  // (via prove_batch_transaction_zk_receipt_with_world_state), verify that
+  // every external-state opcode's claimed output matches the committed entry.
+  // This closes the oracle gap for BLOCKHASH, EXTCODESIZE, EXTCODEHASH,
+  // BALANCE, and SELFBALANCE.
+  if let Some(ws) = &receipt.world_state_context {
+    if !validate_oracle_external_state_claims(statements, ws) {
+      return false;
+    }
   }
 
   true
@@ -2190,9 +2448,8 @@ pub struct LeafReceipt {
   pub s_in: StateCommitment,
   /// VM state commitment at segment exit.
   pub s_out: StateCommitment,
-  /// The batch STARK proof covering all arithmetic instructions in this
-  /// segment.  `None` when the segment has no arithmetic opcodes (pure
-  /// structural instructions like JUMP/PUSH need no batch proof).
+  /// The batch STARK proof covering all instructions in this segment.
+  /// `None` when the segment has no instructions (empty batch).
   pub batch_receipt: Option<BatchTransactionZkReceipt>,
   /// Raw step proofs for this segment — required by the verifier to
   /// reconstruct [`InstructionTransitionStatement`]s from stored data.
@@ -2257,6 +2514,7 @@ fn statement_from_proof_step(step: &InstructionTransitionProof) -> InstructionTr
       sp: step.stack_inputs.len(),
       stack: step.stack_inputs.clone(),
       memory_root: [0u8; 32],
+      storage_root: [0u8; 32],
     },
     s_next: VmState {
       opcode: step.opcode,
@@ -2264,29 +2522,30 @@ fn statement_from_proof_step(step: &InstructionTransitionProof) -> InstructionTr
       sp: step.stack_outputs.len(),
       stack: step.stack_outputs.clone(),
       memory_root: [0u8; 32],
+      storage_root: [0u8; 32],
     },
     accesses: Vec::new(),
     sub_call_claim: step.sub_call_claim.clone(),
     mcopy_claim: step.mcopy_claim.clone(),
+    external_state_claim: step.external_state_claim.clone(),
   }
 }
 
-/// Verify a [`SubCallClaim`]'s `inner_proof`, if present.
+/// Verify a [`SubCallClaim`]'s `inner_proof`.
 ///
 /// Steps:
 /// 1. Enforce `claim.depth < MAX_CALL_DEPTH`.
-/// 2. If `inner_proof` is `Some`, build [`InstructionTransitionStatement`]s
-///    from the inner steps for structural consistency checking.
-/// 3. Confirm the callee's `return_data` matches `claim.return_data`
-///    (binding the caller's claim to the callee's RETURN/REVERT).
-/// 4. Recursively verify any nested sub-calls inside the inner proof,
-///    so callee soundness propagates transitively (depth-bounded by
-///    `MAX_CALL_DEPTH`).
+/// 2. If `inner_proof.steps` is non-empty, build [`InstructionTransitionStatement`]s
+///    and perform full structural consistency checking.
+/// 3. Confirm return_data binding: the callee's RETURN/REVERT data must match
+///    `claim.return_data` (empty for precompiles/STOP/out-of-gas is OK).
+/// 4. STATICCALL write-prohibition (EIP-214): inner steps must not contain
+///    state-modifying opcodes.
+/// 5. Recursively verify any nested sub-calls, so callee soundness propagates
+///    transitively (depth-bounded by `MAX_CALL_DEPTH`).
 ///
 /// When `inner_proof.batch_receipt` is `Some`, the receipt is cryptographically
-/// verified via `verify_batch_transaction_zk_receipt`. A `None` receipt is also
-/// accepted (oracle mode), which is useful for tests and tooling that omit the
-/// full STARK prover.
+/// verified via `verify_batch_transaction_zk_receipt`.
 pub fn verify_sub_call_claim(
   claim: &SubCallClaim,
   _outer_statements: &[InstructionTransitionStatement],
@@ -2298,61 +2557,159 @@ pub fn verify_sub_call_claim(
     ));
   }
 
-  if let Some(inner) = &claim.inner_proof {
-    if inner.steps.is_empty() {
-      return Err("SubCall inner_proof has no steps".to_string());
+  let inner = &claim.inner_proof;
+
+  // Empty steps = precompile / empty account — no EVM bytecode to verify.
+  // Return-data comes from the host environment and is accepted as-is.
+  if inner.steps.is_empty() {
+    return Ok(());
+  }
+
+  // Build statements from ALL steps — prove_batch_transaction_zk_receipt
+  // processes every step (using auto-proofs for structural opcodes), so
+  // the manifest entry count equals the number of steps, not just those
+  // that carry an explicit semantic_proof.
+  let inner_stmts: Vec<InstructionTransitionStatement> = inner
+    .steps
+    .iter()
+    .map(statement_from_proof_step)
+    .collect();
+
+  // STARK receipt re-verification.
+  // When the inner proof carries a pre-computed batch receipt, verify it
+  // cryptographically.  `batch_receipt = None` means the inner execution
+  // has not been STARK-proven yet (capture-only mode); accepted structurally.
+  if let Some(receipt) = &inner.batch_receipt
+    && !verify_batch_transaction_zk_receipt(&inner_stmts, receipt) {
+      return Err("SubCall inner STARK receipt verification failed".to_string());
     }
 
-    // Build statements from the inner proof's steps.
-    // Only include steps that have a semantic_proof — `prove_batch_transaction_zk_receipt`
-    // filters the same way, so the manifest entry count matches.
-    let inner_stmts: Vec<InstructionTransitionStatement> = inner
-      .steps
-      .iter()
-      .filter(|s| s.semantic_proof.is_some())
-      .map(statement_from_proof_step)
-      .collect();
+  // Gap-C2: The inner proof must end with a terminal opcode.
+  // A non-terminal last step (e.g. PUSH1, ADD) indicates a truncated trace —
+  // the prover may have cut execution just before a REVERT to falsely claim
+  // success, or injected arbitrary return-data.
+  let last_op = inner.steps.last().map(|s| s.opcode).unwrap_or(0);
+  if !matches!(
+    last_op,
+    opcode::RETURN | opcode::REVERT | opcode::STOP | opcode::SELFDESTRUCT
+  ) {
+    return Err(format!(
+      "SubCall inner proof is non-terminal (last opcode 0x{:02x}); \
+       prover may have truncated execution to hide a REVERT",
+      last_op
+    ));
+  }
 
-    // STARK receipt re-verification.
-    // When the inner proof carries a pre-computed batch receipt, verify it
-    // cryptographically.  `None` = oracle mode (structural-only), which is
-    // still accepted — it lets tests and tooling omit the full STARK prover.
-    if let Some(receipt) = &inner.batch_receipt
-      && !verify_batch_transaction_zk_receipt(&inner_stmts, receipt) {
-        return Err("SubCall inner STARK receipt verification failed".to_string());
-      }
-
-    // Return-data binding: the last RETURN/REVERT step's bytes must match.
-    let inner_return = inner
-      .steps
-      .iter()
-      .rev()
-      .find_map(|s| s.return_data_claim.as_ref());
-    match inner_return {
-      Some(rd) => {
-        if rd.data != claim.return_data {
-          return Err(format!(
-            "SubCall return_data mismatch: inner={} bytes, claim={} bytes",
-            rd.data.len(),
-            claim.return_data.len()
-          ));
-        }
-      }
-      None => {
-        // STOP or out-of-gas: caller expects empty return data.
-        if !claim.return_data.is_empty() {
-          return Err(
-            "SubCall claim has non-empty return_data but inner proof has no RETURN".to_string(),
-          );
-        }
+  // Gap-C1: The terminal opcode must agree with the claimed success flag.
+  //   RETURN / STOP  → success must be true
+  //   REVERT         → success must be false
+  //   SELFDESTRUCT   → implies success (not strictly enforced in current MVP)
+  match last_op {
+    opcode::RETURN | opcode::STOP => {
+      if !claim.success {
+        return Err(
+          "SubCall inner proof ends with RETURN/STOP but success=false".to_string(),
+        );
       }
     }
+    opcode::REVERT => {
+      if claim.success {
+        return Err(
+          "SubCall inner proof ends with REVERT but success=true".to_string(),
+        );
+      }
+    }
+    _ => {}
+  }
 
-    // Recursively verify any nested sub-calls inside the inner proof.
+  // Gap-C4: CREATE2 address derivation formula.
+  // Expected: keccak256(0xff ++ deployer[20] ++ salt[32] ++ keccak256(initcode)[32])[12..]
+  if claim.opcode == opcode::CREATE2 {
+    let deployer = match claim.create2_deployer {
+      Some(d) => d,
+      None => return Err("CREATE2 claim is missing deployer".to_string()),
+    };
+    let salt = match claim.create2_salt {
+      Some(s) => s,
+      None => return Err("CREATE2 claim is missing salt".to_string()),
+    };
+    let initcode_hash = match claim.create2_initcode_hash {
+      Some(h) => h,
+      None => return Err("CREATE2 claim is missing initcode_hash".to_string()),
+    };
+    // Build the 85-byte preimage: 0xff ++ deployer(20) ++ salt(32) ++ initcode_hash(32)
+    let mut preimage = [0u8; 85];
+    preimage[0] = 0xff;
+    preimage[1..21].copy_from_slice(&deployer);
+    preimage[21..53].copy_from_slice(&salt);
+    preimage[53..85].copy_from_slice(&initcode_hash);
+    let hash = crate::zk_proof::keccak256_bytes(&preimage);
+    let mut expected_addr = [0u8; 20];
+    expected_addr.copy_from_slice(&hash[12..32]);
+    if expected_addr != claim.callee {
+      return Err(format!(
+        "CREATE2 address mismatch: derived 0x{} but claim.callee is 0x{}",
+        expected_addr.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+        claim.callee.iter().map(|b| format!("{:02x}", b)).collect::<String>(),
+      ));
+    }
+  }
+
+  // Return-data binding: the last RETURN/REVERT step's bytes must match.
+  let inner_return = inner
+    .steps
+    .iter()
+    .rev()
+    .find_map(|s| s.return_data_claim.as_ref());
+  match inner_return {
+    Some(rd) => {
+      if rd.data != claim.return_data {
+        return Err(format!(
+          "SubCall return_data mismatch: inner={} bytes, claim={} bytes",
+          rd.data.len(),
+          claim.return_data.len()
+        ));
+      }
+    }
+    None => {
+      // STOP or out-of-gas: caller expects empty return data.
+      if !claim.return_data.is_empty() {
+        return Err(
+          "SubCall claim has non-empty return_data but inner proof has no RETURN".to_string(),
+        );
+      }
+    }
+  }
+
+  // STATICCALL write-prohibition (EIP-214).
+  // Inner execution must not contain any state-modifying opcodes.
+  if claim.opcode == opcode::STATICCALL {
     for step in &inner.steps {
-      if let Some(sc) = &step.sub_call_claim {
-        verify_sub_call_claim(sc, &inner_stmts)?;
+      if step.storage_claims.iter().any(|c| c.is_write)
+        || matches!(
+          step.opcode,
+          opcode::LOG0
+            | opcode::LOG1
+            | opcode::LOG2
+            | opcode::LOG3
+            | opcode::LOG4
+            | opcode::CREATE
+            | opcode::CREATE2
+            | opcode::SELFDESTRUCT
+        )
+      {
+        return Err(format!(
+          "STATICCALL inner proof contains state-modifying opcode 0x{:02x}",
+          step.opcode
+        ));
       }
+    }
+  }
+
+  // Recursively verify any nested sub-calls inside the inner proof.
+  for step in &inner.steps {
+    if let Some(sc) = &step.sub_call_claim {
+      verify_sub_call_claim(sc, &inner_stmts)?;
     }
   }
 
@@ -2392,14 +2749,34 @@ pub fn prove_execution_chain(
   let commitments: Vec<StateCommitment> = vm_state_seq.iter().map(commit_vm_state).collect();
 
   // Step 2: Build one LeafReceipt per segment.
+  //
+  // Maintain cumulative write-sets `mem_w_in` / `stor_w_in` so each segment's
+  // first-read values can be validated against the state inherited from prior
+  // segments (First-Read Initialization soundness check).
+  let mut mem_w_in = MemWriteSet::new();
+  let mut stor_w_in = StorWriteSet::new();
   let mut nodes: Vec<ExecutionReceipt> = Vec::with_capacity(n);
   for (i, steps) in step_seqs.into_iter().enumerate() {
-    let has_semantic = steps.iter().any(|s| s.semantic_proof.is_some());
-    let batch_receipt = if has_semantic {
-      Some(prove_batch_transaction_zk_receipt(&steps)?)
-    } else {
+    let batch_receipt = if steps.is_empty() {
       None
+    } else {
+      Some(prove_batch_transaction_zk_receipt_with_w_in(&steps, &mem_w_in, &stor_w_in)?)
     };
+
+    // Advance W_in for the next segment: accumulate writes from this segment.
+    for step in &steps {
+      for claim in &step.memory_claims {
+        if claim.is_write {
+          mem_w_in.insert(claim.addr, claim.value);
+        }
+      }
+      for claim in &step.storage_claims {
+        if claim.is_write {
+          stor_w_in.insert((claim.contract, claim.slot), claim.value);
+        }
+      }
+    }
+
     let leaf = LeafReceipt {
       s_in: commitments[i].clone(),
       s_out: commitments[i + 1].clone(),
@@ -2454,13 +2831,12 @@ pub fn prove_execution_chain(
 pub fn verify_execution_receipt(receipt: &ExecutionReceipt) -> Result<(), String> {
   match receipt {
     ExecutionReceipt::Leaf(leaf) => {
+      let stmts: Vec<InstructionTransitionStatement> = leaf
+        .steps
+        .iter()
+        .map(statement_from_proof_step)
+        .collect();
       if let Some(batch_receipt) = &leaf.batch_receipt {
-        let stmts: Vec<InstructionTransitionStatement> = leaf
-          .steps
-          .iter()
-          .filter(|s| s.semantic_proof.is_some())
-          .map(statement_from_proof_step)
-          .collect();
         if !verify_batch_transaction_zk_receipt(&stmts, batch_receipt) {
           return Err("Leaf batch receipt verification failed".to_string());
         }

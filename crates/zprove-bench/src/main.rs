@@ -4,13 +4,21 @@ use std::time::Instant;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use revm::bytecode::opcode;
+use revm::primitives::{Bytes, U256};
 
+use zprove_core::execute::{
+  execute_bytecode_and_prove_with_batch_zkp, execute_bytecode_trace,
+  prove_transaction_proof_with_batch_zkp,
+  reset_proof_phase_timings, read_proof_phase_timings,
+};
+use zprove_core::transition::TransactionProof;
 use zprove_core::semantic_proof::{
-  compute_addmod, compute_byte, compute_exp, compute_mulmod, compute_signextend,
+  compile_proof, compute_addmod, compute_byte, compute_exp, compute_mulmod, compute_signextend,
 };
 use zprove_core::transition::{
-  InstructionTransitionProof, InstructionTransitionStatement, VmState, build_batch_manifest,
-  prove_batch_transaction_zk_receipt, prove_instruction, verify_batch_transaction_zk_receipt,
+  InstructionTransitionProof, InstructionTransitionStatement, VmState,
+  build_batch_zk_receipt_prep, prove_batch_transaction_zk_receipt_with_prep,
+  prove_instruction, verify_batch_transaction_zk_receipt,
 };
 
 // ============================================================
@@ -24,6 +32,19 @@ struct BenchReport {
   samples: usize,
   log_rows: usize,
   rows: Vec<BatchBenchRow>,
+  tps: Option<TpsSection>,
+}
+
+struct TpsSection {
+  ncpus: usize,
+  tx_count: usize,
+  seq_us: f64,
+  par_us: f64,
+  /// If `--split` was passed: (seq_trace_us, seq_prove_us, par_trace_us, par_prove_us)
+  split: Option<(f64, f64, f64, f64)>,
+  /// If `--split` was passed: phase breakdown of the sequential prove run.
+  /// (seq_logup_ns, seq_fri_commit_ns, par_logup_ns, par_fri_commit_ns)
+  phase: Option<(u64, u64, u64, u64)>,
 }
 
 struct BatchBenchRow {
@@ -100,12 +121,124 @@ fn render_html(r: &BenchReport) -> String {
     })
     .collect::<String>();
 
+  let tps_section = if let Some(tps) = &r.tps {
+    let seq_ms = tps.seq_us / 1000.0;
+    let par_ms = tps.par_us / 1000.0;
+    let seq_tps = tps.tx_count as f64 / (tps.seq_us / 1_000_000.0);
+    let par_tps = tps.tx_count as f64 / (tps.par_us / 1_000_000.0);
+    let speedup = tps.seq_us / tps.par_us;
+    let base = format!(
+      "<h2>ERC-20 transfer TPS</h2>\
+       <p>bytecode: GT + ISZERO + SUB + MSTORE + ADD + MSTORE &mdash; 6 proven ops / transfer</p>\
+       <p>tx_count = {} &nbsp;|&nbsp; pool threads = {ncpus}</p>\
+       <table><thead><tr><th style='text-align:left'>mode</th>\
+       <th>tx count</th><th>wall ms</th><th>ms / tx</th><th>TPS</th></tr></thead><tbody>\
+       <tr><td style='text-align:left'>sequential</td><td>{n}</td>\
+       <td>{sm:.1}</td><td>{spt:.2}</td><td>{st:.0}</td></tr>\
+       <tr><td style='text-align:left'>parallel ({ncpus} threads)</td><td>{n}</td>\
+       <td>{pm:.1}</td><td>{ppt:.2}</td><td>{pt:.0}</td></tr>\
+       </tbody></table>\
+       <p>speedup: <b>{sp:.2}&times;</b></p>",
+      tps.tx_count,
+      ncpus = tps.ncpus,
+      n = tps.tx_count,
+      sm = seq_ms,
+      spt = seq_ms / tps.tx_count as f64,
+      st = seq_tps,
+      pm = par_ms,
+      ppt = par_ms / tps.tx_count as f64,
+      pt = par_tps,
+      sp = speedup,
+    );
+
+    let split_html = if let Some((st_us, sp_us, pt_us, pp_us)) = tps.split {
+      let n = tps.tx_count as f64;
+      let phase_html = if let Some((sl_ns, sf_ns, pl_ns, pf_ns)) = tps.phase {
+        let sl_ms = sl_ns as f64 / 1_000_000.0;
+        let sf_ms = sf_ns as f64 / 1_000_000.0;
+        let pl_ms = pl_ns as f64 / 1_000_000.0;
+        let pf_ms = pf_ns as f64 / 1_000_000.0;
+        let total_s = sl_ms + sf_ms;
+        format!(
+          "<h2>Sub-phase breakdown: LogUp vs FRI+Commit</h2>\
+           <table><thead><tr>\
+           <th style='text-align:left'>mode</th>\
+           <th>logup ms</th><th>logup ms/tx</th>\
+           <th>fri+com ms</th><th>fri+com ms/tx</th>\
+           <th>logup %</th><th>fri+com %</th>\
+           </tr></thead><tbody>\
+           <tr><td style='text-align:left'>sequential</td>\
+           <td>{sl:.3}</td><td>{slt:.4}</td>\
+           <td>{sf:.1}</td><td>{sft:.2}</td>\
+           <td>{slp:.1}%</td><td>{sfp:.1}%</td></tr>\
+           <tr><td style='text-align:left'>parallel ({ncpus} threads, amortized)</td>\
+           <td>{pl:.3}</td><td>{plt:.4}</td>\
+           <td>{pf_:.1}</td><td>{pft:.2}</td>\
+           <td>—</td><td>—</td></tr>\
+           </tbody></table>",
+          ncpus = tps.ncpus,
+          sl = sl_ms, slt = sl_ms / n,
+          sf = sf_ms, sft = sf_ms / n,
+          slp = sl_ms / total_s * 100.0,
+          sfp = sf_ms / total_s * 100.0,
+          pl = pl_ms, plt = pl_ms / n,
+          pf_ = pf_ms, pft = pf_ms / n,
+        )
+      } else {
+        String::new()
+      };
+      format!(
+        "<h2>ERC-20 phase breakdown (--split)</h2>\
+         <table><thead><tr>\
+         <th style='text-align:left'>mode</th>\
+         <th>trace ms</th><th>trace ms/tx</th>\
+         <th>prove ms</th><th>prove ms/tx</th>\
+         <th>total ms</th><th>TPS</th>\
+         </tr></thead><tbody>\
+         <tr><td style='text-align:left'>sequential</td>\
+         <td>{stm:.1}</td><td>{stpt:.2}</td>\
+         <td>{spm:.1}</td><td>{sppt:.2}</td>\
+         <td>{stot:.1}</td><td>{stps:.0}</td></tr>\
+         <tr><td style='text-align:left'>parallel ({ncpus} threads)</td>\
+         <td>{ptm:.1}</td><td>{ptpt:.2}</td>\
+         <td>{ppm:.1}</td><td>{pppt:.2}</td>\
+         <td>{ptot:.1}</td><td>{ptps:.0}</td></tr>\
+         </tbody></table>\
+         <p>prove / total (seq): <b>{pr_frac:.0}%</b> &nbsp; trace: <b>{tr_frac:.0}%</b></p>\
+         {phase_html}",
+        ncpus = tps.ncpus,
+        stm  = st_us / 1000.0,
+        stpt = st_us / 1000.0 / n,
+        spm  = sp_us / 1000.0,
+        sppt = sp_us / 1000.0 / n,
+        stot = (st_us + sp_us) / 1000.0,
+        stps = n / ((st_us + sp_us) / 1_000_000.0),
+        ptm  = pt_us / 1000.0,
+        ptpt = pt_us / 1000.0 / n,
+        ppm  = pp_us / 1000.0,
+        pppt = pp_us / 1000.0 / n,
+        ptot = (pt_us + pp_us) / 1000.0,
+        ptps = n / ((pt_us + pp_us) / 1_000_000.0),
+        pr_frac = sp_us / (st_us + sp_us) * 100.0,
+        tr_frac = st_us / (st_us + sp_us) * 100.0,
+        phase_html = phase_html,
+      )
+    } else {
+      String::new()
+    };
+
+    base + &split_html
+  } else {
+    String::new()
+  };
+
   format!(
     "<!DOCTYPE html><html><head><meta charset=\"UTF-8\">\
      <title>zprove batch bench</title><style>{css}</style></head>\
      <body><h1>zprove batch bench</h1>{meta}\
      <h2>prove_batch_transaction_zk_receipt / verify_batch_transaction_zk_receipt</h2>\
      <table><thead><tr>{th_row}</tr></thead><tbody>{rows}</tbody></table>\
+     {tps_section}\
      </body></html>"
   )
 }
@@ -189,6 +322,55 @@ fn random_bytes32(rng: &mut StdRng) -> [u8; 32] {
   let mut out = [0u8; 32];
   rng.fill(&mut out);
   out
+}
+
+// ============================================================
+// ERC-20 transfer bytecode helpers
+// ============================================================
+
+/// Push a u128 value as a 32-byte big-endian word (PUSH32 opcode).
+fn push32_u128(code: &mut Vec<u8>, v: u128) {
+  code.push(opcode::PUSH32);
+  let mut b = [0u8; 32];
+  b[16..].copy_from_slice(&v.to_be_bytes());
+  code.extend_from_slice(&b);
+}
+
+/// Minimal ERC-20 transfer: overflow check + debit sender + credit recipient.
+///
+/// Proven ops (per transfer):
+///   GT      – amount > sender_balance?
+///   ISZERO  – invert result (1 = valid)
+///   SUB     – new_sender  = sender_balance - amount
+///   MSTORE  – write new_sender  to mem[0]
+///   ADD     – new_recip   = recipient_balance + amount
+///   MSTORE  – write new_recip   to mem[32]
+fn erc20_transfer_bytecode(sender_balance: u128, recipient_balance: u128, amount: u128) -> Bytes {
+  let mut code: Vec<u8> = Vec::new();
+
+  // ── Overflow check ────────────────────────────────────────────────────────
+  push32_u128(&mut code, sender_balance);  // [sender_bal]
+  push32_u128(&mut code, amount);           // [amount, sender_bal]
+  code.push(opcode::GT);                    // [amount > sender_bal]
+  code.push(opcode::ISZERO);                // [valid (1 = ok)]
+  code.push(opcode::POP);                   // []
+
+  // ── Debit sender ─────────────────────────────────────────────────────────
+  push32_u128(&mut code, amount);           // [amount]
+  push32_u128(&mut code, sender_balance);   // [sender_bal, amount]
+  code.push(opcode::SUB);                   // [sender_bal - amount]
+  code.push(opcode::PUSH1); code.push(0x00);
+  code.push(opcode::MSTORE);                // mem[0]  = new_sender_bal
+
+  // ── Credit recipient ─────────────────────────────────────────────────────
+  push32_u128(&mut code, recipient_balance); // [recipient_bal]
+  push32_u128(&mut code, amount);            // [amount, recipient_bal]
+  code.push(opcode::ADD);                    // [recipient_bal + amount]
+  code.push(opcode::PUSH1); code.push(0x20);
+  code.push(opcode::MSTORE);                 // mem[32] = new_recipient_bal
+
+  code.push(opcode::STOP);
+  Bytes::from(code)
 }
 
 fn random_nonzero_u128(rng: &mut StdRng) -> u128 {
@@ -624,29 +806,18 @@ static CASE_GENERATORS: &[CaseGen] = &[
   make_signextend_case,
 ];
 
-fn bench_cases(samples: usize, seed: u64) -> Vec<BenchCase> {
-  let mut rng = StdRng::seed_from_u64(seed);
-  let mut cases = Vec::new();
-  for sample_idx in 0..samples {
-    for make_case in CASE_GENERATORS {
-      cases.push(make_case(&mut rng, sample_idx));
-    }
-  }
-  cases
-}
-
 // ============================================================
 // ITP / Statement builders
 // ============================================================
 
-fn build_itp(case: &BenchCase) -> Option<InstructionTransitionProof> {
-  let proof = prove_instruction(case.opcode, &case.inputs, &[case.output])?;
-  Some(InstructionTransitionProof {
+fn build_itp(case: &BenchCase) -> InstructionTransitionProof {
+  let proof = prove_instruction(case.opcode, &case.inputs, &[case.output]);
+  InstructionTransitionProof {
     opcode: case.opcode,
     pc: 0,
     stack_inputs: case.inputs.clone(),
     stack_outputs: vec![case.output],
-    semantic_proof: Some(proof),
+    semantic_proof: proof,
     memory_claims: vec![],
     storage_claims: vec![],
     stack_claims: vec![],
@@ -656,7 +827,7 @@ fn build_itp(case: &BenchCase) -> Option<InstructionTransitionProof> {
     keccak_claim: None,
     external_state_claim: None,
     sub_call_claim: None,
-  })
+  }
 }
 
 fn build_statement(case: &BenchCase) -> InstructionTransitionStatement {
@@ -668,6 +839,7 @@ fn build_statement(case: &BenchCase) -> InstructionTransitionStatement {
       sp: case.inputs.len(),
       stack: case.inputs.clone(),
       memory_root: [0u8; 32],
+      storage_root: [0u8; 32],
     },
     s_next: VmState {
       opcode: case.opcode,
@@ -675,16 +847,22 @@ fn build_statement(case: &BenchCase) -> InstructionTransitionStatement {
       sp: 1,
       stack: vec![case.output],
       memory_root: [0u8; 32],
+      storage_root: [0u8; 32],
     },
     accesses: Vec::new(),
     sub_call_claim: None,
     mcopy_claim: None,
+    external_state_claim: None,
   }
 }
 
 // ============================================================
 // Arg parsing
 // ============================================================
+
+fn parse_arg_bool(args: &[String], key: &str) -> bool {
+  args.iter().any(|a| a == key)
+}
 
 fn parse_arg_usize(args: &[String], key: &str, default: usize) -> usize {
   let mut i = 0;
@@ -775,7 +953,17 @@ fn main() {
   let log_rows = parse_arg_usize(&args, "--log-rows", 10);
   let seed_opt = parse_arg_opt_u64(&args, "--seed");
   let seed = seed_opt.unwrap_or_else(rand::random::<u64>);
+  // --split  : also measure trace-gen and FRI/commitment phases separately
+  let do_split = parse_arg_bool(&args, "--split");
   let max_rows: usize = 1 << log_rows;
+
+  // ── Warm up AIR constraint hint caches ───────────────────────────────────
+  //
+  // Pre-compute symbolic constraint metadata (constraint count +
+  // log_num_quotient_chunks) for all well-known AIR types.  Without this, the
+  // first `prove_*` call for each AIR type pays ~15-70 ms of symbolic
+  // evaluation overhead; subsequent calls use the cached hints for free.
+  zprove_core::zk_proof::air_cache::warm_up();
 
   println!("zprove batch bench");
   match seed_opt {
@@ -785,13 +973,6 @@ fn main() {
   println!("  samples  : {samples}  (per opcode)");
   println!("  iters    : {iters}  (repetitions per bench point)");
   println!("  log-rows : {log_rows}  (max rows/batch = 2^N = {max_rows})");
-
-  // ── Build one sample case per generator to count rows ────────────────────
-  //
-  // We probe row count with a single fixed-seed sample; the row count for a
-  // given opcode is structural (independent of input values).
-  let probe_seed = seed ^ 0xdead_beef_cafe;
-  let probe_cases = bench_cases(1, probe_seed);
 
   println!();
   println!("── prove_batch_transaction_zk_receipt / verify_batch_transaction_zk_receipt ──");
@@ -815,66 +996,64 @@ fn main() {
     samples,
     log_rows,
     rows: Vec::new(),
+    tps: None,
   };
 
   for (gen_idx, make_case) in CASE_GENERATORS.iter().enumerate() {
     let mut rng = rand::rngs::StdRng::seed_from_u64(seed ^ (gen_idx as u64));
 
-    // ── Probe row count for this opcode ───────────────────────────────────
-    let probe = probe_cases
-      .get(gen_idx)
-      .cloned()
-      .unwrap_or_else(|| make_case(&mut rand::rngs::StdRng::seed_from_u64(probe_seed), gen_idx));
-    let rows_per_instr = match prove_instruction(probe.opcode, &probe.inputs, &[probe.output]) {
-      Some(p) => match build_batch_manifest(&[(probe.opcode, &p)]) {
-        Ok(m) => m.entries.first().map_or(1, |e| e.row_count.max(1)),
-        Err(_) => 1,
-      },
-      None => {
-        eprintln!(
-          "  {:<16} : skipped (prove_instruction returned None)",
-          probe.group
-        );
-        continue;
-      }
-    };
-
-    // batch_count = largest k such that k * rows_per_instr < 2^N
-    let batch_count = if rows_per_instr >= max_rows {
-      1
-    } else {
-      ((max_rows - 1) / rows_per_instr).max(1)
-    };
-
     // ── Generate `samples` cases for this generator, cycling for batch ────
-    let mut seed_cases: Vec<BenchCase> = (0..samples).map(|i| make_case(&mut rng, i)).collect();
+    let mut seed_cases: Vec<BenchCase> = (0..samples.max(1)).map(|i| make_case(&mut rng, i)).collect();
     if seed_cases.is_empty() {
       seed_cases.push(make_case(&mut rng, 0));
     }
-    let batch_itps: Vec<InstructionTransitionProof> = seed_cases
-      .iter()
-      .cycle()
-      .take(batch_count)
-      .filter_map(|c| build_itp(c))
-      .collect();
-    let batch_stmts: Vec<InstructionTransitionStatement> = seed_cases
-      .iter()
-      .cycle()
-      .take(batch_count)
-      .map(|c| build_statement(c))
-      .collect();
+
+    // ── Build batch online: add instructions until rows would overflow ─────
+    //
+    // We prove each sample instruction once, check its real row contribution,
+    // and stop (discarding the overflow instruction) the moment the cumulative
+    // row total would exceed max_rows.  This handles input-dependent row
+    // counts (e.g. ISZERO: v=0 → 2 rows, v≠0 → 18 rows) without any upfront
+    // probing or worst-case estimation.
+    let mut batch_itps: Vec<InstructionTransitionProof> = Vec::new();
+    let mut batch_stmts: Vec<InstructionTransitionStatement> = Vec::new();
+    let mut total_rows = 0usize;
+    for c in seed_cases.iter().cycle().take(max_rows) {
+      let itp = build_itp(c);
+      let row_count = compile_proof(&itp.semantic_proof).len().max(1);
+      // Always include the very first instruction even if it alone exceeds
+      // max_rows; otherwise stop before overflow.
+      if !batch_itps.is_empty() && total_rows + row_count > max_rows {
+        break;
+      }
+      total_rows += row_count;
+      batch_itps.push(itp);
+      batch_stmts.push(build_statement(c));
+    }
     if batch_itps.is_empty() {
-      eprintln!("  {:<16} : skipped (no valid ITPs)", probe.group);
+      eprintln!("  {:<16} : skipped (no valid ITPs)", seed_cases[0].group);
       continue;
     }
     let actual_count = batch_itps.len();
+    let rows_per_instr = total_rows / actual_count.max(1);
+
+    // ── pre-build receipt prep (WFF + manifest + preprocessed setup) ──────
+    // This work is amortised outside the timing loop so the bench measures
+    // only the STARK proving cost, not WFF tree construction.
+    let receipt_prep = match build_batch_zk_receipt_prep(&batch_itps) {
+      Ok(p) => p,
+      Err(e) => {
+        eprintln!("  {:<16} : prep failed: {e}", seed_cases[0].group);
+        continue;
+      }
+    };
 
     // ── prove (best of iters) ─────────────────────────────────────────────
     let mut prove_us = f64::MAX;
     let mut last_receipt = None;
     for _ in 0..iters {
       let t = Instant::now();
-      match prove_batch_transaction_zk_receipt(black_box(&batch_itps)) {
+      match prove_batch_transaction_zk_receipt_with_prep(black_box(&batch_itps), &receipt_prep) {
         Ok(receipt) => {
           let us = t.elapsed().as_secs_f64() * 1_000_000.0;
           if us < prove_us {
@@ -883,7 +1062,7 @@ fn main() {
           last_receipt = Some(receipt);
         }
         Err(e) => {
-          eprintln!("  {:<16} : prove failed: {e}", probe.group);
+          eprintln!("  {:<16} : prove failed: {e}", seed_cases[0].group);
           break;
         }
       }
@@ -911,7 +1090,7 @@ fn main() {
 
     println!(
       "  {:<16}  {:>10}  {:>6}  {:>12.1}  {:>12.1}  {:>12.1}  {:>12.1}  {:>10}",
-      probe.group,
+      seed_cases[0].group,
       rows_per_instr,
       actual_count,
       prove_us,
@@ -921,7 +1100,7 @@ fn main() {
       verify_ok,
     );
     report.rows.push(BatchBenchRow {
-      group: probe.group.to_string(),
+      group: seed_cases[0].group.to_string(),
       rows_per_instr,
       batch_count: actual_count,
       prove_us,
@@ -929,6 +1108,227 @@ fn main() {
       verify_ok,
     });
   }
+
+  // ── ERC-20 transfer TPS ────────────────────────────────────────────────────
+  println!();
+  println!("── ERC-20 transfer TPS ────────────────────────────────────────────────────────");
+  println!("   (GT + ISZERO + SUB + MSTORE + ADD + MSTORE per transfer)");
+
+  let ncpus = std::thread::available_parallelism()
+    .map(|n| n.get())
+    .unwrap_or(4);
+  let tx_count = ncpus * 2; // two waves to keep pool busy
+
+  // Generate varied ERC-20 transfers to avoid caching effects.
+  let mut tps_rng = rand::rngs::StdRng::seed_from_u64(seed ^ 0xEE20EE20u64);
+  let bytecodes: Vec<Bytes> = (0..tx_count)
+    .map(|_| {
+      let sender_bal: u128 = tps_rng.random::<u64>() as u128 + 100_000;
+      let recipient_bal: u128 = tps_rng.random::<u32>() as u128;
+      let amount: u128 = (tps_rng.random::<u32>() as u128 % 1000) + 1;
+      erc20_transfer_bytecode(sender_bal, recipient_bal, amount)
+    })
+    .collect();
+
+  // Warm-up: one tx to initialise pool, AIR caches, JIT, etc.
+  let warmup = erc20_transfer_bytecode(1_000_000, 0, 100);
+  let _ = execute_bytecode_and_prove_with_batch_zkp(warmup, Bytes::default(), U256::ZERO);
+
+  // ── Sequential ──────────────────────────────────────────────────────────
+  let t_seq = Instant::now();
+  for bc in &bytecodes {
+    execute_bytecode_and_prove_with_batch_zkp(bc.clone(), Bytes::default(), U256::ZERO)
+      .expect("erc20 seq prove failed");
+  }
+  let seq_us = t_seq.elapsed().as_secs_f64() * 1_000_000.0;
+  let seq_tps = tx_count as f64 / (seq_us / 1_000_000.0);
+
+  // ── Parallel ────────────────────────────────────────────────────────────
+  let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+  let t_par = Instant::now();
+  for bc in &bytecodes {
+    let bc = bc.clone();
+    let tx = done_tx.clone();
+    std::thread::spawn(move || {
+      let r = execute_bytecode_and_prove_with_batch_zkp(bc, Bytes::default(), U256::ZERO)
+        .map(|_| ());
+      tx.send(r).ok();
+    });
+  }
+  drop(done_tx);
+  for r in done_rx {
+    r.expect("erc20 parallel prove failed");
+  }
+  let par_us = t_par.elapsed().as_secs_f64() * 1_000_000.0;
+  let par_tps = tx_count as f64 / (par_us / 1_000_000.0);
+
+  println!(
+    "  {:<28}  {:>8}  {:>10.1}  {:>10.2}  {:>8.0}",
+    "mode", "tx", "wall ms", "ms/tx", "TPS"
+  );
+  println!("  {}", "─".repeat(70));
+  println!(
+    "  {:<28}  {:>8}  {:>10.1}  {:>10.2}  {:>8.0}",
+    "sequential",
+    tx_count,
+    seq_us / 1000.0,
+    seq_us / 1000.0 / tx_count as f64,
+    seq_tps,
+  );
+  println!(
+    "  {:<28}  {:>8}  {:>10.1}  {:>10.2}  {:>8.0}",
+    format!("parallel ({ncpus} threads)"),
+    tx_count,
+    par_us / 1000.0,
+    par_us / 1000.0 / tx_count as f64,
+    par_tps,
+  );
+  println!("  speedup: {:.2}×", seq_us / par_us);
+
+  // ── Phase breakdown (--split) ────────────────────────────────────────────
+  let split_timings: Option<(f64, f64, f64, f64, u64, u64, u64, u64)> = if do_split {
+    println!();
+    println!("── ERC-20 phase breakdown (--split) ──────────────────────────────────────────");
+    println!("   Phase 1: EVM trace generation    Phase 2: Commitment + FRI (batch STARK)");
+
+    // Pre-generate all traces (shared by both sequential and parallel prove runs).
+    let traces: Vec<TransactionProof> = bytecodes
+      .iter()
+      .map(|bc| {
+        execute_bytecode_trace(bc.clone(), Bytes::default(), U256::ZERO)
+          .expect("erc20 trace failed")
+      })
+      .collect();
+
+    // ── sequential trace ──
+    let t = Instant::now();
+    for bc in &bytecodes {
+      execute_bytecode_trace(bc.clone(), Bytes::default(), U256::ZERO)
+        .expect("trace failed");
+    }
+    let seq_trace_us = t.elapsed().as_secs_f64() * 1_000_000.0;
+
+    // ── sequential prove ──
+    reset_proof_phase_timings();
+    let t = Instant::now();
+    for tr in &traces {
+      prove_transaction_proof_with_batch_zkp(tr)
+        .expect("erc20 prove failed");
+    }
+    let seq_prove_us = t.elapsed().as_secs_f64() * 1_000_000.0;
+    let seq_phase = read_proof_phase_timings();
+
+    // ── parallel trace ──
+    let (tx_c, rx_c) = std::sync::mpsc::channel::<f64>();
+    let t = Instant::now();
+    for bc in &bytecodes {
+      let bc = bc.clone();
+      let s = tx_c.clone();
+      std::thread::spawn(move || {
+        let t2 = Instant::now();
+        execute_bytecode_trace(bc, Bytes::default(), U256::ZERO)
+          .expect("par trace failed");
+        s.send(t2.elapsed().as_secs_f64() * 1_000_000.0).ok();
+      });
+    }
+    drop(tx_c);
+    let _: Vec<_> = rx_c.iter().collect();
+    let par_trace_us = t.elapsed().as_secs_f64() * 1_000_000.0;
+
+    // ── parallel prove ──
+    reset_proof_phase_timings();
+    let (done_tx2, done_rx2) = std::sync::mpsc::channel::<Result<(), String>>();
+    let t = Instant::now();
+    for tr in traces {
+      let s = done_tx2.clone();
+      std::thread::spawn(move || {
+        s.send(prove_transaction_proof_with_batch_zkp(&tr)).ok();
+      });
+    }
+    drop(done_tx2);
+    for r in done_rx2 {
+      r.expect("par prove failed");
+    }
+    let par_prove_us = t.elapsed().as_secs_f64() * 1_000_000.0;
+    let par_phase = read_proof_phase_timings();
+
+    println!(
+      "  {:<28}  {:>12}  {:>12}  {:>12}  {:>12}",
+      "mode", "trace ms", "trace ms/tx", "prove ms", "prove ms/tx"
+    );
+    println!("  {}", "─".repeat(80));
+    let n = tx_count as f64;
+    println!(
+      "  {:<28}  {:>12.2}  {:>12.3}  {:>12.1}  {:>12.2}",
+      "sequential",
+      seq_trace_us / 1000.0, seq_trace_us / 1000.0 / n,
+      seq_prove_us / 1000.0, seq_prove_us / 1000.0 / n,
+    );
+    println!(
+      "  {:<28}  {:>12.2}  {:>12.3}  {:>12.1}  {:>12.2}",
+      format!("parallel ({ncpus} threads)"),
+      par_trace_us / 1000.0, par_trace_us / 1000.0 / n,
+      par_prove_us / 1000.0, par_prove_us / 1000.0 / n,
+    );
+    println!(
+      "  prove / total (seq): {:.1}%   trace: {:.1}%",
+      seq_prove_us / (seq_trace_us + seq_prove_us) * 100.0,
+      seq_trace_us / (seq_trace_us + seq_prove_us) * 100.0,
+    );
+
+    // ── phase breakdown (LogUp vs FRI+Commit) ──
+    println!();
+    println!("── Sub-phase breakdown (LogUp vs FRI+Commitment) ─────────────────────────────");
+    println!(
+      "  {:<34}  {:>12}  {:>12}  {:>12}  {:>12}",
+      "mode", "logup ms", "logup ms/tx", "fri+com ms", "fri+com ms/tx"
+    );
+    println!("  {}", "─".repeat(86));
+    let logup_ms_s   = seq_phase.logup_eval_ns() as f64 / 1_000_000.0;
+    let fri_ms_s     = seq_phase.fri_commit_ns()  as f64 / 1_000_000.0;
+    let total_prove_ms = logup_ms_s + fri_ms_s;
+    let logup_frac   = logup_ms_s / total_prove_ms;
+    let fri_frac     = 1.0 - logup_frac;
+
+    // Parallel amortized wall-clock per tx = par_wall_clock / n * phase_fraction.
+    // This is the "throughput" view: how fast each tx is processed end-to-end,
+    // with the phase split estimated from the sequential ratios.
+    let par_prove_ms = par_prove_us / 1000.0;
+    let logup_ms_p   = par_prove_ms * logup_frac / n;
+    let fri_ms_p     = par_prove_ms * fri_frac   / n;
+
+    println!(
+      "  {:<34}  {:>12.3}  {:>12.4}  {:>12.1}  {:>12.2}",
+      "sequential",
+      logup_ms_s, logup_ms_s / n,
+      fri_ms_s, fri_ms_s / n,
+    );
+    println!(
+      "  {:<34}  {:>12.3}  {:>12.4}  {:>12.1}  {:>12.2}",
+      format!("parallel ({ncpus} threads, amortized)"),
+      logup_ms_p * n, logup_ms_p,
+      fri_ms_p   * n, fri_ms_p,
+    );
+    println!(
+      "  logup / prove (seq): {:.1}%   fri+commit: {:.1}%",
+      logup_frac * 100.0,
+      fri_frac   * 100.0,
+    );
+
+    Some((seq_trace_us, seq_prove_us, par_trace_us, par_prove_us,
+          seq_phase.logup_eval_ns(), seq_phase.fri_commit_ns(),
+          // Amortized parallel wall-clock ns for each phase.
+          (logup_ms_p * n * 1_000_000.0) as u64,
+          (fri_ms_p   * n * 1_000_000.0) as u64))
+  } else {
+    None
+  };
+
+  let (split_tup, phase_tup) = match split_timings {
+    Some((a, b, c, d, e, f, g, h)) => (Some((a, b, c, d)), Some((e, f, g, h))),
+    None => (None, None),
+  };
+  report.tps = Some(TpsSection { ncpus, tx_count, seq_us, par_us, split: split_tup, phase: phase_tup });
 
   write_html_report(&report);
 }

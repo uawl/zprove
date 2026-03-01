@@ -26,6 +26,8 @@ mod tests {
       Term::Add29(a, b, c) | Term::Add29Carry(a, b, c) | Term::Add24(a, b, c) => {
         1 + term_node_count(a) + term_node_count(b) + term_node_count(c)
       }
+      Term::U15(_) | Term::PartialMul15 { .. } => 1,
+      Term::U15MulLow(a, b) | Term::U15MulHigh(a, b) => 1 + term_node_count(a) + term_node_count(b),
     }
   }
 

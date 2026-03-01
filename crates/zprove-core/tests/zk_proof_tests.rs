@@ -750,14 +750,13 @@ mod batch_lut_tests {
   }
 
   fn make_itp(op: u8, inputs: &[[u8; 32]], output: [u8; 32]) -> InstructionTransitionProof {
-    let proof = prove_instruction(op, inputs, &[output])
-      .unwrap_or_else(|| panic!("prove_instruction 0x{op:02x}: unsupported opcode"));
+    let proof = prove_instruction(op, inputs, &[output]);
     InstructionTransitionProof {
       opcode: op,
       pc: 0,
       stack_inputs: inputs.to_vec(),
       stack_outputs: vec![output],
-      semantic_proof: Some(proof),
+      semantic_proof: proof,
       memory_claims: vec![],
       storage_claims: vec![],
       stack_claims: vec![],
@@ -780,6 +779,7 @@ mod batch_lut_tests {
         sp: inputs.len(),
         stack: inputs.to_vec(),
         memory_root: [0u8; 32],
+        storage_root: [0u8; 32],
       },
       s_next: VmState {
         opcode: op,
@@ -787,9 +787,11 @@ mod batch_lut_tests {
         sp: 1,
         stack: vec![output],
         memory_root: [0u8; 32],
+        storage_root: [0u8; 32],
       },
       accesses: Vec::new(),
       mcopy_claim: None,
+      external_state_claim: None,
       sub_call_claim: None,
     }
   }
@@ -800,9 +802,9 @@ mod batch_lut_tests {
   #[test]
   fn test_batch_manifest_digest_is_deterministic() {
     let add_proof =
-      prove_instruction(opcode::ADD, &[a256(5), a256(3)], &[a256(8)]).expect("prove ADD");
+      prove_instruction(opcode::ADD, &[a256(5), a256(3)], &[a256(8)]);
     let and_proof =
-      prove_instruction(opcode::AND, &[a256(0xF0), a256(0x0F)], &[a256(0)]).expect("prove AND");
+      prove_instruction(opcode::AND, &[a256(0xF0), a256(0x0F)], &[a256(0)]);
 
     let items = vec![(opcode::ADD, &add_proof), (opcode::AND, &and_proof)];
     let manifest_a = build_batch_manifest(&items).expect("manifest_a");
@@ -823,8 +825,7 @@ mod batch_lut_tests {
     let proofs: Vec<(u8, _)> = specs
       .iter()
       .map(|(op, a, b, out)| {
-        let p = prove_instruction(*op, &[a256(*a), a256(*b)], &[a256(*out)])
-          .unwrap_or_else(|| panic!("prove 0x{op:02x}: unsupported"));
+        let p = prove_instruction(*op, &[a256(*a), a256(*b)], &[a256(*out)]);
         (*op, p)
       })
       .collect();
@@ -1210,6 +1211,7 @@ mod keccak_memory_cross_check_tests {
       size: 32,
       input_bytes: value.to_vec(),
       output_hash: keccak256_bytes(&value),
+      memory_words: vec![],
     }];
     let write_log = vec![mem_entry(0, value)];
     assert!(validate_keccak_memory_cross_check(&log, &write_log, &[]));
@@ -1228,6 +1230,7 @@ mod keccak_memory_cross_check_tests {
       size: 16,
       input_bytes: input_bytes.clone(),
       output_hash: keccak256_bytes(&input_bytes),
+      memory_words: vec![],
     }];
     let write_log = vec![mem_entry(0, word_val)];
     assert!(validate_keccak_memory_cross_check(&log, &write_log, &[]));
@@ -1252,6 +1255,7 @@ mod keccak_memory_cross_check_tests {
       size: 8,
       input_bytes: input_bytes.clone(),
       output_hash: keccak256_bytes(&input_bytes),
+      memory_words: vec![],
     }];
     let write_log = vec![mem_entry(0, w0), mem_entry(32, w1)];
     assert!(validate_keccak_memory_cross_check(&log, &write_log, &[]));
@@ -1277,6 +1281,7 @@ mod keccak_memory_cross_check_tests {
       size: 32,
       input_bytes: correct_bytes.clone(),
       output_hash: keccak256_bytes(&correct_bytes),
+      memory_words: vec![],
     }];
     let write_log = vec![mem_entry(0, wrong_word)]; // wrong bytes in memory
     assert!(
@@ -1294,6 +1299,7 @@ mod keccak_memory_cross_check_tests {
       size: 32,
       input_bytes: input_bytes.clone(),
       output_hash: keccak256_bytes(&input_bytes),
+      memory_words: vec![],
     }];
     // write_log / read_log are both empty
     assert!(
@@ -1317,6 +1323,7 @@ mod keccak_memory_cross_check_tests {
       size: 32,
       input_bytes: tampered_bytes, // doesn't match memory
       output_hash: keccak256_bytes(&real_bytes),
+      memory_words: vec![],
     }];
     let write_log = vec![mem_entry(0, real_word)];
     assert!(
@@ -1336,6 +1343,7 @@ mod keccak_memory_cross_check_tests {
       size: 32,
       input_bytes: value.clone(),
       output_hash: keccak256_bytes(&value),
+      memory_words: vec![],
     }];
     let read_log = vec![mem_entry(0, word_val)];
     assert!(validate_keccak_memory_cross_check(&log, &[], &read_log));
@@ -1355,6 +1363,7 @@ mod keccak_memory_cross_check_tests {
       size: 1,
       input_bytes: vec![0xBB],
       output_hash: keccak256_bytes(&[0xBB]),
+      memory_words: vec![],
     }];
     let write_log = vec![mem_entry(0, write_val)];
     let read_log = vec![mem_entry(0, read_val)];

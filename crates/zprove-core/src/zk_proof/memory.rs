@@ -13,9 +13,11 @@ use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_symmetric::CryptographicHasher;
 use p3_uni_stark::{
-  Entry, SymbolicExpression, SymbolicVariable, VerifierConstraintFolder, prove_with_lookup,
-  verify_with_lookup,
+  Entry, SymbolicExpression, SymbolicVariable, VerifierConstraintFolder,
+  prove_with_lookup_hinted, verify_with_lookup,
 };
+
+use super::air_cache;
 
 // ── Column layout  (NUM_MEM_COLS = 12) ───────────────────────────────
 
@@ -282,35 +284,64 @@ fn build_mem_log_trace(
   read_log: &[MemLogEntry],
   write_set: &std::collections::HashMap<u64, [u8; 32]>,
 ) -> RowMajorMatrix<Val> {
-  let mut intra_read_count: std::collections::HashMap<u64, i32> = Default::default();
-  for e in read_log {
-    if write_set.contains_key(&e.addr) {
-      *intra_read_count.entry(e.addr).or_insert(0) += 1;
+  // ── Step 1: count intra-batch reads per address (sorted scan) ────────────
+  // Collect addresses of reads that fall inside write_set, sort, then count
+  // consecutive runs — avoids HashMap overhead for small-to-medium batches.
+  let mut intra_read_addrs: Vec<u64> = read_log
+    .iter()
+    .filter(|e| write_set.contains_key(&e.addr))
+    .map(|e| e.addr)
+    .collect();
+  intra_read_addrs.sort_unstable();
+  let read_counts: Vec<(u64, i32)> = {
+    let mut v: Vec<(u64, i32)> = Vec::new();
+    for addr in intra_read_addrs {
+      match v.last_mut() {
+        Some((a, c)) if *a == addr => *c += 1,
+        _ => v.push((addr, 1)),
+      }
     }
-  }
-  let mut last_write_idx: std::collections::HashMap<u64, usize> = Default::default();
-  for (i, e) in write_log.iter().enumerate() {
-    last_write_idx.insert(e.addr, i);
-  }
+    v
+  };
 
+  // ── Step 2: find last write index per address (sorted scan) ──────────────
+  // Sort (addr, original_idx) pairs; within each address group the last
+  // element has the largest original index (= the "last write" for that addr).
+  let mut write_addr_idx: Vec<(u64, usize)> = write_log
+    .iter()
+    .enumerate()
+    .map(|(i, e)| (e.addr, i))
+    .collect();
+  write_addr_idx.sort_unstable();
+  let last_writes: Vec<(u64, usize)> = {
+    let mut v: Vec<(u64, usize)> = Vec::new();
+    for (addr, idx) in write_addr_idx {
+      match v.last_mut() {
+        Some((a, i)) if *a == addr => *i = idx, // later (larger) idx wins
+        _ => v.push((addr, idx)),
+      }
+    }
+    v
+  };
+
+  // ── Fill trace ────────────────────────────────────────────────────────────
   let n_total = write_log.len() + read_log.len();
   let height = n_total.max(4).next_power_of_two();
   let mut data = vec![Val::ZERO; height * NUM_MEM_COLS];
 
   for (i, entry) in write_log.iter().enumerate() {
-    let mult = if last_write_idx.get(&entry.addr) == Some(&i) {
-      *intra_read_count.get(&entry.addr).unwrap_or(&0)
-    } else {
-      0
+    let mult = match last_writes.binary_search_by(|(a, _)| a.cmp(&entry.addr)) {
+      Ok(pos) if last_writes[pos].1 == i => {
+        read_counts
+          .binary_search_by(|(a, _)| a.cmp(&entry.addr))
+          .map_or(0, |rp| read_counts[rp].1)
+      }
+      _ => 0,
     };
     fill_log_row(&mut data, i * NUM_MEM_COLS, entry, true, mult);
   }
   for (i, entry) in read_log.iter().enumerate() {
-    let mult = if write_set.contains_key(&entry.addr) {
-      -1
-    } else {
-      0
-    };
+    let mult = if write_set.contains_key(&entry.addr) { -1 } else { 0 };
     fill_log_row(
       &mut data,
       (write_log.len() + i) * NUM_MEM_COLS,
@@ -375,13 +406,50 @@ pub struct MemoryConsistencyProof {
   pub read_set: std::collections::HashMap<u64, [u8; 32]>,
   pub write_log: Vec<MemLogEntry>,
   pub read_log: Vec<MemLogEntry>,
+  /// Commitment to `write_set` — i.e. `D_seg_root` in the state-transition design.
+  /// Equals `hash_mem_write_set(BTreeMap from write_set)`. `[0u8;32]` for empty segments.
+  pub d_seg_root: [u8; 32],
 }
 
 pub fn prove_memory_consistency(
   claims: &[crate::transition::MemAccessClaim],
 ) -> Result<MemoryConsistencyProof, String> {
+  prove_memory_consistency_inner(claims, None)
+}
+
+/// Like [`prove_memory_consistency`] but also validates cross-segment reads.
+///
+/// `w_in` is the cumulative write-set `W_{i-1}` at the start of this segment.
+/// Every address in `read_set` (first-read, no prior write in segment) must match
+/// `w_in`; unwritten addresses must be read as zero.  Returns `Err` on violation.
+pub fn prove_memory_consistency_with_w_in(
+  claims: &[crate::transition::MemAccessClaim],
+  w_in: &super::write_delta::MemWriteSet,
+) -> Result<MemoryConsistencyProof, String> {
+  prove_memory_consistency_inner(claims, Some(w_in))
+}
+
+fn prove_memory_consistency_inner(
+  claims: &[crate::transition::MemAccessClaim],
+  w_in: Option<&super::write_delta::MemWriteSet>,
+) -> Result<MemoryConsistencyProof, String> {
   let (write_log, read_log) = split_mem_logs(claims);
   let (write_set, read_set) = check_claims_and_build_sets(claims)?;
+
+  // First-Read Initialization soundness check.
+  if let Some(w_in) = w_in {
+    if !super::write_delta::validate_inherited_reads(&read_set, w_in) {
+      return Err(
+        "prove_memory_consistency: inherited read value does not match W_in".to_string(),
+      );
+    }
+  }
+
+  let d_seg_root = {
+    let bmap = super::write_delta::mem_write_set_from_map(&write_set);
+    super::write_delta::hash_mem_write_set(&bmap)
+  };
+
   let public_values = make_mem_public_values(&write_log, &read_log, &write_set, &read_set);
 
   let trace = if write_log.is_empty() && read_log.is_empty() {
@@ -391,8 +459,10 @@ pub fn prove_memory_consistency(
   };
 
   let config = make_circle_config();
+  let hints =
+    air_cache::get_or_compute(&MemoryConsistencyAir, 0, public_values.len(), 0);
   let trace_for_perm = trace.clone();
-  let stark_proof = prove_with_lookup(
+  let stark_proof = prove_with_lookup_hinted(
     &config,
     &MemoryConsistencyAir,
     trace,
@@ -402,6 +472,7 @@ pub fn prove_memory_consistency(
     2,
     2,
     |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_mem_lookup(folder),
+    hints,
   );
 
   Ok(MemoryConsistencyProof {
@@ -410,10 +481,26 @@ pub fn prove_memory_consistency(
     read_set,
     write_log,
     read_log,
+    d_seg_root,
   })
 }
 
 pub fn verify_memory_consistency(proof: &MemoryConsistencyProof) -> bool {
+  verify_memory_consistency_inner(proof, None)
+}
+
+/// Like [`verify_memory_consistency`] but also re-checks the inherited-read constraint.
+pub fn verify_memory_consistency_with_w_in(
+  proof: &MemoryConsistencyProof,
+  w_in: &super::write_delta::MemWriteSet,
+) -> bool {
+  verify_memory_consistency_inner(proof, Some(w_in))
+}
+
+fn verify_memory_consistency_inner(
+  proof: &MemoryConsistencyProof,
+  w_in: Option<&super::write_delta::MemWriteSet>,
+) -> bool {
   let (derived_write_set, derived_read_set) =
     match derive_sets_from_logs(&proof.write_log, &proof.read_log) {
       Ok(s) => s,
@@ -421,6 +508,20 @@ pub fn verify_memory_consistency(proof: &MemoryConsistencyProof) -> bool {
     };
   if derived_write_set != proof.write_set || derived_read_set != proof.read_set {
     return false;
+  }
+  // Verify d_seg_root commitment.
+  let expected_d_seg_root = {
+    let bmap = super::write_delta::mem_write_set_from_map(&proof.write_set);
+    super::write_delta::hash_mem_write_set(&bmap)
+  };
+  if proof.d_seg_root != expected_d_seg_root {
+    return false;
+  }
+  // First-Read Initialization check (optional).
+  if let Some(w_in) = w_in {
+    if !super::write_delta::validate_inherited_reads(&proof.read_set, w_in) {
+      return false;
+    }
   }
   let public_values = make_mem_public_values(
     &proof.write_log,
@@ -474,12 +575,28 @@ fn merge_sets(
   right_rs: &std::collections::HashMap<u64, [u8; 32]>,
 ) -> Result<AggregatedMemoryProof, String> {
   for (addr, &r_val) in right_rs {
-    if let Some(&l_val) = left_ws.get(addr)
-      && r_val != l_val {
+    if let Some(&l_val) = left_ws.get(addr) {
+      // Address was written by the left segment — right must read that value.
+      if r_val != l_val {
         return Err(format!(
           "read/write set mismatch at addr=0x{addr:x}: right read {r_val:?}, left wrote {l_val:?}"
         ));
       }
+    } else if let Some(&inherited) = left_rs.get(addr) {
+      // Address was inherited (first-read) by left from an even earlier segment.
+      // Right must observe the same inherited value.
+      if r_val != inherited {
+        return Err(format!(
+          "inherited read mismatch at addr=0x{addr:x}: right read {r_val:?}, left inherited {inherited:?}"
+        ));
+      }
+    }
+    // Otherwise: address not yet resolved in the left subtree.  The unresolved
+    // read propagates upward into the merged read_set, where it will be checked
+    // against the W_in passed to prove_batch_transaction_zk_receipt_with_w_in.
+    // Zero-init enforcement is done there, not here, so that binary-tree
+    // aggregation can work correctly when left and right come from different
+    // subtrees whose writes are not yet combined.
   }
   let mut write_set = left_ws.clone();
   for (&addr, &val) in right_ws {

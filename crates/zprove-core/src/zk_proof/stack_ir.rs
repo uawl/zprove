@@ -499,8 +499,10 @@ pub fn prove_batch_stack_ir_with_prep(
   let trace = build_stack_ir_trace_from_rows(&manifest.all_rows)?;
   let config = make_circle_config();
   let air = StackIrBatchAirWithPrep::new(manifest, public_values);
-  let proof =
-    p3_uni_stark::prove_with_preprocessed(&config, &air, trace, public_values, Some(prep_data));
+  let hints = super::air_cache::get_or_compute(&air, prep_data.width, public_values.len(), 0);
+  let proof = p3_uni_stark::prove_with_preprocessed_hinted(
+    &config, &air, trace, public_values, Some(prep_data), hints,
+  );
   Ok(proof)
 }
 

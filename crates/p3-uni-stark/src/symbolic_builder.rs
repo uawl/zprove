@@ -13,6 +13,45 @@ use crate::Entry;
 use crate::symbolic_expression::SymbolicExpression;
 use crate::symbolic_variable::SymbolicVariable;
 
+/// Pre-computed AIR constraint metadata that can be cached and reused across
+/// multiple proof invocations of the same AIR structure.
+///
+/// Reusing these values avoids the symbolic evaluation of `air.eval()` (which
+/// builds the full constraint AST) on every call to `prove` / `prove_with_lookup`.
+/// For fixed-structure AIRs the values are constant regardless of trace height
+/// or public values.
+#[derive(Clone, Copy, Debug)]
+pub struct AirConstraintHints {
+  /// Number of main (non-lookup) constraints produced by the AIR's `eval`.
+  pub main_constraint_count: usize,
+  /// `log2(number of FRI quotient chunks)`.  Determines quotient polynomial
+  /// split; equals `log2_ceil(constraint_degree - 1)`.
+  pub log_num_quotient_chunks: usize,
+}
+
+/// Compute [`AirConstraintHints`] for `air` from scratch.
+///
+/// This runs the AIR's `eval` method symbolically once to determine the
+/// constraint count and maximum degree.  The result should be cached by the
+/// caller (e.g. in a `std::sync::OnceLock`) and reused via the `*_hinted`
+/// prove functions.
+pub fn compute_air_constraint_hints<F, A>(
+  air: &A,
+  preprocessed_width: usize,
+  num_public_values: usize,
+  is_zk: usize,
+) -> AirConstraintHints
+where
+  F: Field,
+  A: Air<SymbolicAirBuilder<F>>,
+{
+  let main_constraint_count =
+    get_symbolic_constraints(air, preprocessed_width, num_public_values).len();
+  let log_num_quotient_chunks =
+    get_log_num_quotient_chunks::<F, A>(air, preprocessed_width, num_public_values, is_zk);
+  AirConstraintHints { main_constraint_count, log_num_quotient_chunks }
+}
+
 #[instrument(skip_all)]
 pub fn get_log_num_quotient_chunks<F, A>(
   air: &A,

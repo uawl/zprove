@@ -6,7 +6,7 @@
 //! most-recent prior write at the same depth.  A LogUp multiset argument ties
 //! the `(depth, value)` tuples back to the execution trace.
 //!
-//! # Column layout  (NUM_STACK_RW_COLS = 14)
+//! # Column layout  (NUM_STACK_RW_COLS = 15)
 //!
 //! ```text
 //!  0  DEPTH           u32 access-depth (= depth_after for push, depth_after+1 for pop)
@@ -23,9 +23,12 @@
 //! 11  IS_WRITE        boolean — 1 = push (write), 0 = pop (read)
 //! 12  IS_SAME_DEPTH   boolean — 1 if this row's depth == next row's depth
 //! 13  MULT            LogUp multiplicity (M31-encoded signed integer)
+//! 14  IS_READ_CONT    = IS_SAME_DEPTH × (1 − next.IS_WRITE); helper column that
+//!                     caps the AIR constraint degree at 2 (without it, read-continuity
+//!                     constraints would be degree 3, requiring 2 quotient chunks).
 //! ```
 //!
-//! # AIR constraints  (12 main + 2 LogUp = 14 total)
+//! # AIR constraints  (13 main + 2 LogUp = 15 total, max degree = 2)
 //!
 //! | # | Expression | Kind |
 //! |---|---|---|
@@ -33,7 +36,8 @@
 //! | 2 | `is_write · (1 − is_write) = 0` | boolean |
 //! | 3 | `is_same_depth · (1 − is_same_depth) = 0` | boolean |
 //! | 4 | `is_same_depth · (next.depth − this.depth) = 0` | transition |
-//! | 5‥12 | `is_same_depth · (1 − next.is_write) · (next.val_k − this.val_k) = 0` ∀k | read-continuity |
+//! | 5 | `is_read_cont − is_same_depth · (1 − next.is_write) = 0` | helper definition |
+//! | 6‥13 | `is_read_cont · (next.val_k − this.val_k) = 0` ∀k | read-continuity |
 //!
 //! Constraints 4–12 are written *without* `when_transition()` so they do not
 //! introduce an `IsTransition` factor (which has `degree_multiple = 0` in the
@@ -54,13 +58,15 @@ use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_symmetric::CryptographicHasher;
 use p3_uni_stark::{
-  Entry, SymbolicExpression, SymbolicVariable, VerifierConstraintFolder, prove_with_lookup,
-  verify_with_lookup,
+  Entry, SymbolicExpression, SymbolicVariable, VerifierConstraintFolder,
+  prove_with_lookup_hinted, verify_with_lookup,
 };
+
+use super::air_cache;
 
 // ── Tag ───────────────────────────────────────────────────────────────────────
 
-pub const RECEIPT_BIND_TAG_STACK_RW: u32 = 7;
+pub const RECEIPT_BIND_TAG_STACK_RW: u32 = 8;
 
 // ── Column indices ────────────────────────────────────────────────────────────
 
@@ -71,8 +77,12 @@ const COL_VAL0: usize = 3; // VAL0..VAL7 occupy columns 3–10
 const COL_IS_WRITE: usize = 11;
 const COL_IS_SAME_DEPTH: usize = 12;
 const COL_MULT: usize = 13;
+/// Helper witness: `IS_SAME_DEPTH × (1 − next.IS_WRITE)`.  Pre-computing this
+/// product as a column lets read-continuity constraints stay at degree 2 instead
+/// of degree 3, halving the number of quotient polynomial chunks.
+const COL_IS_READ_CONT: usize = 14;
 
-pub const NUM_STACK_RW_COLS: usize = 14;
+pub const NUM_STACK_RW_COLS: usize = 15;
 
 /// Length of the public-values vector: tag + n_writes + hash_write[8] + n_reads + hash_read[8].
 const STACK_RW_PUBLIC_VALUES_LEN: usize = 19;
@@ -202,29 +212,32 @@ fn check_stack_rw_consistency(entries: &[StackRwEntry]) -> Result<(), String> {
 fn compute_multiplicities(sorted_rows: &[&StackRwEntry]) -> Vec<i32> {
   let n = sorted_rows.len();
   let mut mults = vec![0i32; n];
-  // Track which depths have had at least one WRITE so far (in sorted order).
-  let mut depths_seen_write: std::collections::HashSet<u32> = Default::default();
+  // sorted_rows is ordered by (depth ASC, rw_counter ASC), so all entries at
+  // the same depth are consecutive.  A simple per-group flag replaces the
+  // HashSet used previously — no hashing, pure cache-friendly linear scan.
+  let mut current_depth = u32::MAX;
+  let mut depth_had_write = false;
   for i in 0..n {
     let e = sorted_rows[i];
     let d = e.access_depth();
+    if d != current_depth {
+      current_depth = d;
+      depth_had_write = false;
+    }
     if e.is_write {
-      depths_seen_write.insert(d);
+      depth_had_write = true;
       // Count immediately-following same-depth reads before any next write.
       let mut count = 0i32;
       let mut j = i + 1;
-      while j < n && sorted_rows[j].access_depth() == d {
-        if sorted_rows[j].is_write {
-          break; // a new write supersedes this one
-        }
+      while j < n && sorted_rows[j].access_depth() == d && !sorted_rows[j].is_write {
         count += 1;
         j += 1;
       }
       mults[i] = count;
     } else {
-      // Read: −1 if a write at this depth has already appeared in the sorted trace
-      // (i.e. the read is intra-batch and follows its matching write).
-      // 0 if no write at this depth has been seen yet (cross-batch read).
-      mults[i] = if depths_seen_write.contains(&d) { -1 } else { 0 };
+      // Read: −1 if a write for this depth group has already appeared (intra-batch);
+      //        0 if this is the first access for this depth (cross-batch read).
+      mults[i] = if depth_had_write { -1 } else { 0 };
     }
   }
   mults
@@ -257,6 +270,11 @@ fn build_stack_rw_trace(
       0
     };
 
+    // IS_READ_CONT = IS_SAME_DEPTH × (1 − IS_WRITE_next): 1 iff the next row is a
+    // same-depth read that must inherit this row's value.
+    let is_read_cont: u32 =
+      if is_same_depth == 1 && i + 1 < n && !rows[i + 1].is_write { 1 } else { 0 };
+
     data[base + COL_DEPTH] = Val::from_u32(d);
     data[base + COL_RW_HI] = Val::from_u32((e.rw_counter >> 32) as u32);
     data[base + COL_RW_LO] = Val::from_u32(e.rw_counter as u32);
@@ -270,9 +288,10 @@ fn build_stack_rw_trace(
     } else {
       -Val::from_u32((-mult) as u32)
     };
+    data[base + COL_IS_READ_CONT] = Val::from_u32(is_read_cont);
   }
-  // Padding rows are all-zero: IS_WRITE=0, IS_SAME_DEPTH=0, MULT=0 — all
-  // constraints evaluate to 0 on padding.
+  // Padding rows are all-zero: IS_WRITE=0, IS_SAME_DEPTH=0, IS_READ_CONT=0, MULT=0 —
+  // all constraints evaluate to 0 on padding.
 
   RowMajorMatrix::new(data, NUM_STACK_RW_COLS)
 }
@@ -329,16 +348,27 @@ where
         * (next[COL_DEPTH].clone().into() - local[COL_DEPTH].clone().into()),
     );
 
-    // ── Constraints 5–12: read-after-write continuity ─────────────────────
+    // ── Constraint 5: IS_READ_CONT definition (degree 2) ────────────────────
     //
-    // If same depth AND next row is a read → next.val_k must equal this.val_k.
-    // Degree = 3 (IS_SAME_DEPTH × (1−IS_WRITE_next) × ΔVAL).
-    // Same `is_same_depth` selector guarantees 0 at the wrap-around.
-    let next_is_read = AB::Expr::ONE - next[COL_IS_WRITE].clone().into();
+    // Enforce that the helper column equals IS_SAME_DEPTH × (1 − IS_WRITE_next).
+    // Pre-computing this product as a witness column lets the read-continuity
+    // constraints below stay at degree 2 rather than degree 3, which halves the
+    // number of FRI quotient chunks from 2 to 1.
+    let is_read_cont = local[COL_IS_READ_CONT].clone();
+    builder.assert_zero(
+      is_read_cont.clone().into()
+        - is_same_depth.clone().into()
+          * (AB::Expr::ONE - next[COL_IS_WRITE].clone().into()),
+    );
+
+    // ── Constraints 6–13: read-after-write continuity (degree 2) ─────────────
+    //
+    // If IS_READ_CONT=1 (same depth AND next is a read) → values must match.
+    // The IS_SAME_DEPTH=0 invariant on the last data/padding rows ensures
+    // IS_READ_CONT=0 there, so these constraints evaluate to 0 at wrap-around.
     for k in 0..8 {
       builder.assert_zero(
-        is_same_depth.clone().into()
-          * next_is_read.clone()
+        is_read_cont.clone().into()
           * (next[COL_VAL0 + k].clone().into() - local[COL_VAL0 + k].clone().into()),
       );
     }
@@ -432,8 +462,9 @@ pub fn prove_stack_rw(
   };
 
   let config = make_circle_config();
+  let hints = air_cache::get_or_compute(&StackRwAir, 0, public_values.len(), 0);
   let trace_for_perm = trace.clone();
-  let stark_proof = prove_with_lookup(
+  let stark_proof = prove_with_lookup_hinted(
     &config,
     &StackRwAir,
     trace,
@@ -443,6 +474,7 @@ pub fn prove_stack_rw(
     2,
     2,
     |folder: &mut VerifierConstraintFolder<CircleStarkConfig>| eval_stack_rw_lookup(folder),
+    hints,
   );
 
   Ok(StackRwProof {

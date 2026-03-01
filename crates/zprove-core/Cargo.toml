@@ -17,7 +17,7 @@ p3-field = "0.4"
 p3-air = "0.4"
 p3-matrix = "0.4"
 p3-circle = "0.4"
-p3-uni-stark = "0.4"
+p3-uni-stark = { version = "0.4", features = ["timing"] }
 p3-fri = "0.4"
 p3-commit = "0.4"
 p3-keccak = "0.4"
@@ -30,5 +30,6 @@ rand_xoshiro = "0.7"
 
 num-traits = "0.2"
 itertools = "0.13"
+rayon = "1"
 
 

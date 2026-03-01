@@ -3,7 +3,9 @@
 //! Split from the original monolithic `zk_proof.rs`.  All public items are
 //! re-exported at this level so external callers see no change.
 
+pub mod air_cache;
 pub mod batch;
+pub mod challenger_air;
 pub mod fri_air;
 pub mod keccak;
 pub mod lut;
@@ -20,6 +22,7 @@ pub mod stage_a;
 pub mod stark_verifier_air;
 pub mod storage;
 pub mod types;
+pub mod write_delta;
 
 pub use batch::*;
 pub use fri_air::*;
@@ -38,3 +41,4 @@ pub use stage_a::*;
 pub use stark_verifier_air::*;
 pub use storage::*;
 pub use types::*;
+pub use write_delta::*;

@@ -26,6 +26,7 @@ mod phase2_chain_tests {
       sp,
       stack: vec![[0u8; 32]; sp],
       memory_root: [0u8; 32],
+      storage_root: [0u8; 32],
     }
   }
 

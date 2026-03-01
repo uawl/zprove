@@ -182,6 +182,29 @@ pub fn build_lut_steps_from_rows(rows: &[ProofRow]) -> Result<Vec<LutStep>, Stri
         out0: row.scalar0 ^ row.scalar1,
         out1: 0,
       },
+      crate::semantic_proof::OP_U15_MUL_LOW_EQ => {
+        let total = row.scalar0 * row.scalar1;
+        LutStep {
+          op: LutOpcode::U15MulEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: total & 0x7FFF,
+          out1: total >> 15,
+        }
+      }
+      crate::semantic_proof::OP_U15_MUL_HIGH_EQ => {
+        let total = row.scalar0 * row.scalar1;
+        LutStep {
+          op: LutOpcode::U15MulEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: total & 0x7FFF,
+          out1: total >> 15,
+        }
+      }
+      crate::semantic_proof::OP_PARTIAL_MUL15_BIND => return Err(format!("OP_PARTIAL_MUL15_BIND is not a LUT-step encodable row")),
       other => return Err(format!("row op {other} is not LUT-step encodable yet")),
     };
     out.push(step);
@@ -613,14 +636,15 @@ pub fn collect_byte_table_queries_from_lut_steps(
 pub fn collect_byte_table_queries_from_rows(
   rows: &[ProofRow],
 ) -> Vec<crate::byte_table::ByteTableQuery> {
-  use crate::byte_table::{BYTE_OP_AND, BYTE_OP_OR, BYTE_OP_XOR};
+  use crate::byte_table::{ByteTableQuery, BYTE_OP_AND, BYTE_OP_OR, BYTE_OP_XOR};
   use crate::semantic_proof::{
     OP_BYTE_AND_EQ, OP_BYTE_AND_SYM, OP_BYTE_NOT_SYM, OP_BYTE_OR_EQ, OP_BYTE_OR_SYM,
     OP_BYTE_XOR_EQ, OP_BYTE_XOR_SYM,
   };
-  use std::collections::BTreeMap;
 
-  let mut acc: BTreeMap<(u8, u8, u32), i32> = BTreeMap::new();
+  const TABLE_SIZE: usize = 256 * 256 * 3;
+  let mut mult_flat = vec![0i32; TABLE_SIZE];
+  let mut touched: Vec<u32> = Vec::new();
 
   for row in rows {
     let (a, b, op) = match row.op {
@@ -635,23 +659,31 @@ pub fn collect_byte_table_queries_from_rows(
       op if op == OP_BYTE_NOT_SYM => (row.scalar1 as u8, 0xFF, BYTE_OP_XOR),
       _ => continue,
     };
-    *acc.entry((a, b, op)).or_insert(0) += 1;
+    let idx = (a as usize) * 768 + (b as usize) * 3 + op as usize;
+    if mult_flat[idx] == 0 {
+      touched.push(idx as u32);
+    }
+    mult_flat[idx] += 1;
   }
 
-  acc
+  touched
     .into_iter()
-    .map(|((a, b, op), mult)| {
+    .map(|raw_idx| {
+      let idx = raw_idx as usize;
+      let op = (idx % 3) as u32;
+      let b = ((idx / 3) % 256) as u8;
+      let a = (idx / 768) as u8;
       let result = match op {
         BYTE_OP_AND => a & b,
         BYTE_OP_OR => a | b,
         _ => a ^ b,
       };
-      crate::byte_table::ByteTableQuery {
+      ByteTableQuery {
         a,
         b,
         op,
         result,
-        multiplicity: mult,
+        multiplicity: mult_flat[raw_idx as usize],
       }
     })
     .collect()
@@ -1016,8 +1048,15 @@ pub fn prove_batch_lut_with_prep(
   let trace = build_lut_trace_from_proof_rows(&manifest.all_rows)?;
   let config = make_circle_config();
   let air = BatchLutKernelAirWithPrep::new(manifest, public_values);
-  let proof =
-    p3_uni_stark::prove_with_preprocessed(&config, &air, trace, public_values, Some(prep_data));
+  let hints = super::air_cache::get_or_compute(&air, prep_data.width, public_values.len(), 0);
+  let proof = p3_uni_stark::prove_with_preprocessed_hinted(
+    &config,
+    &air,
+    trace,
+    public_values,
+    Some(prep_data),
+    hints,
+  );
   Ok(proof)
 }
 
@@ -1050,11 +1089,14 @@ pub fn prove_lut_kernel_stark_with_public_values(
 ) -> Result<CircleStarkProof, String> {
   let trace = build_lut_trace_from_steps(steps)?;
   let config = make_circle_config();
-  Ok(p3_uni_stark::prove(
+  let hints = super::air_cache::get_or_compute(&LutKernelAir, 0, public_values.len(), 0);
+  Ok(p3_uni_stark::prove_with_preprocessed_hinted(
     &config,
     &LutKernelAir,
     trace,
     public_values,
+    None,
+    hints,
   ))
 }
 
@@ -1185,6 +1227,36 @@ pub fn build_lut_steps_from_rows_mul_family(rows: &[ProofRow]) -> Result<Vec<Lut
           out0: total & 0x7FFF,
           out1: total >> 15,
         });
+      }
+      crate::semantic_proof::OP_U15_MUL_LOW_EQ => {
+        let total = row.scalar0 * row.scalar1;
+        out.push(LutStep {
+          op: LutOpcode::U15MulEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: total & 0x7FFF,
+          out1: total >> 15,
+        });
+      }
+      crate::semantic_proof::OP_U15_MUL_HIGH_EQ => {
+        let total = row.scalar0 * row.scalar1;
+        out.push(LutStep {
+          op: LutOpcode::U15MulEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: total & 0x7FFF,
+          out1: total >> 15,
+        });
+      }
+      // Witness-binding and term steps — skipped in MUL family (no LUT row).
+      crate::semantic_proof::OP_PARTIAL_MUL15_BIND
+      | crate::semantic_proof::OP_U15_LIT
+      | crate::semantic_proof::OP_U15_MUL_LOW
+      | crate::semantic_proof::OP_U15_MUL_HIGH
+      | crate::semantic_proof::OP_PARTIAL_MUL15 => {
+        seen_mul_family = true;
       }
       other => return Err(format!("non-mul-family row in MUL kernel path: {other}")),
     }
@@ -1435,6 +1507,34 @@ pub fn build_lut_steps_from_rows_auto(rows: &[ProofRow]) -> Result<Vec<LutStep>,
           out1: 0,
         });
       }
+      crate::semantic_proof::OP_U15_MUL_LOW_EQ => {
+        let total = row.scalar0 * row.scalar1;
+        out.push(LutStep {
+          op: LutOpcode::U15MulEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: total & 0x7FFF,
+          out1: total >> 15,
+        });
+      }
+      crate::semantic_proof::OP_U15_MUL_HIGH_EQ => {
+        let total = row.scalar0 * row.scalar1;
+        out.push(LutStep {
+          op: LutOpcode::U15MulEq,
+          in0: row.scalar0,
+          in1: row.scalar1,
+          in2: 0,
+          out0: total & 0x7FFF,
+          out1: total >> 15,
+        });
+      }
+      // OP_PARTIAL_MUL15_BIND is a witness-binding structural step — not a LUT row.
+      crate::semantic_proof::OP_PARTIAL_MUL15_BIND
+      | crate::semantic_proof::OP_U15_LIT
+      | crate::semantic_proof::OP_U15_MUL_LOW
+      | crate::semantic_proof::OP_U15_MUL_HIGH
+      | crate::semantic_proof::OP_PARTIAL_MUL15 => {}
       other => {
         return Err(format!(
           "build_lut_steps_from_rows_auto: unrecognised row op {other}"
